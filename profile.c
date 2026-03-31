@@ -38,6 +38,17 @@ void profile_init(profile_state_t *ps, alink_config_t *cfg,
     ps->noise_pnlty = 0;
     ps->fec_change = 0;
 
+    ps->ema_fast = 0;
+    ps->ema_slow = 0;
+    ps->ema_initialized = false;
+    ps->up_confidence_count = 0;
+    ps->up_target_profile = -1;
+
+    ps->worker_mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
+    ps->worker_cond = (pthread_cond_t)PTHREAD_COND_INITIALIZER;
+    ps->job_pending = false;
+    ps->worker_stop = false;
+
     ps->cfg = cfg;
     ps->hw = hw;
     ps->cmd = cmd;
@@ -109,8 +120,13 @@ void profile_apply_fec_bitrate(profile_state_t *ps, int new_fec_k, int new_fec_n
     }
 }
 
-void profile_apply(profile_state_t *ps, Profile *profile, void *osd_ptr) {
-    osd_state_t *os = (osd_state_t *)osd_ptr;
+/*
+ * Internal: execute profile commands on the worker thread.
+ * Called with worker_mutex held for prev* state access.
+ */
+static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
+    const Profile *profile = &job->profile;
+    osd_state_t *os = (osd_state_t *)job->osd;
     alink_config_t *cfg = ps->cfg;
     hw_state_t *hw = ps->hw;
 
@@ -122,8 +138,8 @@ void profile_apply(profile_state_t *ps, Profile *profile, void *osd_ptr) {
     char roiCommand[MAX_COMMAND_SIZE];
     const char *idrCommand = cfg->idrCommandTemplate;
 
-    long currentTime = util_get_monotonic_time();
-    long timeElapsed = currentTime - ps->prevTimeStamp;
+    uint64_t now = util_now_ms();
+    long timeElapsed = (long)((now - ps->prevTimeStamp) / 1000);
 
     int currentWfbPower = profile->wfbPower;
     float currentSetGop = profile->setGop;
@@ -147,7 +163,7 @@ void profile_apply(profile_state_t *ps, Profile *profile, void *osd_ptr) {
         currentFPS = 60;
     }
 
-    /* --- qpDeltaCommand --- */
+    /* --- Build commands --- */
     {
         const char *keys[] = { "qpDelta" };
         char strQpDelta[10];
@@ -155,7 +171,6 @@ void profile_apply(profile_state_t *ps, Profile *profile, void *osd_ptr) {
         const char *values[] = { strQpDelta };
         cmd_format(qpDeltaCommand, sizeof(qpDeltaCommand), cfg->qpDeltaCommandTemplate, 1, keys, values);
     }
-    /* --- fpsCommand --- */
     {
         const char *keys[] = { "fps" };
         char strFPS[10];
@@ -163,7 +178,6 @@ void profile_apply(profile_state_t *ps, Profile *profile, void *osd_ptr) {
         const char *values[] = { strFPS };
         cmd_format(fpsCommand, sizeof(fpsCommand), cfg->fpsCommandTemplate, 1, keys, values);
     }
-    /* --- powerCommand --- */
     {
         const char *keys[] = { "power" };
         char strPower[10];
@@ -178,7 +192,6 @@ void profile_apply(profile_state_t *ps, Profile *profile, void *osd_ptr) {
         const char *values[] = { strPower };
         cmd_format(powerCommand, sizeof(powerCommand), cfg->powerCommandTemplate, 1, keys, values);
     }
-    /* --- gopCommand --- */
     {
         const char *keys[] = { "gop" };
         char strGop[10];
@@ -186,7 +199,6 @@ void profile_apply(profile_state_t *ps, Profile *profile, void *osd_ptr) {
         const char *values[] = { strGop };
         cmd_format(gopCommand, sizeof(gopCommand), cfg->gopCommandTemplate, 1, keys, values);
     }
-    /* --- mcsCommand --- */
     {
         const char *keys[] = { "bandwidth", "gi", "stbc", "ldpc", "mcs" };
         char strBandwidth[10], strGI[10], strStbc[10], strLdpc[10], strMcs[10];
@@ -198,15 +210,15 @@ void profile_apply(profile_state_t *ps, Profile *profile, void *osd_ptr) {
         const char *values[] = { strBandwidth, strGI, strStbc, strLdpc, strMcs };
         cmd_format(mcsCommand, sizeof(mcsCommand), cfg->mcsCommandTemplate, 5, keys, values);
     }
-    /* --- roiCommand --- */
     {
         const char *keys[] = { "roiQp" };
         const char *values[] = { currentROIqp };
         cmd_format(roiCommand, sizeof(roiCommand), cfg->roiCommandTemplate, 1, keys, values);
     }
 
-    /* --- Execution Logic --- */
-    if (ps->currentProfile > ps->previousProfile) {
+    /* --- Execute commands (ordering depends on direction) --- */
+    if (job->currentProfile > job->previousProfile) {
+        /* Upgrading: power before MCS */
         if (currentQpDelta != ps->prevQpDelta) {
             cmd_exec(ps->cmd, qpDeltaCommand);
             ps->prevQpDelta = currentQpDelta;
@@ -231,14 +243,12 @@ void profile_apply(profile_state_t *ps, Profile *profile, void *osd_ptr) {
             strcpy(ps->prevSetGI, currentSetGI);
             ps->prevSetMCS = currentSetMCS;
         }
-
         if (currentSetFecK != ps->prevSetFecK || currentSetFecN != ps->prevSetFecN || currentSetBitrate != ps->prevSetBitrate) {
             profile_apply_fec_bitrate(ps, currentSetFecK, currentSetFecN, currentSetBitrate);
             ps->prevSetBitrate = currentSetBitrate;
             ps->prevSetFecK = currentSetFecK;
             ps->prevSetFecN = currentSetFecN;
         }
-
         if (cfg->roi_focus_mode && strcmp(currentROIqp, ps->prevROIqp) != 0) {
             cmd_exec(ps->cmd, roiCommand);
             strcpy(ps->prevROIqp, currentROIqp);
@@ -247,6 +257,7 @@ void profile_apply(profile_state_t *ps, Profile *profile, void *osd_ptr) {
             cmd_exec(ps->cmd, idrCommand);
         }
     } else {
+        /* Downgrading: MCS/FEC before power */
         if (currentQpDelta != ps->prevQpDelta) {
             cmd_exec(ps->cmd, qpDeltaCommand);
             ps->prevQpDelta = currentQpDelta;
@@ -255,14 +266,12 @@ void profile_apply(profile_state_t *ps, Profile *profile, void *osd_ptr) {
             cmd_exec(ps->cmd, fpsCommand);
             ps->prevFPS = currentFPS;
         }
-
         if (currentSetFecK != ps->prevSetFecK || currentSetFecN != ps->prevSetFecN || currentSetBitrate != ps->prevSetBitrate) {
             profile_apply_fec_bitrate(ps, currentSetFecK, currentSetFecN, currentSetBitrate);
             ps->prevSetBitrate = currentSetBitrate;
             ps->prevSetFecK = currentSetFecK;
             ps->prevSetFecN = currentSetFecN;
         }
-
         if (currentSetGop != ps->prevSetGop) {
             cmd_exec(ps->cmd, gopCommand);
             ps->prevSetGop = currentSetGop;
@@ -307,6 +316,48 @@ void profile_apply(profile_state_t *ps, Profile *profile, void *osd_ptr) {
     snprintf(os->profile_fec, sizeof(os->profile_fec), "%d/%d", k, n);
 }
 
+/*
+ * Dispatch profile application to the async worker thread.
+ * Returns immediately — the worker executes commands in the background.
+ */
+void profile_apply(profile_state_t *ps, Profile *profile, void *osd_ptr) {
+    pthread_mutex_lock(&ps->worker_mutex);
+    ps->pending_job.profile = *profile;
+    ps->pending_job.currentProfile = ps->currentProfile;
+    ps->pending_job.previousProfile = ps->previousProfile;
+    ps->pending_job.osd = osd_ptr;
+    ps->job_pending = true;
+    pthread_cond_signal(&ps->worker_cond);
+    pthread_mutex_unlock(&ps->worker_mutex);
+}
+
+/*
+ * Async worker thread: waits for profile jobs and executes them.
+ * Latest job wins — if a new job arrives while executing, it is
+ * picked up immediately after the current one finishes.
+ */
+void *profile_worker_func(void *arg) {
+    profile_state_t *ps = (profile_state_t *)arg;
+
+    while (1) {
+        pthread_mutex_lock(&ps->worker_mutex);
+        while (!ps->job_pending && !ps->worker_stop)
+            pthread_cond_wait(&ps->worker_cond, &ps->worker_mutex);
+
+        if (ps->worker_stop) {
+            pthread_mutex_unlock(&ps->worker_mutex);
+            break;
+        }
+
+        profile_job_t job = ps->pending_job;
+        ps->job_pending = false;
+        pthread_mutex_unlock(&ps->worker_mutex);
+
+        profile_apply_exec(ps, &job);
+    }
+    return NULL;
+}
+
 static bool value_chooses_profile(profile_state_t *ps, int input_value, void *osd_ptr) {
     alink_config_t *cfg = ps->cfg;
 
@@ -327,30 +378,70 @@ static bool value_chooses_profile(profile_state_t *ps, int input_value, void *os
         if (cfg->verbose_mode) {
             printf("No change: Link value is within same profile.\n");
         }
+        /* Reset confidence if we're stable at current profile */
+        ps->up_confidence_count = 0;
+        ps->up_target_profile = -1;
         return false;
     }
 
-    long currentTime = util_get_monotonic_time();
-    long timeElapsed = currentTime - ps->prevTimeStamp;
+    uint64_t now = util_now_ms();
+    uint64_t elapsed_ms = now - ps->prevTimeStamp;
 
-    if (ps->previousProfile == 0) {
-        if (timeElapsed <= cfg->hold_fallback_mode_s) {
+    bool is_downgrade = (ps->currentProfile < ps->previousProfile);
+
+    if (is_downgrade && cfg->fast_downgrade) {
+        /* Fast downgrade: skip hold timers, apply immediately */
+        if (cfg->verbose_mode) {
+            printf("Fast downgrade: profile %d -> %d\n", ps->previousProfile, ps->currentProfile);
+        }
+        ps->up_confidence_count = 0;
+        ps->up_target_profile = -1;
+    } else if (ps->previousProfile == 0) {
+        /* Exiting fallback: enforce fallback hold */
+        if (elapsed_ms <= (uint64_t)cfg->hold_fallback_mode_ms) {
             if (cfg->verbose_mode) {
                 puts("Holding fallback...");
             }
             return false;
         }
-    }
-    else if (ps->previousProfile < ps->currentProfile && timeElapsed <= cfg->hold_modes_down_s) {
-        if (cfg->verbose_mode) {
-            puts("Too soon to increase link...");
+    } else if (!is_downgrade) {
+        /* Upgrade: confidence gating */
+        if (ps->currentProfile != ps->up_target_profile) {
+            /* New target profile, reset confidence counter */
+            ps->up_target_profile = ps->currentProfile;
+            ps->up_confidence_count = 1;
+            if (cfg->verbose_mode) {
+                printf("Upgrade confidence: 1/%d for profile %d\n",
+                       cfg->upward_confidence_loops, ps->currentProfile);
+            }
+            return false;
         }
-        return false;
+        ps->up_confidence_count++;
+        if (ps->up_confidence_count < cfg->upward_confidence_loops) {
+            if (cfg->verbose_mode) {
+                printf("Upgrade confidence: %d/%d for profile %d\n",
+                       ps->up_confidence_count, cfg->upward_confidence_loops,
+                       ps->currentProfile);
+            }
+            return false;
+        }
+        /* Also enforce minimum hold time for upgrades */
+        if (elapsed_ms <= (uint64_t)cfg->hold_modes_down_ms) {
+            if (cfg->verbose_mode) {
+                puts("Too soon to increase link...");
+            }
+            return false;
+        }
+        if (cfg->verbose_mode) {
+            printf("Upgrade confirmed after %d evaluations\n", ps->up_confidence_count);
+        }
     }
 
     profile_apply(ps, ps->selectedProfile, osd_ptr);
     ps->previousProfile = ps->currentProfile;
-    ps->prevTimeStamp = currentTime;
+    ps->prevTimeStamp = now;
+    ps->up_confidence_count = 0;
+    ps->up_target_profile = -1;
     return true;
 }
 
@@ -391,12 +482,32 @@ void profile_start_selection(profile_state_t *ps, int rssi_score,
         combined_value_float = (float)cfg->limit_max_score_to;
     }
 
+    /* Legacy single-EMA smoothing (kept for upward path and OSD) */
     float chosen_smoothing_factor = (combined_value_float >= ps->last_value_sent) ? cfg->smoothing_factor : cfg->smoothing_factor_down;
-
     ps->smoothed_combined_value = (chosen_smoothing_factor * combined_value_float + (1 - chosen_smoothing_factor) * ps->smoothed_combined_value);
 
+    /* Dual EMA for trend detection */
+    if (!ps->ema_initialized) {
+        ps->ema_fast = combined_value_float;
+        ps->ema_slow = combined_value_float;
+        ps->ema_initialized = true;
+    } else {
+        ps->ema_fast = cfg->ema_fast_alpha * combined_value_float + (1.0f - cfg->ema_fast_alpha) * ps->ema_fast;
+        ps->ema_slow = cfg->ema_slow_alpha * combined_value_float + (1.0f - cfg->ema_slow_alpha) * ps->ema_slow;
+    }
+
+    /* Predictive score: when fast < slow, signal is degrading */
+    float effective_score = ps->smoothed_combined_value;
+    if (ps->ema_fast < ps->ema_slow && cfg->predict_multi > 0) {
+        float gap = ps->ema_slow - ps->ema_fast;
+        float predicted = ps->ema_fast - gap * cfg->predict_multi;
+        if (predicted < effective_score)
+            effective_score = predicted;
+    }
+
     int osd_smoothed_score = (int)ps->smoothed_combined_value;
-    sprintf(os->score_related, "linkQ %d, smthdQ %d", osd_raw_score, osd_smoothed_score);
+    sprintf(os->score_related, "linkQ %d, smthdQ %d, emaF %d",
+            osd_raw_score, osd_smoothed_score, (int)ps->ema_fast);
 
     long time_diff_ms = util_elapsed_ms_timespec(&current_time, &ps->last_exec_time);
     if (time_diff_ms < cfg->min_between_changes_ms) {
@@ -405,12 +516,21 @@ void profile_start_selection(profile_state_t *ps, int rssi_score,
         return;
     }
 
-    int combined_value = (int)floor(ps->smoothed_combined_value);
+    int combined_value = (int)floor(effective_score);
     combined_value = (combined_value < SCORE_RANGE_BASE) ? SCORE_RANGE_BASE : (combined_value > SCORE_RANGE_MAX) ? SCORE_RANGE_MAX : combined_value;
 
     float percent_change = fabs((float)(combined_value - ps->last_value_sent) / ps->last_value_sent) * 100;
+    bool is_downgrade = (combined_value < ps->last_value_sent);
 
-    float hysteresis_threshold = (combined_value >= ps->last_value_sent) ? cfg->hysteresis_percent : cfg->hysteresis_percent_down;
+    float hysteresis_threshold;
+    if (is_downgrade && cfg->fast_downgrade) {
+        /* Fast downgrade: use minimal hysteresis */
+        hysteresis_threshold = (float)cfg->hysteresis_percent_down;
+    } else if (is_downgrade) {
+        hysteresis_threshold = (float)cfg->hysteresis_percent_down;
+    } else {
+        hysteresis_threshold = (float)cfg->hysteresis_percent;
+    }
 
     if (percent_change >= hysteresis_threshold) {
         if (cfg->verbose_mode) {
@@ -421,6 +541,10 @@ void profile_start_selection(profile_state_t *ps, int rssi_score,
             ps->last_value_sent = combined_value;
             ps->last_exec_time = current_time;
         }
+    } else if (!is_downgrade && combined_value != ps->last_value_sent) {
+        /* Score improved but not enough for hysteresis — still feed
+         * the confidence counter by attempting profile selection */
+        (void)value_chooses_profile(ps, combined_value, osd_ptr);
     }
     ps->selection_busy = false;
 }

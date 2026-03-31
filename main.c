@@ -247,6 +247,10 @@ int main(int argc, char *argv[]) {
     pthread_t osd_thread;
     pthread_create(&osd_thread, NULL, osd_thread_func, &osd_arg);
 
+    /* Start the async profile worker thread */
+    pthread_t profile_worker_thread;
+    pthread_create(&profile_worker_thread, NULL, profile_worker_func, &daemon.ps);
+
     /* Start the periodic TX dropped thread */
     txmon_thread_arg_t txmon_arg = {
         .ps = &daemon.ps,
@@ -261,42 +265,55 @@ int main(int argc, char *argv[]) {
 
     /* Main loop for processing incoming messages */
     while (1) {
-        int n = recvfrom(daemon.sockfd, buffer, sizeof(buffer) - 1, 0,
-                         (struct sockaddr *)&client_addr, &client_addr_len);
-        if (n < 0) {
-            perror("recvfrom failed");
+        fd_set rfds;
+        struct timeval tv = {0, 50000}; /* 50ms timeout */
+        FD_ZERO(&rfds);
+        FD_SET(daemon.sockfd, &rfds);
+
+        int activity = select(daemon.sockfd + 1, &rfds, NULL, NULL, &tv);
+
+        if (activity > 0 && FD_ISSET(daemon.sockfd, &rfds)) {
+            int n = recvfrom(daemon.sockfd, buffer, sizeof(buffer) - 1, 0,
+                             (struct sockaddr *)&client_addr, &client_addr_len);
+            if (n < 0) {
+                perror("recvfrom failed");
+                break;
+            }
+
+            daemon.initialized = true;
+
+            /* Increment message count */
+            pthread_mutex_lock(&daemon.count_mutex);
+            daemon.message_count++;
+            pthread_mutex_unlock(&daemon.count_mutex);
+
+            /* Null-terminate the received data */
+            buffer[n] = '\0';
+
+            /* Extract the length of the message (first 4 bytes) */
+            uint32_t msg_length;
+            memcpy(&msg_length, buffer, sizeof(msg_length));
+            msg_length = ntohl(msg_length);
+
+            if (daemon.cfg.verbose_mode) {
+                printf("Received message (%u bytes): %s\n", msg_length, buffer + sizeof(msg_length));
+            }
+
+            /* Strip length off the start of the message */
+            char *message = buffer + sizeof(uint32_t);
+            /* See if it's a special command, otherwise process it */
+            if (strncmp(message, "special:", 8) == 0) {
+                keyframe_handle_special(&daemon.ks, message, &daemon.cfg,
+                                        daemon.ps.prevSetGop,
+                                        &daemon.paused, &daemon.pause_mutex);
+            } else {
+                msg_process(&daemon.ms, message);
+            }
+        } else if (activity < 0) {
+            perror("select failed");
             break;
         }
-
-        daemon.initialized = true;
-
-        /* Increment message count */
-        pthread_mutex_lock(&daemon.count_mutex);
-        daemon.message_count++;
-        pthread_mutex_unlock(&daemon.count_mutex);
-
-        /* Null-terminate the received data */
-        buffer[n] = '\0';
-
-        /* Extract the length of the message (first 4 bytes) */
-        uint32_t msg_length;
-        memcpy(&msg_length, buffer, sizeof(msg_length));
-        msg_length = ntohl(msg_length);
-
-        if (daemon.cfg.verbose_mode) {
-            printf("Received message (%u bytes): %s\n", msg_length, buffer + sizeof(msg_length));
-        }
-
-        /* Strip length off the start of the message */
-        char *message = buffer + sizeof(uint32_t);
-        /* See if it's a special command, otherwise process it */
-        if (strncmp(message, "special:", 8) == 0) {
-            keyframe_handle_special(&daemon.ks, message, &daemon.cfg,
-                                    daemon.ps.prevSetGop,
-                                    &daemon.paused, &daemon.pause_mutex);
-        } else {
-            msg_process(&daemon.ms, message);
-        }
+        /* Timeout or data processed — periodic tick runs here */
     }
 
     /* Close the socket */

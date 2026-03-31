@@ -50,6 +50,12 @@ long util_get_monotonic_time(void) {
     return ts.tv_sec;
 }
 
+uint64_t util_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
 long util_elapsed_ms_timespec(const struct timespec *current, const struct timespec *past) {
     long long sec_diff = (long long)current->tv_sec - past->tv_sec;
     long long nsec_diff = (long long)current->tv_nsec - past->tv_nsec;

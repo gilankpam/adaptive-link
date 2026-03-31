@@ -22,11 +22,18 @@ typedef struct {
     float snr_weight;
     int hold_fallback_mode_s;
     int hold_modes_down_s;
+    int hold_fallback_mode_ms;
+    int hold_modes_down_ms;
     int min_between_changes_ms;
     int hysteresis_percent;
     int hysteresis_percent_down;
     float smoothing_factor;
     float smoothing_factor_down;
+    float ema_fast_alpha;
+    float ema_slow_alpha;
+    float predict_multi;
+    bool fast_downgrade;
+    int upward_confidence_loops;
     int limit_max_score_to;
     int fallback_ms;
     int baseline_value;
@@ -35,6 +42,7 @@ typedef struct {
     bool allow_dynamic_fec;
     bool fec_k_adjust;
     bool spike_fix_dynamic_fec;
+    int fec_reaction_delay_ms;
 
     /* Bitrate control */
     bool allow_xtx_reduce_bitrate;

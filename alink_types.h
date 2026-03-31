@@ -19,6 +19,7 @@
 #include <arpa/inet.h>
 #include <stdbool.h>
 #include <sys/time.h>
+#include <sys/select.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <math.h>
@@ -46,7 +47,7 @@
 #define WIFI_ADAPTERS_YAML       "/etc/wlan_adapters.yaml"
 
 /* ─── Timing defaults ─── */
-#define DEFAULT_PACE_EXEC_MS  50
+#define DEFAULT_PACE_EXEC_MS  20
 
 /* ─── Hardware constants ─── */
 #define MCS_COUNT      8

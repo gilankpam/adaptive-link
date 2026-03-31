@@ -113,7 +113,7 @@ void msg_process(msg_state_t *ms, const char *msg) {
 
     long elapsed_ms = util_elapsed_ms_timeval(&current_time, &ms->last_fec_call_time);
 
-    if (cfg->allow_dynamic_fec && ms->fec_change != ms->prev_fec_change && elapsed_ms >= 1000) {
+    if (cfg->allow_dynamic_fec && ms->fec_change != ms->prev_fec_change && elapsed_ms >= cfg->fec_reaction_delay_ms) {
         profile_apply_fec_bitrate(ps, ps->prevSetFecK, ps->prevSetFecN, ps->prevSetBitrate);
         ms->last_fec_call_time = current_time;
         ms->prev_fec_change = ms->fec_change;

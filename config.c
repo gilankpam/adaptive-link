@@ -17,11 +17,18 @@ void config_set_defaults(alink_config_t *cfg) {
     cfg->snr_weight = 0.5f;
     cfg->hold_fallback_mode_s = 2;
     cfg->hold_modes_down_s = 2;
+    cfg->hold_fallback_mode_ms = -1; /* -1 = not set, derive from _s */
+    cfg->hold_modes_down_ms = -1;
     cfg->min_between_changes_ms = 100;
     cfg->hysteresis_percent = 15;
     cfg->hysteresis_percent_down = 5;
     cfg->smoothing_factor = 0.5f;
     cfg->smoothing_factor_down = 0.8f;
+    cfg->ema_fast_alpha = 0.5f;
+    cfg->ema_slow_alpha = 0.15f;
+    cfg->predict_multi = 1.0f;
+    cfg->fast_downgrade = true;
+    cfg->upward_confidence_loops = 3;
     cfg->limit_max_score_to = 2000;
     cfg->fallback_ms = 1000;
     cfg->baseline_value = 100;
@@ -29,10 +36,11 @@ void config_set_defaults(alink_config_t *cfg) {
     cfg->allow_dynamic_fec = 1;
     cfg->fec_k_adjust = 0;
     cfg->spike_fix_dynamic_fec = 1;
+    cfg->fec_reaction_delay_ms = 300;
 
     cfg->allow_xtx_reduce_bitrate = 1;
     cfg->xtx_reduce_bitrate_factor = 0.5f;
-    cfg->check_xtx_period_ms = 500;
+    cfg->check_xtx_period_ms = 200;
 
     cfg->allow_request_keyframe = 1;
     cfg->allow_rq_kf_by_tx_d = 1;
@@ -83,6 +91,10 @@ int config_load(alink_config_t *cfg, const char *filename) {
                 cfg->hold_fallback_mode_s = atoi(value);
             } else if (strcmp(key, "hold_modes_down_s") == 0) {
                 cfg->hold_modes_down_s = atoi(value);
+            } else if (strcmp(key, "hold_fallback_mode_ms") == 0) {
+                cfg->hold_fallback_mode_ms = atoi(value);
+            } else if (strcmp(key, "hold_modes_down_ms") == 0) {
+                cfg->hold_modes_down_ms = atoi(value);
             } else if (strcmp(key, "min_between_changes_ms") == 0) {
                 cfg->min_between_changes_ms = atoi(value);
             } else if (strcmp(key, "request_keyframe_interval_ms") == 0) {
@@ -101,6 +113,8 @@ int config_load(alink_config_t *cfg, const char *filename) {
                 cfg->fec_k_adjust = atoi(value);
             } else if (strcmp(key, "spike_fix_dynamic_fec") == 0) {
                 cfg->spike_fix_dynamic_fec = atoi(value);
+            } else if (strcmp(key, "fec_reaction_delay_ms") == 0) {
+                cfg->fec_reaction_delay_ms = atoi(value);
             } else if (strcmp(key, "allow_rq_kf_by_tx_d") == 0) {
                 cfg->allow_rq_kf_by_tx_d = atoi(value);
             } else if (strcmp(key, "hysteresis_percent") == 0) {
@@ -111,6 +125,16 @@ int config_load(alink_config_t *cfg, const char *filename) {
                 cfg->smoothing_factor = atof(value);
             } else if (strcmp(key, "exp_smoothing_factor_down") == 0) {
                 cfg->smoothing_factor_down = atof(value);
+            } else if (strcmp(key, "ema_fast_alpha") == 0) {
+                cfg->ema_fast_alpha = atof(value);
+            } else if (strcmp(key, "ema_slow_alpha") == 0) {
+                cfg->ema_slow_alpha = atof(value);
+            } else if (strcmp(key, "predict_multi") == 0) {
+                cfg->predict_multi = atof(value);
+            } else if (strcmp(key, "fast_downgrade") == 0) {
+                cfg->fast_downgrade = atoi(value);
+            } else if (strcmp(key, "upward_confidence_loops") == 0) {
+                cfg->upward_confidence_loops = atoi(value);
             } else if (strcmp(key, "roi_focus_mode") == 0) {
                 cfg->roi_focus_mode = atoi(value);
             } else if (strcmp(key, "allow_spike_fix_fps") == 0) {
@@ -160,6 +184,13 @@ int config_load(alink_config_t *cfg, const char *filename) {
     }
 
     fclose(file);
+
+    /* Derive ms hold timers from _s values if not explicitly set */
+    if (cfg->hold_fallback_mode_ms < 0)
+        cfg->hold_fallback_mode_ms = cfg->hold_fallback_mode_s * 1000;
+    if (cfg->hold_modes_down_ms < 0)
+        cfg->hold_modes_down_ms = cfg->hold_modes_down_s * 1000;
+
     return 0;
 }
 

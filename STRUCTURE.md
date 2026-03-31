@@ -122,10 +122,10 @@ adaptive-link/
 
 A multi-module, multi-threaded C daemon (13 source files). Core responsibilities:
 
-1. **UDP listener** - Receives link quality scores from GS
-2. **Profile engine** - Maps scores to transmission profiles via range matching
-3. **Command executor** - Applies profiles by running shell commands with template substitution
-4. **Stability logic** - Hysteresis, exponential smoothing, rate limiting, hold-down timers
+1. **UDP listener** - Non-blocking receive loop (`select()` with 50ms timeout) for link quality scores from GS
+2. **Profile engine** - Maps scores to transmission profiles via range matching, with dual EMA trend detection and predictive scoring
+3. **Async command executor** - Dispatches profile changes to a background worker thread, applying shell commands with template substitution without blocking the main loop
+4. **Stability logic** - Asymmetric profile stepping (fast downgrade, confidence-gated upgrade), hysteresis, exponential smoothing, rate limiting, millisecond-precision hold-down timers
 5. **Monitoring** - TX drop detection, antenna RSSI parsing, OSD updates
 6. **External control** - Unix socket interface for power changes and parameter queries
 
@@ -217,7 +217,7 @@ wfb-ng RX stats ──TCP──> alink_gs ──UDP──> alink_drone ──sys
 
 ### Profile Selection Algorithm (Drone)
 
-The `start_selection()` and `value_chooses_profile()` functions implement a multi-stage selection pipeline:
+The `profile_start_selection()` and `value_chooses_profile()` functions implement a multi-stage selection pipeline:
 
 ```
 1. FALLBACK CHECK
@@ -229,27 +229,38 @@ The `start_selection()` and `value_chooses_profile()` functions implement a mult
 3. SCORE CAPPING
    combined = min(combined, limit_max_score_to)   // default: 2000
 
-4. EXPONENTIAL SMOOTHING
+4. LEGACY EXPONENTIAL SMOOTHING (for upward path and OSD)
    factor = (combined >= previous) ? smoothing_up : smoothing_down
    smoothed = factor * combined + (1 - factor) * smoothed
 
-5. RATE LIMITING
-   Skip if elapsed_ms < min_between_changes_ms    // default: 200ms
+5. DUAL EMA TREND DETECTION
+   ema_fast = ema_fast_alpha * combined + (1 - ema_fast_alpha) * ema_fast    // default α=0.5
+   ema_slow = ema_slow_alpha * combined + (1 - ema_slow_alpha) * ema_slow    // default α=0.15
 
-6. HYSTERESIS CHECK
-   pct_change = |combined - last_sent| / last_sent * 100
-   threshold  = (combined >= last_sent) ? hysteresis_up : hysteresis_down
-   Skip if pct_change < threshold                  // default: 5%
+6. PREDICTIVE SCORE (when degrading: fast < slow)
+   gap = ema_slow - ema_fast
+   effective = min(smoothed, ema_fast - gap * predict_multi)    // default predict_multi=1.0
 
-7. PROFILE LOOKUP
-   Match smoothed score against profile range boundaries
+7. RATE LIMITING
+   Skip if elapsed_ms < min_between_changes_ms    // default: 100ms
 
-8. TIME GUARDS
-   - Leaving fallback: wait hold_fallback_mode_s   // default: 1s
-   - Upgrading profile: wait hold_modes_down_s      // default: 3s
+8. HYSTERESIS CHECK
+   pct_change = |effective - last_sent| / last_sent * 100
+   threshold  = (improving) ? hysteresis_up : hysteresis_down
+   Skip if pct_change < threshold                  // default: 15% up, 5% down
 
-9. APPLY PROFILE
-   Execute command templates for the new profile
+9. PROFILE LOOKUP
+   Match effective score against profile range boundaries
+
+10. ASYMMETRIC STEPPING
+   - Downgrade (fast_downgrade=1): bypass hold timer, apply immediately
+   - Upgrade: require upward_confidence_loops (default 3) consecutive
+     evaluations above threshold, then also enforce hold_modes_down_ms
+   - Leaving fallback: wait hold_fallback_mode_ms   // default: 2000ms
+
+11. ASYNC PROFILE APPLICATION
+   Dispatch to background worker thread (non-blocking)
+   Latest job wins if new change arrives during execution
 ```
 
 ### Profile Application Order
@@ -260,7 +271,7 @@ Command execution order differs based on direction of change:
 
 **Downgrading (worse link):** QpDelta → FPS → FEC/Bitrate → GOP → MCS → Power → ROI → IDR
 
-The key difference: when downgrading, FEC/bitrate changes happen **before** MCS changes to ensure error protection is in place before reducing modulation rate. Commands are paced with configurable delays (`pace_exec`, default 50ms).
+The key difference: when downgrading, FEC/bitrate changes happen **before** MCS changes to ensure error protection is in place before reducing modulation rate. Commands are paced with configurable delays (`pace_exec`, default 20ms). Profile application runs on the async worker thread, so the main loop is never blocked.
 
 ---
 
@@ -312,7 +323,8 @@ Written to `/tmp/MSPOSD.msg` every 1 second (or via UDP). Verbosity controlled b
 
 | Thread | Module | Entry Point | Frequency | Responsibility |
 |--------|--------|-------------|-----------|----------------|
-| Main | `main.c` | `main()` | Per UDP packet | Receive messages, parse, trigger profile selection |
+| Main | `main.c` | `main()` | 50ms select timeout / per UDP packet | Non-blocking receive, parse, trigger profile selection |
+| Profile Worker | `profile.c` | `profile_worker_func()` | Per job signal | Execute profile commands asynchronously (system() calls) |
 | RSSI Monitor | `rssi_monitor.c` | `rssi_thread_func()` | Per queue item | Parse drone antenna RSSI, detect weak antennas (>20dB spread) |
 | Fallback | `fallback.c` | `fallback_thread_func()` | Every `fallback_ms` | Count heartbeats; trigger fallback on GS silence |
 | TX Drop Monitor | `tx_monitor.c` | `txmon_thread_func()` | Every `check_xtx_period_ms` | Read `/sys/class/net/wlan0/statistics/tx_dropped`, reduce bitrate on drops |
@@ -327,11 +339,13 @@ Written to `/tmp/MSPOSD.msg` every 1 second (or via UDP). Verbosity controlled b
 |-------|-------|----------|---------|---------|
 | `count_mutex` | `main.c` | `message_count` | Main thread (+1 per msg) | Fallback thread (read + reset) |
 | `pause_mutex` | `main.c` | `paused` flag | Cmd server, keyframe (special msgs) | Message processing, fallback |
-| `tx_power_mutex` | `main.c` | `power_level_0_to_4` | Cmd server (set) | `profile_apply()` (read) |
+| `tx_power_mutex` | `main.c` | `power_level_0_to_4` | Cmd server (set) | Profile worker (read) |
+| `worker_mutex` | `profile.c` | `pending_job`, `job_pending`, `prev*` state | Main thread (dispatch), cmd server (dispatch) | Profile worker (consume + execute) |
+| `worker_cond` | `profile.c` | — | Main thread (signal) | Profile worker (wait) |
 | `keyframe_state_t.mutex` | `keyframe.c` | `KeyframeRequest codes[]` | Main thread (add codes) | Main thread (check duplicates) |
 | `rssi_state_t.lock` | `rssi_monitor.c` | RSSI circular queue | Cmd server (enqueue) | RSSI thread (dequeue) |
 
-The first three mutexes are allocated in `alink_daemon_t` (main.c) and passed by pointer to thread modules. The last two are fully encapsulated within their respective module structs.
+The first three mutexes are allocated in `alink_daemon_t` (main.c) and passed by pointer to thread modules. The worker mutex/cond are in `profile_state_t`. The last two are fully encapsulated within their respective module structs.
 
 Additional synchronization:
 - `selection_busy` flag in `profile_state_t` prevents nested profile changes (non-atomic, but only written/read from main thread)
@@ -351,20 +365,28 @@ Additional synchronization:
 | Weights | `rssi_weight` | 0.5 | RSSI contribution to combined score |
 | Weights | `snr_weight` | 0.5 | SNR contribution to combined score |
 | Timing | `fallback_ms` | 1000 | Timeout before entering fallback profile |
-| Timing | `hold_fallback_mode_s` | 1 | Minimum time in fallback before leaving |
-| Timing | `hold_modes_down_s` | 3 | Minimum time before upgrading profile |
-| Timing | `min_between_changes_ms` | 200 | Minimum interval between profile changes |
-| Smoothing | `exp_smoothing_factor` | 0.1 | Smoothing for score increases |
-| Smoothing | `exp_smoothing_factor_down` | 1.0 | Smoothing for score decreases |
-| Hysteresis | `hysteresis_percent` | 5 | Change threshold for increases (%) |
+| Timing | `hold_fallback_mode_s` | 2 | Minimum time (s) in fallback before leaving |
+| Timing | `hold_fallback_mode_ms` | derived | Millisecond override (if set, takes precedence over `_s`) |
+| Timing | `hold_modes_down_s` | 2 | Minimum time (s) before upgrading profile |
+| Timing | `hold_modes_down_ms` | derived | Millisecond override (if set, takes precedence over `_s`) |
+| Timing | `min_between_changes_ms` | 100 | Minimum interval between profile changes |
+| Smoothing | `exp_smoothing_factor` | 0.5 | Legacy smoothing for score increases |
+| Smoothing | `exp_smoothing_factor_down` | 0.8 | Legacy smoothing for score decreases |
+| Dual EMA | `ema_fast_alpha` | 0.5 | Fast EMA weight (trend detection) |
+| Dual EMA | `ema_slow_alpha` | 0.15 | Slow EMA weight (stable baseline) |
+| Dual EMA | `predict_multi` | 1.0 | Predictive pessimism multiplier (0 = disabled) |
+| Stepping | `fast_downgrade` | 1 | Skip hold timer on downgrades |
+| Stepping | `upward_confidence_loops` | 3 | Consecutive evaluations required before upgrade |
+| Hysteresis | `hysteresis_percent` | 15 | Change threshold for increases (%) |
 | Hysteresis | `hysteresis_percent_down` | 5 | Change threshold for decreases (%) |
-| FEC | `allow_dynamic_fec` | 0 | Adjust FEC based on noise signals |
-| FEC | `fec_k_adjust` | 1 | Decrease K (vs increase N) for FEC |
+| FEC | `allow_dynamic_fec` | 1 | Adjust FEC based on noise signals |
+| FEC | `fec_k_adjust` | 0 | Decrease K (vs increase N) for FEC |
+| FEC | `fec_reaction_delay_ms` | 300 | Minimum delay before FEC adjustment |
 | Keyframe | `allow_request_keyframe` | 1 | Allow IDR frame requests |
-| Keyframe | `request_keyframe_interval_ms` | 1112 | Minimum between IDR requests |
-| TX Monitor | `check_xtx_period_ms` | 2250 | TX dropped check interval |
-| TX Monitor | `xtx_reduce_bitrate_factor` | 0.8 | Bitrate reduction on TX drops |
-| OSD | `osd_level` | 0 | OSD verbosity (0-6) |
+| Keyframe | `request_keyframe_interval_ms` | 50 | Minimum between IDR requests |
+| TX Monitor | `check_xtx_period_ms` | 200 | TX dropped check interval |
+| TX Monitor | `xtx_reduce_bitrate_factor` | 0.5 | Bitrate reduction on TX drops |
+| OSD | `osd_level` | 4 | OSD verbosity (0-6) |
 
 ### alink_gs.conf (Ground Station) - Key Parameters
 

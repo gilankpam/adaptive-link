@@ -13,9 +13,9 @@
   - [Command Template System](#command-template-system)
 - [Data Flow](#data-flow)
   - [Signal Flow](#signal-flow)
-  - [Score Calculation (Ground Station)](#score-calculation-ground-station)
-  - [Profile Selection Algorithm (Drone)](#profile-selection-algorithm-drone)
-  - [Profile Application Order](#profile-application-order)
+  - [Multi-Factor Scoring (Ground Station)](#multi-factor-scoring-ground-station)
+  - [Profile Selection Algorithm (Ground Station)](#profile-selection-algorithm-ground-station)
+  - [Profile Application (Drone)](#profile-application-drone)
 - [Communication Protocols](#communication-protocols)
 - [Threading Model](#threading-model)
 - [Concurrency & Shared State](#concurrency--shared-state)
@@ -30,7 +30,7 @@
 
 OpenIPC Adaptive-Link is an adaptive wireless link profile selector for OpenIPC FPV drone systems. It dynamically adjusts video bitrate, MCS (modulation/coding scheme), FEC (forward error correction), TX power, and other transmission parameters based on real-time signal quality from the ground station.
 
-The system continuously monitors link quality and smoothly transitions between pre-defined transmission profiles, using hysteresis, exponential smoothing, and time-based guards to prevent oscillation.
+**Architecture change (commit a6fcf7b):** Profile selection logic has been offloaded from the drone to the ground station. The GS now calculates multi-factor scores, runs the full selection algorithm, and sends finalized profile parameters to the drone. The drone simply applies received profiles.
 
 ---
 
@@ -61,22 +61,22 @@ adaptive-link/
 ├── config.h / config.c        # alink.conf + txprofiles.conf parsing
 ├── hardware.h / hardware.c    # WiFi adapter, power tables, camera/video
 ├── command.h / command.c      # Template substitution, system() execution
-├── profile.h / profile.c     # Profile selection, hysteresis, application
-├── osd.h / osd.c             # OSD string assembly, display thread
-├── keyframe.h / keyframe.c   # Keyframe request deduplication
+├── profile.h / profile.c      # Profile application only (selection moved to GS)
+├── osd.h / osd.c              # OSD string assembly, display thread
+├── keyframe.h / keyframe.c    # Keyframe request deduplication
 ├── rssi_monitor.h / rssi_monitor.c  # Drone antenna RSSI queue + thread
 ├── tx_monitor.h / tx_monitor.c      # TX drop monitoring thread
-├── message.h / message.c     # UDP heartbeat message parsing
+├── message.h / message.c      # UDP heartbeat message parsing
 ├── cmd_server.h / cmd_server.c      # Unix socket command handler
-├── fallback.h / fallback.c   # Message count / fallback thread
+├── fallback.h / fallback.c    # Message count / fallback thread
 │
 ├── alink_drone.c              # Original monolithic source (kept as reference)
-├── alink_gs                   # Ground station script (Python 3, ~376 lines)
+├── alink_gs                   # Ground station script (Python 3, ~600 lines)
 ├── Makefile                   # Build configuration (13 compilation units)
 ├── alink_install.sh           # Installation script for both drone and GS
 │
-├── alink.conf                 # Drone daemon configuration (41 parameters)
-├── alink_gs.conf              # Ground station configuration
+├── alink.conf                 # Drone daemon configuration (simplified)
+├── alink_gs.conf              # Ground station configuration (scoring + selection)
 ├── txprofiles.conf            # Active TX profile mapping (symlinked from txprofiles/)
 ├── wlan_adapters.yaml         # WiFi adapter power tables and capabilities
 │
@@ -86,7 +86,6 @@ adaptive-link/
 │   ├── txprofiles.AF1-EU2-20Mhz-30mbps.conf  # High-performance
 │   └── ...                                    # Other presets
 │
-├── more/                      # Legacy/experimental code
 ├── LICENSE
 ├── README.md
 └── CLAUDE.md
@@ -98,21 +97,23 @@ adaptive-link/
 
 ```
                           UDP (10.5.0.10:9999)
-  ┌─────────────────┐  ────────────────────────>  ┌──────────────────────┐
-  │  Ground Station  │    score, RSSI, SNR,        │    Drone Daemon      │
-  │   (alink_gs)     │    FEC stats, keyframe      │   (alink_drone)      │
-  │                  │    codes                     │                      │
-  │  Python 3        │                              │  C + pthreads        │
-  └────────┬─────────┘                              └──────────┬───────────┘
-           │                                                   │
-    TCP to wfb-ng                                    Executes commands:
-    JSON stats port                                  ├── wfb_tx_cmd (MCS, FEC)
-    (127.0.0.1:8103)                                 ├── curl (Majestic API)
-                                                     ├── iw (TX power)
-                                                     └── Writes OSD to /tmp/
+  ┌─────────────────┐  ──────────────────────────────────────────>  ┌──────────────────────┐
+  │  Ground Station  │    profile index + all parameters           │    Drone Daemon      │
+  │   (alink_gs)     │    (P: message with GI, MCS, FEC, etc.)     │   (alink_drone)      │
+  │                  │                                               │                      │
+  │  Python 3        │                                               │  C + pthreads        │
+  │  └─ Scoring      │                                               │  └─ Apply profiles   │
+  │  └─ Selection    │                                               │     via templates    │
+  └────────┬─────────┘                                               └──────────┬───────────┘
+           │                                                                    │
+    TCP to wfb-ng                                                    Executes commands:
+    JSON stats port                                                ├── wfb_tx_cmd (MCS, FEC)
+    (127.0.0.1:8103)                                               ├── curl (Majestic API)
+                                                                    ├── iw (TX power)
+                                                                    └── Writes OSD to /tmp/
 ```
 
-**One-directional link:** The ground station continuously pushes link quality data to the drone. There is no drone-to-GS feedback channel in this system.
+**One-directional link:** The ground station continuously pushes finalized profile selections to the drone. There is no drone-to-GS feedback channel in this system.
 
 ---
 
@@ -122,12 +123,13 @@ adaptive-link/
 
 A multi-module, multi-threaded C daemon (13 source files). Core responsibilities:
 
-1. **UDP listener** - Non-blocking receive loop (`select()` with 50ms timeout) for link quality scores from GS
-2. **Profile engine** - Maps scores to transmission profiles via range matching, with dual EMA trend detection and predictive scoring
+1. **UDP listener** - Non-blocking receive loop (`select()` with 50ms timeout) for profile messages from GS
+2. **Profile application** - Receives finalized profile parameters from GS and applies them via `profile_apply_direct()`
 3. **Async command executor** - Dispatches profile changes to a background worker thread, applying shell commands with template substitution without blocking the main loop
-4. **Stability logic** - Asymmetric profile stepping (fast downgrade, confidence-gated upgrade), hysteresis, exponential smoothing, rate limiting, millisecond-precision hold-down timers
-5. **Monitoring** - TX drop detection, antenna RSSI parsing, OSD updates
-6. **External control** - Unix socket interface for power changes and parameter queries
+4. **Monitoring** - TX drop detection, antenna RSSI parsing, OSD updates
+5. **External control** - Unix socket interface for power changes and parameter queries
+
+**Note:** Profile selection logic (scoring, smoothing, hysteresis, confidence gating) has been removed from the drone and moved to the GS.
 
 ### Ground Station (alink_gs)
 
@@ -135,11 +137,12 @@ A Python 3 script that:
 
 1. Connects to wfb-ng's JSON statistics TCP port
 2. Extracts per-antenna RSSI, SNR, FEC recovery, and packet loss metrics
-3. Normalizes and weights metrics into a composite score (range 1000-2000)
-4. Applies Kalman filtering for noise estimation
-5. Optionally penalizes score based on filtered noise level
-6. Sends UDP heartbeat messages to the drone (~10 Hz)
-7. Generates keyframe request codes on packet loss events
+3. Calculates multi-factor score (RF quality, loss rate, FEC pressure, antenna diversity)
+4. Runs dual EMA smoothing with predictive trend detection
+5. Applies hysteresis and confidence gating for stable transitions
+6. Selects the appropriate profile from `txprofiles.conf`
+7. Sends UDP messages with finalized profile parameters to the drone (~10 Hz)
+8. Generates keyframe request codes on packet loss events
 
 ### Profile System
 
@@ -162,7 +165,7 @@ Profiles in `txprofiles.conf` define transmission parameter sets mapped to score
 | BW | 20 | Channel bandwidth (MHz) |
 | QpDelta | -12 | Quantization parameter delta |
 
-Profile 999 is the **fallback profile** used when GS heartbeats are lost.
+Profile 0 is the **fallback profile** used when GS heartbeats are lost.
 
 Lower scores map to conservative profiles (low MCS, low bitrate, high FEC redundancy).
 Higher scores map to aggressive profiles (high MCS, high bitrate, less FEC).
@@ -188,90 +191,100 @@ This decouples the control logic from hardware-specific commands, making it adap
 ### Signal Flow
 
 ```
-wfb-ng RX stats ──TCP──> alink_gs ──UDP──> alink_drone ──system()──> wfb_tx_cmd / curl / iw
-     │                      │                    │
-  RSSI, SNR,          Score calc +          Profile match +
-  FEC, loss           Kalman filter         Smoothing/hysteresis
+wfb-ng RX stats ──TCP──> alink_gs ──UDP (P: message)──> alink_drone ──system()──> wfb_tx_cmd / curl / iw
+     │                      │
+  RSSI, SNR,          Multi-factor scoring +
+  FEC, loss           Profile selection
 ```
 
-### Score Calculation (Ground Station)
+### Multi-Factor Scoring (Ground Station)
+
+The GS computes a composite score from four weighted factors:
 
 ```
-1. Normalize:
+1. RF Quality Score (50% weight):
    snr_norm  = clamp((snr - SNR_MIN) / (SNR_MAX - SNR_MIN), 0, 1)
    rssi_norm = clamp((rssi - RSSI_MIN) / (RSSI_MAX - RSSI_MIN), 0, 1)
+   rf_score  = snr_norm * 0.5 + rssi_norm * 0.5
 
-2. Combine:
-   raw_score = 1000 + (snr_weight * snr_norm + rssi_weight * rssi_norm) * 1000
+2. Packet Loss Score (25% weight):
+   loss_rate = lost_packets / all_packets (since last update)
+   loss_score = 1.0 - loss_rate
 
-3. Error estimation:
-   error_ratio = (5 * lost_packets + adjusted_fec_recovered) / (total_packets / num_antennas)
-   filtered_noise = kalman_update(error_ratio)
+3. FEC Pressure Score (15% weight):
+   redundancy = fec_n - fec_k
+   weighted_fec = fec_rec * (6.0 / (1 + redundancy))
+   fec_score = 1.0 - min(weighted_fec / all_packets, max_loss_rate)
 
-4. Penalty (optional):
-   deduction = min(((filtered_noise - min_noise) / (max_noise - min_noise)) ^ exponent, 1.0)
-   final_score = raw_score * (1 - deduction)
+4. Antenna Diversity Score (10% weight):
+   rssi_spread = max_rssi - min_rssi
+   diversity_score = 1.0 - (rssi_spread / max_rssi_spread)
 
-5. FEC change signal (0-5 scale based on filtered noise level)
+5. Combined Score:
+   score = 1000 + (rf_weight*rf_score + loss_weight*loss_score +
+                   fec_weight*fec_score + diversity_weight*diversity_score) * 1000
 ```
 
-### Profile Selection Algorithm (Drone)
+### Profile Selection Algorithm (Ground Station)
 
-The `profile_start_selection()` and `value_chooses_profile()` functions implement a multi-stage selection pipeline:
+The `ProfileSelector` class implements the full selection pipeline:
 
 ```
-1. FALLBACK CHECK
-   Score == 999 → immediately select fallback profile
+1. RAW SCORE COMPUTATION
+   Calculate multi-factor score from RF, loss, FEC, and diversity metrics
 
-2. WEIGHTED COMBINATION
-   combined = rssi_score * rssi_weight + snr_score * snr_weight
+2. SCORE CAPPING
+   raw_score = min(raw_score, limit_max_score_to)   // default: 2000
 
-3. SCORE CAPPING
-   combined = min(combined, limit_max_score_to)   // default: 2000
+3. DUAL EMA SMOOTHING
+   ema_fast = ema_fast_alpha * raw_score + (1 - ema_fast_alpha) * ema_fast    // α=0.5
+   ema_slow = ema_slow_alpha * raw_score + (1 - ema_slow_alpha) * ema_slow    // α=0.15
 
-4. LEGACY EXPONENTIAL SMOOTHING (for upward path and OSD)
-   factor = (combined >= previous) ? smoothing_up : smoothing_down
-   smoothed = factor * combined + (1 - factor) * smoothed
-
-5. DUAL EMA TREND DETECTION
-   ema_fast = ema_fast_alpha * combined + (1 - ema_fast_alpha) * ema_fast    // default α=0.5
-   ema_slow = ema_slow_alpha * combined + (1 - ema_slow_alpha) * ema_slow    // default α=0.15
-
-6. PREDICTIVE SCORE (when degrading: fast < slow)
+4. PREDICTIVE SCORE (when degrading: fast < slow)
    gap = ema_slow - ema_fast
-   effective = min(smoothed, ema_fast - gap * predict_multi)    // default predict_multi=1.0
+   effective = min(smoothed, ema_fast - gap * predict_multi)   // predict_multi=1.0
 
-7. RATE LIMITING
-   Skip if elapsed_ms < min_between_changes_ms    // default: 100ms
+5. RATE LIMITING
+   Skip if elapsed_ms < min_between_changes_ms   // default: 200ms
 
-8. HYSTERESIS CHECK
+6. HYSTERESIS CHECK
    pct_change = |effective - last_sent| / last_sent * 100
-   threshold  = (improving) ? hysteresis_up : hysteresis_down
-   Skip if pct_change < threshold                  // default: 15% up, 5% down
+   threshold  = (improving) ? hysteresis_percent : hysteresis_percent_down
+   Skip if pct_change < threshold                 // default: 5% both directions
 
-9. PROFILE LOOKUP
-   Match effective score against profile range boundaries
+7. PROFILE LOOKUP
+   Match effective score against txprofiles.conf range boundaries
 
-10. ASYMMETRIC STEPPING
-   - Downgrade (fast_downgrade=1): bypass hold timer, apply immediately
+8. ASYMMETRIC STEPPING
+   - Downgrade (fast_downgrade=True): bypass hold timer, apply immediately
    - Upgrade: require upward_confidence_loops (default 3) consecutive
-     evaluations above threshold, then also enforce hold_modes_down_ms
-   - Leaving fallback: wait hold_fallback_mode_ms   // default: 2000ms
+     evaluations selecting same higher profile
+   - Leaving fallback (profile 0): wait hold_fallback_mode_ms   // default: 1000ms
 
-11. ASYNC PROFILE APPLICATION
-   Dispatch to background worker thread (non-blocking)
-   Latest job wins if new change arrives during execution
+9. SEND TO DRONE
+   Send P: message with profile index and all parameters
 ```
 
-### Profile Application Order
+### Profile Application (Drone)
 
-Command execution order differs based on direction of change:
+The drone receives `P:` messages and applies profiles via `profile_apply_direct()`:
 
-**Upgrading (better link):** QpDelta → FPS → Power → GOP → MCS → FEC/Bitrate → ROI → IDR
+```
+1. Parse P: message (profile_idx, gi, mcs, fec_k, fec_n, bitrate, gop, power, roi_qp, bandwidth, qp_delta, timestamp)
 
-**Downgrading (worse link):** QpDelta → FPS → FEC/Bitrate → GOP → MCS → Power → ROI → IDR
+2. Store as lastAppliedProfile (for re-application via cmd_server)
 
-The key difference: when downgrading, FEC/bitrate changes happen **before** MCS changes to ensure error protection is in place before reducing modulation rate. Commands are paced with configurable delays (`pace_exec`, default 20ms). Profile application runs on the async worker thread, so the main loop is never blocked.
+3. Skip if profile_index == currentProfile (GS sends current profile every tick for reliability)
+
+4. Update tracking state:
+   previousProfile = currentProfile
+   currentProfile = profile_index
+   prevTimeStamp = now_ms()
+
+5. Dispatch to async worker thread (non-blocking)
+   - Apply commands in order: QpDelta → FPS → Power → GOP → MCS → FEC/Bitrate → ROI → IDR
+   - Pace execution with configurable delays
+```
 
 ---
 
@@ -282,15 +295,13 @@ The key difference: when downgrading, FEC/bitrate changes happen **before** MCS 
 ```
 Wire format: <4-byte length (network byte order)><payload string>
 
-Payload: timestamp:rssi_score:snr_score:fec_rec:lost:best_rssi:best_snr:antennas:penalty:fec_change[:keyframe_code]
+Profile message (P:):
+P:<profile_idx>:<gi>:<mcs>:<fec_k>:<fec_n>:<bitrate>:<gop>:<power>:<roi_qp>:<bandwidth>:<qp_delta>:<timestamp>[:<keyframe_code>]
 
-Example: 1700000000:1500:1500:42:3:-65:28:4:10:2:abcd
+Example: P:5:long:5:8:12:6000:10:58:0,0,0,0:20:0:1700000000:abcd
 ```
 
-Special messages are prefixed with `special:`:
-- `special:pause_adaptive` - Pause profile changes
-- `special:resume_adaptive` - Resume profile changes
-- `special:request_keyframe:<code>` - Request IDR frame (deduplicated by code)
+The GS sends the current profile on every tick for UDP reliability. The drone skips application if the profile index matches the current profile.
 
 ### Unix Socket (External Control, /tmp/alink_cmd.sock)
 
@@ -323,7 +334,7 @@ Written to `/tmp/MSPOSD.msg` every 1 second (or via UDP). Verbosity controlled b
 
 | Thread | Module | Entry Point | Frequency | Responsibility |
 |--------|--------|-------------|-----------|----------------|
-| Main | `main.c` | `main()` | 50ms select timeout / per UDP packet | Non-blocking receive, parse, trigger profile selection |
+| Main | `main.c` | `main()` | 50ms select timeout / per UDP packet | Non-blocking receive, parse profile messages |
 | Profile Worker | `profile.c` | `profile_worker_func()` | Per job signal | Execute profile commands asynchronously (system() calls) |
 | RSSI Monitor | `rssi_monitor.c` | `rssi_thread_func()` | Per queue item | Parse drone antenna RSSI, detect weak antennas (>20dB spread) |
 | Fallback | `fallback.c` | `fallback_thread_func()` | Every `fallback_ms` | Count heartbeats; trigger fallback on GS silence |
@@ -340,16 +351,12 @@ Written to `/tmp/MSPOSD.msg` every 1 second (or via UDP). Verbosity controlled b
 | `count_mutex` | `main.c` | `message_count` | Main thread (+1 per msg) | Fallback thread (read + reset) |
 | `pause_mutex` | `main.c` | `paused` flag | Cmd server, keyframe (special msgs) | Message processing, fallback |
 | `tx_power_mutex` | `main.c` | `power_level_0_to_4` | Cmd server (set) | Profile worker (read) |
-| `worker_mutex` | `profile.c` | `pending_job`, `job_pending`, `prev*` state | Main thread (dispatch), cmd server (dispatch) | Profile worker (consume + execute) |
+| `worker_mutex` | `profile.c` | `pending_job`, `job_pending` | Main thread (dispatch), cmd server (dispatch) | Profile worker (consume + execute) |
 | `worker_cond` | `profile.c` | — | Main thread (signal) | Profile worker (wait) |
 | `keyframe_state_t.mutex` | `keyframe.c` | `KeyframeRequest codes[]` | Main thread (add codes) | Main thread (check duplicates) |
 | `rssi_state_t.lock` | `rssi_monitor.c` | RSSI circular queue | Cmd server (enqueue) | RSSI thread (dequeue) |
 
 The first three mutexes are allocated in `alink_daemon_t` (main.c) and passed by pointer to thread modules. The worker mutex/cond are in `profile_state_t`. The last two are fully encapsulated within their respective module structs.
-
-Additional synchronization:
-- `selection_busy` flag in `profile_state_t` prevents nested profile changes (non-atomic, but only written/read from main thread)
-- `initialized` flag in `alink_daemon_t` gates operations until first UDP message received
 
 ---
 
@@ -362,31 +369,16 @@ Additional synchronization:
 | Power | `allow_set_power` | 1 | Enable TX power control |
 | Power | `use_0_to_4_txpower` | 1 | Use power table (vs raw multiplication) |
 | Power | `power_level_0_to_4` | 0 | Power index into adapter table |
-| Weights | `rssi_weight` | 0.5 | RSSI contribution to combined score |
-| Weights | `snr_weight` | 0.5 | SNR contribution to combined score |
-| Timing | `fallback_ms` | 1000 | Timeout before entering fallback profile |
-| Timing | `hold_fallback_mode_s` | 2 | Minimum time (s) in fallback before leaving |
-| Timing | `hold_fallback_mode_ms` | derived | Millisecond override (if set, takes precedence over `_s`) |
-| Timing | `hold_modes_down_s` | 2 | Minimum time (s) before upgrading profile |
-| Timing | `hold_modes_down_ms` | derived | Millisecond override (if set, takes precedence over `_s`) |
-| Timing | `min_between_changes_ms` | 100 | Minimum interval between profile changes |
-| Smoothing | `exp_smoothing_factor` | 0.5 | Legacy smoothing for score increases |
-| Smoothing | `exp_smoothing_factor_down` | 0.8 | Legacy smoothing for score decreases |
-| Dual EMA | `ema_fast_alpha` | 0.5 | Fast EMA weight (trend detection) |
-| Dual EMA | `ema_slow_alpha` | 0.15 | Slow EMA weight (stable baseline) |
-| Dual EMA | `predict_multi` | 1.0 | Predictive pessimism multiplier (0 = disabled) |
-| Stepping | `fast_downgrade` | 1 | Skip hold timer on downgrades |
-| Stepping | `upward_confidence_loops` | 3 | Consecutive evaluations required before upgrade |
-| Hysteresis | `hysteresis_percent` | 15 | Change threshold for increases (%) |
-| Hysteresis | `hysteresis_percent_down` | 5 | Change threshold for decreases (%) |
-| FEC | `allow_dynamic_fec` | 1 | Adjust FEC based on noise signals |
-| FEC | `fec_k_adjust` | 0 | Decrease K (vs increase N) for FEC |
-| FEC | `fec_reaction_delay_ms` | 300 | Minimum delay before FEC adjustment |
+| Fallback | `fallback_ms` | 1000 | Timeout before entering fallback profile |
+| Fallback | `fallback_gi/mcs/fec_k/fec_n/bitrate/gop/power/roi_qp/bandwidth/qp_delta` | — | Fallback profile parameters |
 | Keyframe | `allow_request_keyframe` | 1 | Allow IDR frame requests |
-| Keyframe | `request_keyframe_interval_ms` | 50 | Minimum between IDR requests |
-| TX Monitor | `check_xtx_period_ms` | 200 | TX dropped check interval |
-| TX Monitor | `xtx_reduce_bitrate_factor` | 0.5 | Bitrate reduction on TX drops |
-| OSD | `osd_level` | 4 | OSD verbosity (0-6) |
+| Keyframe | `idr_every_change` | 0 | Request IDR on every profile change |
+| TX Monitor | `allow_xtx_reduce_bitrate` | 1 | Reduce bitrate on TX drops |
+| TX Monitor | `xtx_reduce_bitrate_factor` | 0.8 | Bitrate reduction factor |
+| OSD | `osd_level` | 0 | OSD verbosity (0-6) |
+| Misc | `get_card_info_from_yaml` | 1 | Load adapter info from wlan_adapters.yaml |
+
+**Removed parameters (moved to GS):** `rssi_weight`, `snr_weight`, `hold_fallback_mode_s`, `hold_modes_down_s`, `min_between_changes_ms`, `hysteresis_percent`, `exp_smoothing_factor`, `allow_dynamic_fec`, `allow_spike_fix_fps`
 
 ### alink_gs.conf (Ground Station) - Key Parameters
 
@@ -396,11 +388,38 @@ Additional synchronization:
 | outgoing | `udp_port` | 9999 | Drone listen port |
 | json | `HOST` | 127.0.0.1 | wfb-ng stats host |
 | json | `PORT` | 8103 | wfb-ng stats port |
-| weights | `snr_weight` | 0.5 | SNR contribution to score |
-| weights | `rssi_weight` | 0.5 | RSSI contribution to score |
+| weights | `snr_weight` | 0.5 | SNR contribution to RF score |
+| weights | `rssi_weight` | 0.5 | RSSI contribution to RF score |
 | ranges | `SNR_MIN/MAX` | 12/38 | SNR normalization bounds |
 | ranges | `RSSI_MIN/MAX` | -80/-30 | RSSI normalization bounds (dBm) |
-| noise | `kalman_estimate` | 0.005 | Initial Kalman filter estimate |
+| keyframe | `allow_idr` | True | Generate keyframe request codes |
+| keyframe | `idr_max_messages` | 20 | Messages to include keyframe code |
+| dynamic refinement | `allow_penalty` | False | Apply noise penalty to score |
+| noise | `min_noise` | 0.01 | Minimum noise threshold |
+| noise | `max_noise` | 0.1 | Maximum noise threshold |
+| noise | `deduction_exponent` | 0.5 | Penalty curve exponent |
+| error estimation | `kalman_estimate` | 0.005 | Initial Kalman estimate |
+| error estimation | `kalman_error_estimate` | 0.1 | Initial Kalman error |
+| error estimation | `process_variance` | 1e-5 | Kalman process variance |
+| error estimation | `measurement_variance` | 0.01 | Kalman measurement variance |
+| scoring | `rf_weight` | 0.5 | RF quality weight |
+| scoring | `loss_weight` | 0.25 | Packet loss weight |
+| scoring | `fec_weight` | 0.15 | FEC pressure weight |
+| scoring | `diversity_weight` | 0.1 | Antenna diversity weight |
+| scoring | `max_loss_rate` | 0.1 | Max loss rate for scoring |
+| scoring | `max_rssi_spread` | 20 | Max RSSI spread for scoring |
+| profile selection | `txprofiles_file` | /etc/txprofiles.conf | Profile file path |
+| profile selection | `hold_fallback_mode_ms` | 1000 | Hold time after leaving fallback |
+| profile selection | `hold_modes_down_ms` | 3000 | Hold time before upgrades |
+| profile selection | `min_between_changes_ms` | 200 | Minimum interval between changes |
+| profile selection | `hysteresis_percent` | 5 | Hysteresis for upgrades (%) |
+| profile selection | `hysteresis_percent_down` | 5 | Hysteresis for downgrades (%) |
+| profile selection | `ema_fast_alpha` | 0.5 | Fast EMA weight |
+| profile selection | `ema_slow_alpha` | 0.15 | Slow EMA weight |
+| profile selection | `predict_multi` | 1.0 | Predictive multiplier (0 = disabled) |
+| profile selection | `fast_downgrade` | True | Immediate downgrades |
+| profile selection | `upward_confidence_loops` | 3 | Consecutive evaluations for upgrade |
+| profile selection | `limit_max_score_to` | 2000 | Maximum score cap |
 
 ---
 
@@ -428,7 +447,7 @@ The ground station script (`alink_gs`) is interpreted Python 3 and requires no b
 There are **no automated tests** configured. Testing is done manually on hardware:
 
 1. Deploy to drone and ground station hardware
-2. Verify UDP communication (score messages arriving)
+2. Verify UDP communication (profile messages arriving)
 3. Observe profile changes via OSD or logs
 4. Test edge cases: signal loss/recovery, rapid changes, antenna failures
 
@@ -447,11 +466,12 @@ Requires:
 
 **Ground station:**
 ```bash
-python3 alink_gs [--udp-ip IP] [--udp-port PORT]
+python3 alink_gs [--udp-ip IP] [--udp-port PORT] [--verbose]
 ```
 
 Requires:
 - `/etc/alink_gs.conf` (or local `alink_gs.conf`)
+- `/etc/txprofiles.conf` (or local `txprofiles.conf`)
 - wfb-ng running with JSON stats enabled on the configured port
 
 ---
@@ -490,28 +510,24 @@ sudo ./alink_install.sh drone remove
 
 1. **`system()` for command execution:** All hardware control goes through `system()` calls with string-interpolated commands. This works but is fragile (shell injection risk if config values are not sanitized, no structured error handling from commands, subprocess overhead per call).
 
-2. **One-directional communication:** The GS sends scores to the drone, but the drone has no channel to send feedback to the GS (e.g., confirming profile changes, reporting TX drops). This limits coordination.
+2. **One-directional communication:** The GS sends profiles to the drone, but the drone has no channel to send feedback to the GS (e.g., confirming profile changes, reporting TX drops). This limits coordination.
 
 3. **No structured logging:** Diagnostic output goes to stdout/stderr and OSD. No log levels, no structured format, no rotation.
 
+4. **GS profile selection state:** The GS maintains selection state (EMA values, confidence counters, timing) in Python. If the GS process restarts, this state is lost and must be re-initialized.
+
 ### Code Quality
 
-4. **`selection_busy` flag is not atomic or mutex-protected.** It is read and written from the main thread only (so currently safe), but the pattern is fragile if threading changes.
+5. **No automated tests or CI.** Changes are validated manually on hardware only.
 
-5. **`profile_apply()` is called from both the main thread and the cmd_server thread** without mutex protection. This matches the original behavior and has not caused issues in practice, but is technically a race condition.
-
-6. **No automated tests or CI.** Changes are validated manually on hardware only.
-
-### Configuration
-
-7. **Custom config parser (drone):** The C side uses a hand-rolled parser rather than a standard library. Each parameter requires explicit parsing code with fallback defaults.
-
-8. **Duplicate weight definitions:** Both `alink.conf` (drone) and `alink_gs.conf` (GS) define `rssi_weight` and `snr_weight`. The GS uses its weights for score calculation, and the drone uses its weights for combining the already-weighted scores - meaning weights are applied twice if not coordinated.
+6. **Duplicate config parameters:** Some parameters exist in both `alink.conf` and `alink_gs.conf` (e.g., fallback settings). The GS version is authoritative for selection; the drone version is for local fallback application.
 
 ### Robustness
 
-9. **No message authentication:** UDP messages between GS and drone have no authentication or integrity checking. A malicious actor on the network could inject fake scores.
+7. **No message authentication:** UDP messages between GS and drone have no authentication or integrity checking. A malicious actor on the network could inject fake profile commands.
 
-10. **Fallback profile timing:** If the GS process restarts, the drone enters fallback mode for `hold_fallback_mode_s` (default 1s) before accepting new scores. This is a brief disruption but could be longer with conservative settings.
+8. **Fallback profile timing:** If the GS process restarts, the drone enters fallback mode after `fallback_ms` (default 1000ms) without heartbeats.
 
-11. **No graceful shutdown:** The daemon runs until killed. No signal handlers for cleanup (closing sockets, resetting hardware state).
+9. **No graceful shutdown:** The daemon runs until killed. No signal handlers for cleanup (closing sockets, resetting hardware state).
+
+10. **GS as single point of failure:** With profile selection moved to the GS, the GS process must remain running for adaptive link to function. If it crashes, the drone falls back to the static fallback profile.

@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""
+Ground station adaptive link controller.
+
+Monitors wfb-ng signal metrics, selects transmission profiles using
+multi-factor scoring (RF quality, packet loss, FEC pressure, antenna
+diversity), and sends finalized profile parameters to the drone.
+"""
 import os
 import socket
 import json
@@ -7,10 +14,11 @@ import argparse
 import struct
 import random
 import string
-import threading
 import configparser
+import math
 
-# Defaults used to create new .conf when missing or incomplete
+# ─── Default configuration ───────────────────────────────────────────────────
+
 DEFAULT_CONFIG = """# adaptive-link VRX settings
 
 [outgoing]
@@ -32,36 +40,56 @@ RSSI_MIN = -85
 RSSI_MAX = -40
 
 [keyframe]
-allow_idr = TRue
+allow_idr = True
 idr_max_messages = 20
 
 [dynamic refinement]
 allow_penalty = False
-allow_fec_increase = False
 
 [noise]
 min_noise = 0.01
 max_noise = 0.1
 deduction_exponent = 0.5
-min_noise_for_fec_change = 0.01
-noise_for_max_fec_change = 0.1
 
 [error estimation]
 kalman_estimate = 0.005
 kalman_error_estimate = 0.1
 process_variance = 1e-5
 measurement_variance = 0.01
+
+[scoring]
+rf_weight = 0.5
+loss_weight = 0.25
+fec_weight = 0.15
+diversity_weight = 0.1
+max_loss_rate = 0.1
+max_rssi_spread = 20
+
+[profile selection]
+txprofiles_file = /etc/txprofiles.conf
+hold_fallback_mode_ms = 1000
+hold_modes_down_ms = 3000
+min_between_changes_ms = 200
+hysteresis_percent = 5
+hysteresis_percent_down = 5
+ema_fast_alpha = 0.5
+ema_slow_alpha = 0.15
+predict_multi = 1.0
+fast_downgrade = True
+upward_confidence_loops = 3
+limit_max_score_to = 2000
 """
 
-# List of required sections in the config
 REQUIRED_SECTIONS = {
-    'outgoing', 'json', 'weights', 'ranges', 
-    'keyframe', 'dynamic refinement', 'noise', 'error estimation'
+    'outgoing', 'json', 'weights', 'ranges',
+    'keyframe', 'dynamic refinement', 'noise', 'error estimation',
+    'scoring', 'profile selection'
 }
 
-# Function to create default config file
+
+# ─── Configuration helpers ───────────────────────────────────────────────────
+
 def create_default_config(config_file):
-    # If the config file is a symlink, resolve it so that we write to its target.
     target = os.path.realpath(config_file) if os.path.islink(config_file) else config_file
     try:
         with open(target, 'w') as f:
@@ -70,19 +98,309 @@ def create_default_config(config_file):
     except Exception as e:
         print(f"Error writing default config file: {e}")
 
+
 def load_configuration(config_file):
     config = configparser.ConfigParser()
     read_files = config.read(config_file)
-    # Check if file is missing or doesn't contain all required sections
     if not read_files or not REQUIRED_SECTIONS.issubset(set(config.sections())):
         print("Configuration file missing or invalid. Creating default configuration...")
         create_default_config(config_file)
         config.read(config_file)
     return config
 
+
+# ─── Profile loading ─────────────────────────────────────────────────────────
+
+def load_profiles(filename):
+    """Load TX profiles from txprofiles.conf format.
+
+    Each line: rangeMin - rangeMax GI MCS FecK FecN Bitrate GOP Power ROIqp Bandwidth QpDelta
+    """
+    profiles = []
+    try:
+        with open(filename) as f:
+            for line in f:
+                line = line.split('#')[0].strip()
+                if not line:
+                    continue
+                parts = line.split()
+                if len(parts) < 12 or parts[1] != '-':
+                    continue
+                profiles.append({
+                    'range_min': int(parts[0]),
+                    'range_max': int(parts[2]),
+                    'gi': parts[3],
+                    'mcs': int(parts[4]),
+                    'fec_k': int(parts[5]),
+                    'fec_n': int(parts[6]),
+                    'bitrate': int(parts[7]),
+                    'gop': float(parts[8]),
+                    'power': int(parts[9]),
+                    'roi_qp': parts[10],
+                    'bandwidth': int(parts[11]),
+                    'qp_delta': int(parts[12]) if len(parts) > 12 else 0,
+                })
+    except FileNotFoundError:
+        print(f"Error: Profiles file not found: {filename}")
+    return profiles
+
+
+# ─── Kalman filter ────────────────────────────────────────────────────────────
+
+class KalmanFilter:
+    def __init__(self, estimate, error_estimate, process_variance, measurement_variance):
+        self.estimate = estimate
+        self.error_estimate = error_estimate
+        self.process_variance = process_variance
+        self.measurement_variance = measurement_variance
+
+    def update(self, measurement):
+        predicted_estimate = self.estimate
+        predicted_error = self.error_estimate + self.process_variance
+        kalman_gain = predicted_error / (predicted_error + self.measurement_variance)
+        self.estimate = predicted_estimate + kalman_gain * (measurement - predicted_estimate)
+        self.error_estimate = (1 - kalman_gain) * predicted_error
+        return self.estimate
+
+
+# ─── Profile selector ────────────────────────────────────────────────────────
+
+class ProfileSelector:
+    """Multi-factor profile selection with EMA smoothing, hysteresis,
+    confidence gating, and hold timers.
+
+    Ported from the drone-side C implementation (profile.c) and enhanced
+    with additional scoring factors available on the GS.
+    """
+
+    def __init__(self, profiles, config):
+        self.profiles = profiles
+
+        # Scoring weights
+        self.rf_weight = config.getfloat('scoring', 'rf_weight')
+        self.loss_weight = config.getfloat('scoring', 'loss_weight')
+        self.fec_weight = config.getfloat('scoring', 'fec_weight')
+        self.diversity_weight = config.getfloat('scoring', 'diversity_weight')
+        self.max_loss_rate = config.getfloat('scoring', 'max_loss_rate')
+        self.max_rssi_spread = config.getfloat('scoring', 'max_rssi_spread')
+
+        # RF normalization ranges
+        self.snr_weight = config.getfloat('weights', 'snr_weight')
+        self.rssi_weight = config.getfloat('weights', 'rssi_weight')
+        self.snr_min = config.getint('ranges', 'SNR_MIN')
+        self.snr_max = config.getint('ranges', 'SNR_MAX')
+        self.rssi_min = config.getint('ranges', 'RSSI_MIN')
+        self.rssi_max = config.getint('ranges', 'RSSI_MAX')
+
+        # Selection tuning
+        ps = 'profile selection'
+        self.hold_fallback_mode_ms = config.getint(ps, 'hold_fallback_mode_ms')
+        self.hold_modes_down_ms = config.getint(ps, 'hold_modes_down_ms')
+        self.min_between_changes_ms = config.getint(ps, 'min_between_changes_ms')
+        self.hysteresis_percent = config.getfloat(ps, 'hysteresis_percent')
+        self.hysteresis_percent_down = config.getfloat(ps, 'hysteresis_percent_down')
+        self.ema_fast_alpha = config.getfloat(ps, 'ema_fast_alpha')
+        self.ema_slow_alpha = config.getfloat(ps, 'ema_slow_alpha')
+        self.predict_multi = config.getfloat(ps, 'predict_multi')
+        self.fast_downgrade = config.getboolean(ps, 'fast_downgrade')
+        self.upward_confidence_loops = config.getint(ps, 'upward_confidence_loops')
+        self.limit_max_score_to = config.getint(ps, 'limit_max_score_to')
+
+        # State
+        self.current_profile_idx = -1
+        self.previous_profile_idx = -2
+        self.current_profile = None
+        self.smoothed_value = 1500.0
+        self.ema_fast = 0.0
+        self.ema_slow = 0.0
+        self.ema_initialized = False
+        self.last_value_sent = 100
+        self.last_change_time_ms = 0
+        self.up_confidence_count = 0
+        self.up_target_profile = -1
+
+        # Packet delta tracking
+        self.prev_all_packets = 0
+        self.prev_lost_packets = 0
+        self.prev_fec_rec = 0
+
+    def _clamp(self, val, lo, hi):
+        return max(lo, min(hi, val))
+
+    def _now_ms(self):
+        return int(time.monotonic() * 1000)
+
+    def _lookup_profile(self, score):
+        """Find profile matching score range. Returns (index, profile) or (None, None)."""
+        for i, p in enumerate(self.profiles):
+            if p['range_min'] <= score <= p['range_max']:
+                return i, p
+        return None, None
+
+    def compute_score(self, best_rssi, best_snr, min_rssi,
+                      all_packets, lost_packets, fec_rec,
+                      fec_k, fec_n, num_antennas):
+        """Multi-factor link quality score (1000-2000 range)."""
+
+        # 1. RF quality (normalized 0-1)
+        snr_range = self.snr_max - self.snr_min
+        rssi_range = self.rssi_max - self.rssi_min
+        snr_norm = self._clamp((best_snr - self.snr_min) / snr_range, 0, 1) if snr_range > 0 else 0
+        rssi_norm = self._clamp((best_rssi - self.rssi_min) / rssi_range, 0, 1) if rssi_range > 0 else 0
+        rf_score = self.snr_weight * snr_norm + self.rssi_weight * rssi_norm
+
+        # 2. Packet loss rate (over interval)
+        delta_lost = max(0, lost_packets - self.prev_lost_packets)
+        delta_all = max(0, all_packets - self.prev_all_packets)
+        loss_rate = delta_lost / max(delta_all, 1)
+        loss_score = 1.0 - self._clamp(loss_rate / self.max_loss_rate, 0, 1)
+
+        # 3. FEC pressure
+        delta_fec = max(0, fec_rec - self.prev_fec_rec)
+        fec_redundancy = (fec_n - fec_k) if (fec_k and fec_n and fec_n > fec_k) else 1
+        fec_capacity = fec_redundancy * (delta_all / max(fec_n, 1)) if fec_n else 1
+        fec_pressure = delta_fec / max(fec_capacity, 1)
+        fec_score = 1.0 - self._clamp(fec_pressure, 0, 1)
+
+        # 4. Antenna diversity penalty
+        if num_antennas > 1 and min_rssi > -200:
+            rssi_spread = best_rssi - min_rssi
+            diversity_score = 1.0 - self._clamp(rssi_spread / self.max_rssi_spread, 0, 1)
+        else:
+            diversity_score = 1.0  # Single antenna or no data — no penalty
+
+        # 5. Weighted combination
+        combined = (self.rf_weight * rf_score +
+                    self.loss_weight * loss_score +
+                    self.fec_weight * fec_score +
+                    self.diversity_weight * diversity_score)
+
+        # Update delta tracking
+        self.prev_all_packets = all_packets
+        self.prev_lost_packets = lost_packets
+        self.prev_fec_rec = fec_rec
+
+        return 1000 + combined * 1000
+
+    def select(self, raw_score):
+        """Run selection algorithm on a raw score. Returns (changed, profile_index, profile) tuple.
+
+        If changed is False, the caller should send a heartbeat instead.
+        """
+        # Cap score
+        if self.limit_max_score_to < 2000 and raw_score > self.limit_max_score_to:
+            raw_score = float(self.limit_max_score_to)
+
+        # Dual EMA smoothing
+        if not self.ema_initialized:
+            self.ema_fast = raw_score
+            self.ema_slow = raw_score
+            self.smoothed_value = raw_score
+            self.ema_initialized = True
+        else:
+            self.ema_fast = self.ema_fast_alpha * raw_score + (1.0 - self.ema_fast_alpha) * self.ema_fast
+            self.ema_slow = self.ema_slow_alpha * raw_score + (1.0 - self.ema_slow_alpha) * self.ema_slow
+
+        # Legacy single-EMA (asymmetric up/down)
+        sf = 0.5 if raw_score >= self.last_value_sent else 0.8
+        self.smoothed_value = sf * raw_score + (1 - sf) * self.smoothed_value
+
+        # Predictive score
+        effective_score = self.smoothed_value
+        if self.ema_fast < self.ema_slow and self.predict_multi > 0:
+            gap = self.ema_slow - self.ema_fast
+            predicted = self.ema_fast - gap * self.predict_multi
+            if predicted < effective_score:
+                effective_score = predicted
+
+        # Rate limit
+        now_ms = self._now_ms()
+        if (now_ms - self.last_change_time_ms) < self.min_between_changes_ms:
+            return False, self.current_profile_idx, self.current_profile
+
+        # Clamp to valid range
+        combined_value = int(math.floor(effective_score))
+        combined_value = max(1000, min(2000, combined_value))
+
+        # Hysteresis check
+        if self.last_value_sent != 0:
+            percent_change = abs((combined_value - self.last_value_sent) / self.last_value_sent) * 100
+        else:
+            percent_change = 100
+
+        is_downgrade = combined_value < self.last_value_sent
+        threshold = self.hysteresis_percent_down if is_downgrade else self.hysteresis_percent
+
+        if percent_change < threshold:
+            # Not enough change — but still feed confidence counter for upgrades
+            if not is_downgrade and combined_value != self.last_value_sent:
+                self._try_confidence_feed(combined_value)
+            return False, self.current_profile_idx, self.current_profile
+
+        # Profile lookup
+        new_idx, new_profile = self._lookup_profile(combined_value)
+        if new_idx is None:
+            return False, self.current_profile_idx, self.current_profile
+
+        if new_idx == self.current_profile_idx:
+            self.up_confidence_count = 0
+            self.up_target_profile = -1
+            return False, self.current_profile_idx, self.current_profile
+
+        # Direction
+        is_profile_downgrade = new_idx < self.current_profile_idx
+
+        # Timing and confidence gating
+        elapsed_ms = now_ms - self.last_change_time_ms
+
+        if is_profile_downgrade and self.fast_downgrade:
+            # Fast downgrade — apply immediately
+            self.up_confidence_count = 0
+            self.up_target_profile = -1
+        elif self.current_profile_idx == 0:
+            # Exiting fallback — enforce fallback hold
+            if elapsed_ms <= self.hold_fallback_mode_ms:
+                return False, self.current_profile_idx, self.current_profile
+        elif not is_profile_downgrade:
+            # Upgrade — confidence gating
+            if new_idx != self.up_target_profile:
+                self.up_target_profile = new_idx
+                self.up_confidence_count = 1
+                return False, self.current_profile_idx, self.current_profile
+            self.up_confidence_count += 1
+            if self.up_confidence_count < self.upward_confidence_loops:
+                return False, self.current_profile_idx, self.current_profile
+            # Also enforce hold timer for upgrades
+            if elapsed_ms <= self.hold_modes_down_ms:
+                return False, self.current_profile_idx, self.current_profile
+
+        # Apply the change
+        self.previous_profile_idx = self.current_profile_idx
+        self.current_profile_idx = new_idx
+        self.current_profile = new_profile
+        self.last_value_sent = combined_value
+        self.last_change_time_ms = now_ms
+        self.up_confidence_count = 0
+        self.up_target_profile = -1
+
+        return True, new_idx, new_profile
+
+    def _try_confidence_feed(self, combined_value):
+        """Feed the confidence counter even when hysteresis isn't met."""
+        new_idx, _ = self._lookup_profile(combined_value)
+        if new_idx is not None and new_idx != self.current_profile_idx and new_idx > self.current_profile_idx:
+            if new_idx != self.up_target_profile:
+                self.up_target_profile = new_idx
+                self.up_confidence_count = 1
+            else:
+                self.up_confidence_count += 1
+
+
+# ─── Message generation ──────────────────────────────────────────────────────
+
 def send_udp(message):
     message_bytes = message.encode('utf-8')
-    message_size = struct.pack('!I', len(message_bytes))  # Network byte order (big-endian)
+    message_size = struct.pack('!I', len(message_bytes))
     full_message = message_size + message_bytes
 
     try:
@@ -93,96 +411,106 @@ def send_udp(message):
         if verbose_mode:
             print(f"Error sending UDP data: {e}")
 
-def generate_message():
+
+def generate_profile_message(profile_idx, profile):
+    """Generate a P: profile change message."""
     global keyframe_request_code, keyframe_request_remaining
     timestamp = int(time.time())
 
-    # Base message without keyframe request code
-    message = f"{timestamp}:{int(final_score)}:{int(final_score)}:{int(fec_rec_packets)}:{int(lost_packets)}:{int(best_rssi)}:{int(best_snr)}:{int(num_antennas)}:{int(penalty)}:{int(fec_change)}"
+    parts = [
+        "P",
+        str(profile_idx),
+        profile['gi'],
+        str(profile['mcs']),
+        str(profile['fec_k']),
+        str(profile['fec_n']),
+        str(profile['bitrate']),
+        str(profile['gop']),
+        str(profile['power']),
+        profile['roi_qp'],
+        str(profile['bandwidth']),
+        str(profile['qp_delta']),
+        str(timestamp),
+    ]
 
-    # If there is an active keyframe request, tack the unique code onto the message.
     if keyframe_request_code is not None and keyframe_request_remaining > 0:
-        message = f"{message}:{keyframe_request_code}"
+        parts.append(keyframe_request_code)
         keyframe_request_remaining -= 1
         if keyframe_request_remaining == 0:
             keyframe_request_code = None
 
-    send_udp(message)
+    send_udp(":".join(parts))
 
-def kalman_filter_update(measurement):
-    global kalman_estimate, kalman_error_estimate
 
-    predicted_estimate = kalman_estimate
-    predicted_error = kalman_error_estimate + process_variance
 
-    kalman_gain = predicted_error / (predicted_error + measurement_variance)
+# ─── FEC adjustment helper ───────────────────────────────────────────────────
 
-    kalman_estimate = predicted_estimate + kalman_gain * (measurement - predicted_estimate)
-    kalman_error_estimate = (1 - kalman_gain) * predicted_error
-
-    return kalman_estimate
-
-def adjust_fec_recovered(fec_rec, fec_k, fec_n):
-    """
-    If redundancy is high (fec_n - fec_k is large), then we expect more fec_rec,
-    so its contribution is reduced.
-    """
-    if fec_k is None or fec_n is None or fec_n == 0:
-        return fec_rec  # fallback if values are not available
-
-    redundancy = fec_n - fec_k
-    weight = 6.0 / (1 + redundancy)  # 6 makes 8/12 fec neutral
+def adjust_fec_recovered(fec_rec, fec_k_val, fec_n_val):
+    if fec_k_val is None or fec_n_val is None or fec_n_val == 0:
+        return fec_rec
+    redundancy = fec_n_val - fec_k_val
+    weight = 6.0 / (1 + redundancy)
     return fec_rec * weight
 
-def calculate_link():
-    global best_rssi, best_snr, lost_packets, fec_rec_packets, final_score, penalty, fec_change, keyframe_request_code, keyframe_request_remaining
 
-    # Start or override a keyframe request if necessary
+# ─── Main link calculation ───────────────────────────────────────────────────
+
+def calculate_link():
+    global best_rssi, best_snr, min_rssi, lost_packets, fec_rec_packets
+    global final_score, penalty
+    global keyframe_request_code, keyframe_request_remaining
+
+    # Keyframe request on packet loss
     if lost_packets > 0 and allow_idr:
         keyframe_request_code = ''.join(random.choices(string.ascii_lowercase, k=4))
         keyframe_request_remaining = idr_max_messages
         if verbose_mode:
             print(f"Generated new keyframe request code: {keyframe_request_code}")
 
+    # Kalman-filtered noise estimation for penalty
     if all_packets == 0 or num_antennas == 0:
         filtered_noise = 0
-        error_ratio = 0
     else:
-        # Adjust the fec_rec_packets contribution based on FEC settings
         adjusted_fec_rec = adjust_fec_recovered(fec_rec_packets, fec_k, fec_n)
-        # Now calculate the error ratio with the adjusted fec recovery value
         error_ratio = (5 * lost_packets + adjusted_fec_rec) / (all_packets / num_antennas)
-        filtered_noise = kalman_filter_update(error_ratio)
+        filtered_noise = kalman.update(error_ratio)
 
-    if verbose_mode:
-        print(f"\nRaw noise ratio: {error_ratio:.3f}\nFiltered noise ratio: {filtered_noise:.3f}")
-
-    # Normalize SNR and RSSI to a 0-1 scale.
-    snr_normalized = max(0, min(1, (best_snr - SNR_MIN) / (SNR_MAX - SNR_MIN)))
-    rssi_normalized = max(0, min(1, (best_rssi - RSSI_MIN) / (RSSI_MAX - RSSI_MIN)))
-    score_normalized = (snr_weight * snr_normalized) + (rssi_weight * rssi_normalized)
-    raw_score = 1000 + score_normalized * 1000
-
-    # Penalty logic based on noise estimation
-    if filtered_noise < min_noise:
-        deduction_ratio = 0.0
-    else:
-        deduction_ratio = min(((filtered_noise - min_noise) / (max_noise - min_noise)) ** deduction_exponent, 1.0)
-
-    final_score = 1000 + (raw_score - 1000) * (1 - deduction_ratio) if allow_penalty else raw_score
-    penalty = (final_score - raw_score) if allow_penalty else 0
-
-    # FEC change logic  
-    fec_change = (
-        0 if not allow_fec_increase or filtered_noise <= min_noise_for_fec_change else  
-        5 if filtered_noise >= noise_for_max_fec_change else  
-        int(round(((filtered_noise - min_noise_for_fec_change) / (max_noise - min_noise_for_fec_change)) * 5))  
+    # Compute multi-factor score
+    raw_score = profile_selector.compute_score(
+        best_rssi, best_snr, min_rssi,
+        all_packets, lost_packets, fec_rec_packets,
+        fec_k, fec_n, num_antennas
     )
 
-    if verbose_mode:
-        print(f"Noise triggered fec_change: {fec_change}, penalty: {penalty:.3f}")
+    # Optional noise penalty
+    if allow_penalty and filtered_noise >= min_noise:
+        deduction_ratio = min(((filtered_noise - min_noise) / (max_noise - min_noise)) ** deduction_exponent, 1.0)
+        raw_score = 1000 + (raw_score - 1000) * (1 - deduction_ratio)
 
-    generate_message()
+    final_score = raw_score
+
+    if verbose_mode:
+        print(f"Score: {final_score:.0f} | RSSI: {best_rssi} | SNR: {best_snr} | "
+              f"Lost: {lost_packets} | FEC rec: {fec_rec_packets}")
+
+    # Run profile selection
+    changed, idx, profile = profile_selector.select(final_score)
+
+    if changed and verbose_mode and profile is not None:
+        print(f">>> Profile change: idx={idx} mcs={profile['mcs']} "
+              f"bitrate={profile['bitrate']} fec={profile['fec_k']}/{profile['fec_n']}")
+
+    # Always send current profile — UDP is lossy, so repeating ensures
+    # the drone converges even if messages are dropped. The drone's
+    # delta detection prevents redundant command execution.
+    cur_idx = profile_selector.current_profile_idx
+    cur_prof = profile_selector.current_profile
+    if cur_prof is not None:
+        generate_profile_message(cur_idx, cur_prof)
+
+
+
+# ─── wfb-ng stats handling ───────────────────────────────────────────────────
 
 def connect_to_server(host, port):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -190,23 +518,15 @@ def connect_to_server(host, port):
     print(f"\nReceiving wfb-ng stats from {host}:{port}")
     return sock
 
-def print_video_metrics(rx_mcs):
-    print("\nReceiving_video:", receiving_video)
-    print(f"MCS: {rx_mcs} | fec_k: {fec_k} | fec_n: {fec_n}\n")
-    print(f"Num_antennas: {num_antennas} | Best_rssi: {best_rssi} | Best_snr: {best_snr}")
-    print("\nall_packets:", all_packets)
-    print("avg packets per antenna:", (all_packets / num_antennas) if num_antennas > 0 else 0)
-    print("Fec_rec:", fec_rec_packets)
-    print("Lost:", lost_packets)
 
 def handle_video_rx_stats(data):
-    global best_rssi, best_snr, all_packets, fec_rec_packets, lost_packets
-    global fec_k, fec_n, receiving_video, num_antennas, waiting_for_video_printed, video_rx_initial_message_printed
+    global best_rssi, best_snr, min_rssi, all_packets, fec_rec_packets, lost_packets
+    global fec_k, fec_n, receiving_video, num_antennas
+    global waiting_for_video_printed, video_rx_initial_message_printed
     global keyframe_request_code, keyframe_request_remaining
 
     packets = data.get("packets", {})
     all_packets = packets.get("all", [0])[0]
-    # Determine if we're receiving video
     receiving_video = (all_packets != 0)
 
     fec_rec_packets = packets.get("fec_rec", [0])[0]
@@ -221,26 +541,23 @@ def handle_video_rx_stats(data):
 
     best_rssi = -101
     best_snr = 0
-    rx_mcs = 0
+    min_rssi = 0
     for ant in rx_ant_stats:
         rssi = ant.get("rssi_avg")
         snr = ant.get("snr_avg")
-        mcs_val = ant.get("mcs")
-        if rssi is not None and rssi > best_rssi:
-            best_rssi = rssi
+        if rssi is not None:
+            if rssi > best_rssi:
+                best_rssi = rssi
+            if min_rssi == 0 or rssi < min_rssi:
+                min_rssi = rssi
         if snr is not None and snr > best_snr:
             best_snr = snr
-        if mcs_val is not None and mcs_val > rx_mcs:
-            rx_mcs = mcs_val
 
     if receiving_video:
-        # When video transmission starts, trigger a keyframe request.
-        # This block runs only on the first video stat update after a period of no video.
         if not video_rx_initial_message_printed:
             print("\nReceiving video_rx stats\nWorking...")
             video_rx_initial_message_printed = True
 
-            # Always request a keyframe when video starts
             keyframe_request_code = ''.join(random.choices(string.ascii_lowercase, k=4))
             keyframe_request_remaining = idr_max_messages
             if verbose_mode:
@@ -248,13 +565,12 @@ def handle_video_rx_stats(data):
 
         waiting_for_video_printed = False
         calculate_link()
-        if verbose_mode:
-            print_video_metrics(rx_mcs)
     else:
         video_rx_initial_message_printed = False
         if not waiting_for_video_printed:
             print("\nWaiting for video_rx stats...")
             waiting_for_video_printed = True
+
 
 def process_data_line(line):
     try:
@@ -262,10 +578,10 @@ def process_data_line(line):
     except json.JSONDecodeError:
         return None
 
+
 def listen_for_data(sock):
     global waiting_for_video_printed
     waiting_for_video_printed = False
-    # Wrap the file object usage in a try block to ensure proper cleanup
     try:
         with sock.makefile() as f:
             for line in f:
@@ -283,8 +599,8 @@ def listen_for_data(sock):
         if verbose_mode:
             print(f"Error processing data: {e}")
 
+
 def connect_to_wfb_stats():
-    # Use the JSON data settings (HOST and PORT) from config
     while True:
         sock = None
         try:
@@ -297,15 +613,17 @@ def connect_to_wfb_stats():
                 sock.close()
             time.sleep(3)
 
+
+# ─── Main ────────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="xlink_gs")
+    parser = argparse.ArgumentParser(description="alink_gs - Ground Station Adaptive Link Controller")
     parser.add_argument('--verbose', action='store_true', help='Enable verbose mode for logging')
     parser.add_argument('--config', type=str, default='/etc/alink_gs.conf',
                         help='Path to configuration file (default: /etc/alink_gs.conf)')
     args = parser.parse_args()
     verbose_mode = args.verbose
 
-    # Load configuration from the specified file
     config = load_configuration(args.config)
 
     # Outgoing settings (UDP)
@@ -316,49 +634,47 @@ if __name__ == "__main__":
     HOST = config.get('json', 'HOST')
     PORT = config.getint('json', 'PORT')
 
-    # Weights
-    snr_weight = config.getfloat('weights', 'snr_weight')
-    rssi_weight = config.getfloat('weights', 'rssi_weight')
-
-    # Ranges for SNR and RSSI
-    SNR_MIN = config.getint('ranges', 'SNR_MIN')
-    SNR_MAX = config.getint('ranges', 'SNR_MAX')
-    RSSI_MIN = config.getint('ranges', 'RSSI_MIN')
-    RSSI_MAX = config.getint('ranges', 'RSSI_MAX')
-
     # Keyframe settings
     allow_idr = config.getboolean('keyframe', 'allow_idr')
     idr_max_messages = config.getint('keyframe', 'idr_max_messages')
 
-    # Dynamic refinement settings
+    # Dynamic refinement
     allow_penalty = config.getboolean('dynamic refinement', 'allow_penalty')
-    allow_fec_increase = config.getboolean('dynamic refinement', 'allow_fec_increase')
 
     # Noise and penalty parameters
     min_noise = config.getfloat('noise', 'min_noise')
     max_noise = config.getfloat('noise', 'max_noise')
     deduction_exponent = config.getfloat('noise', 'deduction_exponent')
-    min_noise_for_fec_change = config.getfloat('noise', 'min_noise_for_fec_change')
-    noise_for_max_fec_change = config.getfloat('noise', 'noise_for_max_fec_change')
 
-    # Error estimation parameters
-    kalman_estimate_default = config.getfloat('error estimation', 'kalman_estimate')
-    kalman_error_estimate_default = config.getfloat('error estimation', 'kalman_error_estimate')
-    process_variance = config.getfloat('error estimation', 'process_variance')
-    measurement_variance = config.getfloat('error estimation', 'measurement_variance')
+    # Load profiles
+    txprofiles_file = config.get('profile selection', 'txprofiles_file')
+    profiles = load_profiles(txprofiles_file)
+    if not profiles:
+        print(f"Warning: No profiles loaded from {txprofiles_file}")
+
+    # Initialize profile selector
+    profile_selector = ProfileSelector(profiles, config)
+
+    # Initialize Kalman filter
+    kalman = KalmanFilter(
+        estimate=config.getfloat('error estimation', 'kalman_estimate'),
+        error_estimate=config.getfloat('error estimation', 'kalman_error_estimate'),
+        process_variance=config.getfloat('error estimation', 'process_variance'),
+        measurement_variance=config.getfloat('error estimation', 'measurement_variance'),
+    )
 
     # Global state variables
-    best_rssi = None
-    best_snr = None
-    all_packets = None
-    fec_rec_packets = None
-    lost_packets = None
+    best_rssi = -101
+    best_snr = 0
+    min_rssi = 0
+    all_packets = 0
+    fec_rec_packets = 0
+    lost_packets = 0
     fec_k = None
     fec_n = None
-    receiving_video = None
-    num_antennas = None
+    receiving_video = False
+    num_antennas = 0
     penalty = 0
-    fec_change = 0
     final_score = 1000
     waiting_for_video_printed = False
     video_rx_initial_message_printed = False
@@ -366,10 +682,6 @@ if __name__ == "__main__":
     # Keyframe request globals
     keyframe_request_code = None
     keyframe_request_remaining = 0
-
-    # Kalman Filter variables for noise estimation – initialized from config values
-    kalman_estimate = kalman_estimate_default
-    kalman_error_estimate = kalman_error_estimate_default
 
     udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     connect_to_wfb_stats()

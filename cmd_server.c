@@ -28,11 +28,6 @@ static char *cmdsrv_handle_get(const char *command, const alink_config_t *cfg) {
         snprintf(result, sizeof(result), "%d", cfg->roi_focus_mode);
         return result;
 
-    } else if (strcmp(trimmed, "limit_max_score_to") == 0) {
-        static char result[6];
-        snprintf(result, sizeof(result), "%d", cfg->limit_max_score_to);
-        return result;
-
     } else {
         if (cfg->verbose_mode) {
             return "Unknown GET command";
@@ -97,24 +92,14 @@ static char *cmdsrv_handle_set(const char *command, const char *arg_str,
             }
         }
 
-        if (ps->selectedProfile != NULL) {
-            profile_apply(ps, ps->selectedProfile, osd);
+        if (ps->hasAppliedProfile) {
+            profile_apply(ps, &ps->lastAppliedProfile, osd);
             printf("Profile re-applied to update roi\n");
         }
 
         config_update_param("roi_focus_mode", roi_result);
 
         return roi_result;
-
-    } else if (strcmp(command, "limit_max_score_to") == 0) {
-        int val = atoi(arg_str);
-        if (val < 1000) val = 1000;
-        if (val > 2000) val = 2000;
-        cfg->limit_max_score_to = val;
-
-        snprintf(result, sizeof(result), "%d", cfg->limit_max_score_to);
-
-        return result;
 
     } else {
         if (cfg->verbose_mode) {
@@ -187,8 +172,8 @@ void *cmdsrv_thread_func(void *arg) {
                 pthread_mutex_unlock(ta->tx_power_mutex);
                 printf("alink: TX power updated to %d via command socket\n", v);
 
-                if (ta->cfg->use_0_to_4_txpower && ta->ps->selectedProfile != NULL) {
-                    profile_apply(ta->ps, ta->ps->selectedProfile, ta->osd);
+                if (ta->cfg->use_0_to_4_txpower && ta->ps->hasAppliedProfile) {
+                    profile_apply(ta->ps, &ta->ps->lastAppliedProfile, ta->osd);
                     printf("Profile re-applied to SET power to %d\n", v);
                 }
                 status = 0;

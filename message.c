@@ -1,42 +1,67 @@
 /**
  * @file message.c
- * @brief UDP heartbeat message parsing and processing.
+ * @brief UDP message parsing and processing.
+ *
+ * Handles "P:" profile messages from the GS. The GS sends the current
+ * profile on every tick for reliability; delta detection on the drone
+ * side avoids redundant command execution.
  */
 #include "message.h"
 #include "util.h"
-#include "rssi_monitor.h"
 
 void msg_init(msg_state_t *ms, profile_state_t *ps, keyframe_state_t *ks,
-              osd_state_t *osd, alink_config_t *cfg, rssi_state_t *rs,
+              osd_state_t *osd, alink_config_t *cfg,
               pthread_mutex_t *pause_mutex, volatile bool *paused) {
     memset(ms, 0, sizeof(*ms));
     ms->ps = ps;
     ms->ks = ks;
     ms->osd = osd;
     ms->cfg = cfg;
-    ms->rs = rs;
     ms->pause_mutex = pause_mutex;
     ms->paused = paused;
     ms->time_synced = false;
-    ms->num_antennas = 0;
-    ms->noise_pnlty = 0;
-    ms->fec_change = 0;
-    ms->prev_fec_change = 0;
-    ms->first_time = 1;
-    memset(&ms->last_fec_call_time, 0, sizeof(ms->last_fec_call_time));
 }
 
-void msg_process(msg_state_t *ms, const char *msg) {
-    profile_state_t *ps = ms->ps;
-    alink_config_t *cfg = ms->cfg;
+/**
+ * Handle time synchronization from a GS timestamp.
+ */
+static void msg_handle_time_sync(msg_state_t *ms, int transmitted_time) {
+    if (!ms->time_synced && transmitted_time > 0) {
+        struct timeval tv;
+        tv.tv_sec = transmitted_time;
+        tv.tv_usec = 0;
+        if (settimeofday(&tv, NULL) == 0) {
+            printf("System time synchronized with transmitted time: %ld\n", (long)transmitted_time);
+            ms->time_synced = true;
+        } else {
+            perror("Failed to set system time");
+        }
+    }
+}
 
+/**
+ * Handle an optional IDR code from the message.
+ */
+static void msg_handle_idr(msg_state_t *ms, const char *idr_code) {
+    if (idr_code[0] != '\0') {
+        char keyframe_request[64];
+        snprintf(keyframe_request, sizeof(keyframe_request),
+                 "special:request_keyframe:%s", idr_code);
+        keyframe_handle_special(ms->ks, keyframe_request, ms->cfg,
+                                ms->ps->prevSetGop,
+                                ms->paused, ms->pause_mutex);
+    }
+}
+
+/**
+ * Process a profile message: P:<index>:<GI>:<MCS>:<FecK>:<FecN>:<Bitrate>:<GOP>:<Power>:<ROIqp>:<Bandwidth>:<QpDelta>:<timestamp>[:<idr_code>]
+ */
+static void msg_process_profile(msg_state_t *ms, const char *msg) {
+    Profile profile;
+    memset(&profile, 0, sizeof(profile));
+
+    int profile_index = 0;
     int transmitted_time = 0;
-    int link_value_rssi = FALLBACK_SCORE;
-    int link_value_snr = FALLBACK_SCORE;
-    int recovered = 0;
-    int lost_packets = 0;
-    int rssi1 = -105;
-    int snr1 = 0;
     char idr_code[16] = "";
 
     char *msgCopy = strdup(msg);
@@ -51,38 +76,44 @@ void msg_process(msg_state_t *ms, const char *msg) {
     while (token != NULL) {
         switch (index) {
             case 0:
-                transmitted_time = atoi(token);
+                profile_index = atoi(token);
                 break;
             case 1:
-                link_value_rssi = atoi(token);
+                strncpy(profile.setGI, token, sizeof(profile.setGI) - 1);
+                profile.setGI[sizeof(profile.setGI) - 1] = '\0';
                 break;
             case 2:
-                link_value_snr = atoi(token);
+                profile.setMCS = atoi(token);
                 break;
             case 3:
-                recovered = atoi(token);
+                profile.setFecK = atoi(token);
                 break;
             case 4:
-                lost_packets = atoi(token);
+                profile.setFecN = atoi(token);
                 break;
             case 5:
-                rssi1 = atoi(token);
+                profile.setBitrate = atoi(token);
                 break;
             case 6:
-                snr1 = atoi(token);
+                profile.setGop = atof(token);
                 break;
             case 7:
-                ms->num_antennas = atoi(token);
+                profile.wfbPower = atoi(token);
                 break;
             case 8:
-                ms->noise_pnlty = atoi(token);
-                ps->noise_pnlty = ms->noise_pnlty;
+                strncpy(profile.ROIqp, token, sizeof(profile.ROIqp) - 1);
+                profile.ROIqp[sizeof(profile.ROIqp) - 1] = '\0';
                 break;
             case 9:
-                ms->fec_change = atoi(token);
-                ps->fec_change = ms->fec_change;
+                profile.bandwidth = atoi(token);
                 break;
             case 10:
+                profile.setQpDelta = atoi(token);
+                break;
+            case 11:
+                transmitted_time = atoi(token);
+                break;
+            case 12:
                 strncpy(idr_code, token, sizeof(idr_code) - 1);
                 idr_code[sizeof(idr_code) - 1] = '\0';
                 break;
@@ -95,61 +126,23 @@ void msg_process(msg_state_t *ms, const char *msg) {
 
     free(msgCopy);
 
-    /* Request a keyframe if an idr_code is provided */
-    if (idr_code[0] != '\0') {
-        char keyframe_request[64];
-        snprintf(keyframe_request, sizeof(keyframe_request), "special:request_keyframe:%s", idr_code);
-        keyframe_handle_special(ms->ks, keyframe_request, cfg, ps->prevSetGop,
-                                ms->paused, ms->pause_mutex);
-    }
+    msg_handle_idr(ms, idr_code);
+    msg_handle_time_sync(ms, transmitted_time);
 
-    struct timeval current_time;
-    gettimeofday(&current_time, NULL);
-
-    if (ms->first_time) {
-        ms->last_fec_call_time = current_time;
-        ms->first_time = 0;
-    }
-
-    long elapsed_ms = util_elapsed_ms_timeval(&current_time, &ms->last_fec_call_time);
-
-    if (cfg->allow_dynamic_fec && ms->fec_change != ms->prev_fec_change && elapsed_ms >= cfg->fec_reaction_delay_ms) {
-        profile_apply_fec_bitrate(ps, ps->prevSetFecK, ps->prevSetFecN, ps->prevSetBitrate);
-        ms->last_fec_call_time = current_time;
-        ms->prev_fec_change = ms->fec_change;
-    }
-
-    /* Create OSD string with ground station stats */
-    int num_antennas_drone = rssi_get_num_antennas_drone(ms->rs);
-    if (num_antennas_drone > 0) {
-        sprintf(ms->osd->gs_stats, "rssi%d snr%d fec%d lost%d ants:vrx%d,vtx%d",
-                rssi1, snr1, recovered, lost_packets, ms->num_antennas, num_antennas_drone);
-    } else {
-        sprintf(ms->osd->gs_stats, "rssi%d snr%d fec%d lost%d ants:vrx%d",
-                rssi1, snr1, recovered, lost_packets, ms->num_antennas);
-    }
-
-    /* Time synchronization */
-    if (!ms->time_synced) {
-        if (transmitted_time > 0) {
-            struct timeval tv;
-            tv.tv_sec = transmitted_time;
-            tv.tv_usec = 0;
-            if (settimeofday(&tv, NULL) == 0) {
-                printf("System time synchronized with transmitted time: %ld\n", (long)transmitted_time);
-                ms->time_synced = true;
-            } else {
-                perror("Failed to set system time");
-            }
-        }
-    }
-
-    /* Start selection if not paused */
+    /* Apply profile if not paused */
     pthread_mutex_lock(ms->pause_mutex);
     if (!*(ms->paused)) {
-        profile_start_selection(ps, link_value_rssi, link_value_snr, recovered, ms->osd);
+        profile_apply_direct(ms->ps, &profile, profile_index, ms->osd);
     } else {
         printf("Adaptive mode paused, waiting for resume command...\n");
     }
     pthread_mutex_unlock(ms->pause_mutex);
+}
+
+void msg_process(msg_state_t *ms, const char *msg) {
+    if (msg[0] == 'P' && msg[1] == ':') {
+        msg_process_profile(ms, msg + 2);
+    } else {
+        printf("Unknown message format: %.20s...\n", msg);
+    }
 }

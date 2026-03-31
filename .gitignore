@@ -1,3 +1,4 @@
 .claude
 *.o
 alink_drone
+__pycache__/

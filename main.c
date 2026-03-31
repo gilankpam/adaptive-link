@@ -69,7 +69,6 @@ int main(int argc, char *argv[]) {
 
     /* Load configuration */
     config_load(&daemon.cfg, CONFIG_FILE);
-    config_load_profiles(&daemon.cfg, PROFILE_FILE);
 
     /* Network setup */
     struct sockaddr_in server_addr, client_addr;
@@ -128,7 +127,7 @@ int main(int argc, char *argv[]) {
 
     /* Initialize message processor */
     msg_init(&daemon.ms, &daemon.ps, &daemon.ks, &daemon.osd, &daemon.cfg,
-             &daemon.rs, &daemon.pause_mutex, &daemon.paused);
+             &daemon.pause_mutex, &daemon.paused);
 
     /* Create UDP socket for incoming messages */
     if ((daemon.sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {

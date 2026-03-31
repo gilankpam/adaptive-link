@@ -1,6 +1,9 @@
 /**
  * @file fallback.c
  * @brief Message counting and fallback trigger thread.
+ *
+ * When no GS heartbeat is received within fallback_ms, applies the
+ * fallback profile defined in alink.conf.
  */
 #include "fallback.h"
 
@@ -18,8 +21,8 @@ void *fallback_thread_func(void *arg) {
 
         pthread_mutex_lock(ta->pause_mutex);
         if (*(ta->initialized) && local_count == 0 && !*(ta->paused)) {
-            printf("No messages received in %dms, sending 999\n", ta->cfg->fallback_ms);
-            profile_start_selection(ta->ps, FALLBACK_SCORE, SCORE_RANGE_BASE, 0, ta->osd);
+            printf("No messages received in %dms, applying fallback profile\n", ta->cfg->fallback_ms);
+            profile_apply_direct(ta->ps, &ta->cfg->fallback_profile, 0, ta->osd);
         } else {
             if (ta->cfg->verbose_mode) {
                 printf("Messages per %dms: %d\n", ta->cfg->fallback_ms, local_count);

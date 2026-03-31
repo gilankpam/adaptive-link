@@ -1,6 +1,6 @@
 /**
  * @file config.c
- * @brief Configuration loading for alink.conf and txprofiles.conf.
+ * @brief Configuration loading for alink.conf.
  */
 #include "config.h"
 #include "util.h"
@@ -13,30 +13,19 @@ void config_set_defaults(alink_config_t *cfg) {
     cfg->use_0_to_4_txpower = 0;
     cfg->power_level_0_to_4 = 0;
 
-    cfg->rssi_weight = 0.5f;
-    cfg->snr_weight = 0.5f;
-    cfg->hold_fallback_mode_s = 2;
-    cfg->hold_modes_down_s = 2;
-    cfg->hold_fallback_mode_ms = -1; /* -1 = not set, derive from _s */
-    cfg->hold_modes_down_ms = -1;
-    cfg->min_between_changes_ms = 100;
-    cfg->hysteresis_percent = 15;
-    cfg->hysteresis_percent_down = 5;
-    cfg->smoothing_factor = 0.5f;
-    cfg->smoothing_factor_down = 0.8f;
-    cfg->ema_fast_alpha = 0.5f;
-    cfg->ema_slow_alpha = 0.15f;
-    cfg->predict_multi = 1.0f;
-    cfg->fast_downgrade = true;
-    cfg->upward_confidence_loops = 3;
-    cfg->limit_max_score_to = 2000;
     cfg->fallback_ms = 1000;
-    cfg->baseline_value = 100;
 
-    cfg->allow_dynamic_fec = 1;
-    cfg->fec_k_adjust = 0;
-    cfg->spike_fix_dynamic_fec = 1;
-    cfg->fec_reaction_delay_ms = 300;
+    /* Fallback profile defaults */
+    strncpy(cfg->fallback_profile.setGI, "long", sizeof(cfg->fallback_profile.setGI));
+    cfg->fallback_profile.setMCS = 1;
+    cfg->fallback_profile.setFecK = 8;
+    cfg->fallback_profile.setFecN = 12;
+    cfg->fallback_profile.setBitrate = 4096;
+    cfg->fallback_profile.setGop = 1.0f;
+    cfg->fallback_profile.wfbPower = 58;
+    strncpy(cfg->fallback_profile.ROIqp, "0,0,0,0", sizeof(cfg->fallback_profile.ROIqp));
+    cfg->fallback_profile.bandwidth = 20;
+    cfg->fallback_profile.setQpDelta = 0;
 
     cfg->allow_xtx_reduce_bitrate = 1;
     cfg->xtx_reduce_bitrate_factor = 0.5f;
@@ -55,8 +44,6 @@ void config_set_defaults(alink_config_t *cfg) {
     cfg->verbose_mode = false;
 
     strncpy(cfg->customOSD, "&L%d0&F%d&B &C tx&Wc", sizeof(cfg->customOSD));
-
-    cfg->num_profiles = 0;
 }
 
 int config_load(alink_config_t *cfg, const char *filename) {
@@ -83,58 +70,40 @@ int config_load(alink_config_t *cfg, const char *filename) {
                 cfg->use_0_to_4_txpower = atoi(value);
             } else if (strcmp(key, "power_level_0_to_4") == 0) {
                 cfg->power_level_0_to_4 = atoi(value);
-            } else if (strcmp(key, "rssi_weight") == 0) {
-                cfg->rssi_weight = atof(value);
-            } else if (strcmp(key, "snr_weight") == 0) {
-                cfg->snr_weight = atof(value);
-            } else if (strcmp(key, "hold_fallback_mode_s") == 0) {
-                cfg->hold_fallback_mode_s = atoi(value);
-            } else if (strcmp(key, "hold_modes_down_s") == 0) {
-                cfg->hold_modes_down_s = atoi(value);
-            } else if (strcmp(key, "hold_fallback_mode_ms") == 0) {
-                cfg->hold_fallback_mode_ms = atoi(value);
-            } else if (strcmp(key, "hold_modes_down_ms") == 0) {
-                cfg->hold_modes_down_ms = atoi(value);
-            } else if (strcmp(key, "min_between_changes_ms") == 0) {
-                cfg->min_between_changes_ms = atoi(value);
-            } else if (strcmp(key, "request_keyframe_interval_ms") == 0) {
-                cfg->request_keyframe_interval_ms = atoi(value);
             } else if (strcmp(key, "fallback_ms") == 0) {
                 cfg->fallback_ms = atoi(value);
+            } else if (strcmp(key, "fallback_gi") == 0) {
+                strncpy(cfg->fallback_profile.setGI, value, sizeof(cfg->fallback_profile.setGI) - 1);
+                cfg->fallback_profile.setGI[sizeof(cfg->fallback_profile.setGI) - 1] = '\0';
+            } else if (strcmp(key, "fallback_mcs") == 0) {
+                cfg->fallback_profile.setMCS = atoi(value);
+            } else if (strcmp(key, "fallback_feck") == 0) {
+                cfg->fallback_profile.setFecK = atoi(value);
+            } else if (strcmp(key, "fallback_fecn") == 0) {
+                cfg->fallback_profile.setFecN = atoi(value);
+            } else if (strcmp(key, "fallback_bitrate") == 0) {
+                cfg->fallback_profile.setBitrate = atoi(value);
+            } else if (strcmp(key, "fallback_gop") == 0) {
+                cfg->fallback_profile.setGop = atof(value);
+            } else if (strcmp(key, "fallback_power") == 0) {
+                cfg->fallback_profile.wfbPower = atoi(value);
+            } else if (strcmp(key, "fallback_roiqp") == 0) {
+                strncpy(cfg->fallback_profile.ROIqp, value, sizeof(cfg->fallback_profile.ROIqp) - 1);
+                cfg->fallback_profile.ROIqp[sizeof(cfg->fallback_profile.ROIqp) - 1] = '\0';
+            } else if (strcmp(key, "fallback_bandwidth") == 0) {
+                cfg->fallback_profile.bandwidth = atoi(value);
+            } else if (strcmp(key, "fallback_qpdelta") == 0) {
+                cfg->fallback_profile.setQpDelta = atoi(value);
+            } else if (strcmp(key, "request_keyframe_interval_ms") == 0) {
+                cfg->request_keyframe_interval_ms = atoi(value);
             } else if (strcmp(key, "idr_every_change") == 0) {
                 cfg->idr_every_change = atoi(value);
             } else if (strcmp(key, "allow_request_keyframe") == 0) {
                 cfg->allow_request_keyframe = atoi(value);
             } else if (strcmp(key, "get_card_info_from_yaml") == 0) {
                 cfg->get_card_info_from_yaml = atoi(value);
-            } else if (strcmp(key, "allow_dynamic_fec") == 0) {
-                cfg->allow_dynamic_fec = atoi(value);
-            } else if (strcmp(key, "fec_k_adjust") == 0) {
-                cfg->fec_k_adjust = atoi(value);
-            } else if (strcmp(key, "spike_fix_dynamic_fec") == 0) {
-                cfg->spike_fix_dynamic_fec = atoi(value);
-            } else if (strcmp(key, "fec_reaction_delay_ms") == 0) {
-                cfg->fec_reaction_delay_ms = atoi(value);
             } else if (strcmp(key, "allow_rq_kf_by_tx_d") == 0) {
                 cfg->allow_rq_kf_by_tx_d = atoi(value);
-            } else if (strcmp(key, "hysteresis_percent") == 0) {
-                cfg->hysteresis_percent = atoi(value);
-            } else if (strcmp(key, "hysteresis_percent_down") == 0) {
-                cfg->hysteresis_percent_down = atoi(value);
-            } else if (strcmp(key, "exp_smoothing_factor") == 0) {
-                cfg->smoothing_factor = atof(value);
-            } else if (strcmp(key, "exp_smoothing_factor_down") == 0) {
-                cfg->smoothing_factor_down = atof(value);
-            } else if (strcmp(key, "ema_fast_alpha") == 0) {
-                cfg->ema_fast_alpha = atof(value);
-            } else if (strcmp(key, "ema_slow_alpha") == 0) {
-                cfg->ema_slow_alpha = atof(value);
-            } else if (strcmp(key, "predict_multi") == 0) {
-                cfg->predict_multi = atof(value);
-            } else if (strcmp(key, "fast_downgrade") == 0) {
-                cfg->fast_downgrade = atoi(value);
-            } else if (strcmp(key, "upward_confidence_loops") == 0) {
-                cfg->upward_confidence_loops = atoi(value);
             } else if (strcmp(key, "roi_focus_mode") == 0) {
                 cfg->roi_focus_mode = atoi(value);
             } else if (strcmp(key, "allow_spike_fix_fps") == 0) {
@@ -173,8 +142,6 @@ int config_load(alink_config_t *cfg, const char *filename) {
                 strncpy(cfg->customOSD, value, sizeof(cfg->customOSD));
             } else {
                 fprintf(stderr, "Warning: Unrecognized configuration key: %s\n", key);
-                osd_error("Adaptive-Link: Check/update /etc/alink.conf");
-                exit(EXIT_FAILURE);
             }
         } else if (strlen(line) > 1 && line[0] != '\n') {
             fprintf(stderr, "Error: Invalid configuration format: %s\n", line);
@@ -183,50 +150,6 @@ int config_load(alink_config_t *cfg, const char *filename) {
         }
     }
 
-    fclose(file);
-
-    /* Derive ms hold timers from _s values if not explicitly set */
-    if (cfg->hold_fallback_mode_ms < 0)
-        cfg->hold_fallback_mode_ms = cfg->hold_fallback_mode_s * 1000;
-    if (cfg->hold_modes_down_ms < 0)
-        cfg->hold_modes_down_ms = cfg->hold_modes_down_s * 1000;
-
-    return 0;
-}
-
-int config_load_profiles(alink_config_t *cfg, const char *filename) {
-    FILE *file = fopen(filename, "r");
-    if (!file) {
-        fprintf(stderr, "Problem loading %s: ", filename);
-        osd_error("Adaptive-Link: Check /etc/txprofiles.conf");
-        perror("");
-        exit(1);
-    }
-
-    char line[256];
-    int i = 0;
-
-    while (fgets(line, sizeof(line), file) && i < MAX_PROFILES) {
-        char *comment = strchr(line, '#');
-        if (comment) *comment = '\0';
-
-        util_trim_whitespace(line);
-        util_normalize_whitespace(line);
-
-        if (*line == '\0') continue;
-
-        if (sscanf(line, "%d - %d %15s %d %d %d %d %f %d %15s %d %d",
-                   &cfg->profiles[i].rangeMin, &cfg->profiles[i].rangeMax, cfg->profiles[i].setGI,
-                   &cfg->profiles[i].setMCS, &cfg->profiles[i].setFecK, &cfg->profiles[i].setFecN,
-                   &cfg->profiles[i].setBitrate, &cfg->profiles[i].setGop, &cfg->profiles[i].wfbPower,
-                   cfg->profiles[i].ROIqp, &cfg->profiles[i].bandwidth, &cfg->profiles[i].setQpDelta) == 12) {
-            i++;
-        } else {
-            fprintf(stderr, "Malformed line ignored: %s\n", line);
-        }
-    }
-
-    cfg->num_profiles = i;
     fclose(file);
     return 0;
 }

@@ -74,8 +74,7 @@ void *osd_thread_func(void *arg) {
         int wfb_ch = hw_get_wlan0_channel();
 
         snprintf(os->extra_stats, sizeof(os->extra_stats),
-             "pnlt%d xtx%ld(%d)%s gs_idr%d [ch%d]",
-             ps->noise_pnlty,
+             "xtx%ld(%d)%s gs_idr%d [ch%d]",
              hw->global_total_tx_dropped,
              keyframe_get_total_xtx(ks),
              ps->bitrate_reduced ? "R" : "",

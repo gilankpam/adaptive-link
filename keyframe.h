@@ -11,6 +11,7 @@
 
 #include "alink_types.h"
 #include "config.h"
+#include "command.h"
 
 typedef struct {
     KeyframeRequest codes[MAX_CODES];
@@ -31,7 +32,8 @@ void keyframe_handle_special(keyframe_state_t *ks, const char *msg,
                              const alink_config_t *cfg,
                              float prevSetGop,
                              volatile bool *paused,
-                             pthread_mutex_t *pause_mutex);
+                             pthread_mutex_t *pause_mutex,
+                             const cmd_ctx_t *cmd);
 
 int keyframe_get_total(const keyframe_state_t *ks);
 int keyframe_get_total_xtx(const keyframe_state_t *ks);

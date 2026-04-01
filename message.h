@@ -23,13 +23,15 @@ typedef struct {
     alink_config_t *cfg;
     pthread_mutex_t *pause_mutex;
     volatile bool *paused;
+    const cmd_ctx_t *cmd;
 
     bool time_synced;
 } msg_state_t;
 
 void msg_init(msg_state_t *ms, profile_state_t *ps, keyframe_state_t *ks,
               osd_state_t *osd, alink_config_t *cfg,
-              pthread_mutex_t *pause_mutex, volatile bool *paused);
+              pthread_mutex_t *pause_mutex, volatile bool *paused,
+              const cmd_ctx_t *cmd);
 
 void msg_process(msg_state_t *ms, const char *msg);
 

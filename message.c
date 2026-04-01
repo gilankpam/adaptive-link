@@ -8,10 +8,12 @@
  */
 #include "message.h"
 #include "util.h"
+#include "command.h"
 
 void msg_init(msg_state_t *ms, profile_state_t *ps, keyframe_state_t *ks,
               osd_state_t *osd, alink_config_t *cfg,
-              pthread_mutex_t *pause_mutex, volatile bool *paused) {
+              pthread_mutex_t *pause_mutex, volatile bool *paused,
+              const cmd_ctx_t *cmd) {
     memset(ms, 0, sizeof(*ms));
     ms->ps = ps;
     ms->ks = ks;
@@ -19,6 +21,7 @@ void msg_init(msg_state_t *ms, profile_state_t *ps, keyframe_state_t *ks,
     ms->cfg = cfg;
     ms->pause_mutex = pause_mutex;
     ms->paused = paused;
+    ms->cmd = cmd;
     ms->time_synced = false;
 }
 
@@ -49,7 +52,8 @@ static void msg_handle_idr(msg_state_t *ms, const char *idr_code) {
                  "special:request_keyframe:%s", idr_code);
         keyframe_handle_special(ms->ks, keyframe_request, ms->cfg,
                                 ms->ps->prevSetGop,
-                                ms->paused, ms->pause_mutex);
+                                ms->paused, ms->pause_mutex,
+                                ms->cmd);
     }
 }
 

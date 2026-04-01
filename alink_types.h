@@ -25,8 +25,6 @@
 #include <math.h>
 #include <ctype.h>
 #include <limits.h>
-#include <sys/un.h>
-
 /* ─── Buffer and size constants ─── */
 #define MAX_COMMAND_SIZE  256
 #define BUFFER_SIZE       1024
@@ -42,7 +40,6 @@
 /* ─── File paths ─── */
 #define CONFIG_FILE              "/etc/alink.conf"
 #define PROFILE_FILE             "/etc/txprofiles.conf"
-#define ALINK_CMD_SOCKET_PATH    "/tmp/alink_cmd.sock"
 #define WFB_YAML                 "/etc/wfb.yaml"
 #define WIFI_ADAPTERS_YAML       "/etc/wlan_adapters.yaml"
 
@@ -96,22 +93,6 @@ typedef struct {
     char udp_out_ip[INET_ADDRSTRLEN];
     int udp_out_port;
 } osd_udp_config_t;
-
-/* ─── Command protocol header (for Unix socket IPC) ─── */
-struct __attribute__((packed)) alink_msg_hdr {
-    uint16_t cmd;   /* one of CMD_* */
-    uint16_t len;   /* length of payload in bytes */
-};
-
-/* ─── Command codes (for Unix socket IPC) ─── */
-enum {
-    CMD_SET_POWER      = 1,
-    CMD_GET_STATUS     = 2,
-    CMD_ANTENNA_STATS  = 3,
-    CMD_GET            = 4,
-    CMD_SET            = 5,
-    CMD_STATUS_REPLY   = 0x8000    /* OR'd into cmd for replies */
-};
 
 /* ─── Keyframe request tracking ─── */
 typedef struct {

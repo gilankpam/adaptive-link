@@ -43,13 +43,14 @@ typedef struct {
     /* Command templates */
     char fpsCommandTemplate[150];
     char powerCommandTemplate[100];
-    char qpDeltaCommandTemplate[150];
     char mcsCommandTemplate[100];
-    char bitrateCommandTemplate[150];
-    char gopCommandTemplate[100];
     char fecCommandTemplate[100];
-    char roiCommandTemplate[150];
-    char idrCommandTemplate[100];
+    /* IDR API command template - uses native HTTP client (no curl) */
+    char idrApiCommandTemplate[100];
+
+    /* Batched API command template - combines qpDelta, bitrate, gop, and roiQp */
+    /* Placeholders: {qpDelta}, {bitrate}, {gop}, {roiQp} */
+    char apiCommandTemplate[256];
 
     /* Custom OSD format string */
     char customOSD[64];
@@ -66,11 +67,5 @@ void config_set_defaults(alink_config_t *cfg);
  * Returns 0 on success.
  */
 int config_load(alink_config_t *cfg, const char *filename);
-
-/**
- * Update a single parameter in /etc/alink.conf using sed.
- * Returns the system() return value.
- */
-int config_update_param(const char *key, const char *value);
 
 #endif /* ALINK_CONFIG_H */

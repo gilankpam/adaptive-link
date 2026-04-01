@@ -124,20 +124,14 @@ int config_load(alink_config_t *cfg, const char *filename) {
                 strncpy(cfg->powerCommandTemplate, value, sizeof(cfg->powerCommandTemplate));
             } else if (strcmp(key, "fpsCommandTemplate") == 0) {
                 strncpy(cfg->fpsCommandTemplate, value, sizeof(cfg->fpsCommandTemplate));
-            } else if (strcmp(key, "qpDeltaCommandTemplate") == 0) {
-                strncpy(cfg->qpDeltaCommandTemplate, value, sizeof(cfg->qpDeltaCommandTemplate));
             } else if (strcmp(key, "mcsCommandTemplate") == 0) {
                 strncpy(cfg->mcsCommandTemplate, value, sizeof(cfg->mcsCommandTemplate));
-            } else if (strcmp(key, "bitrateCommandTemplate") == 0) {
-                strncpy(cfg->bitrateCommandTemplate, value, sizeof(cfg->bitrateCommandTemplate));
-            } else if (strcmp(key, "gopCommandTemplate") == 0) {
-                strncpy(cfg->gopCommandTemplate, value, sizeof(cfg->gopCommandTemplate));
             } else if (strcmp(key, "fecCommandTemplate") == 0) {
                 strncpy(cfg->fecCommandTemplate, value, sizeof(cfg->fecCommandTemplate));
-            } else if (strcmp(key, "roiCommandTemplate") == 0) {
-                strncpy(cfg->roiCommandTemplate, value, sizeof(cfg->roiCommandTemplate));
-            } else if (strcmp(key, "idrCommandTemplate") == 0) {
-                strncpy(cfg->idrCommandTemplate, value, sizeof(cfg->idrCommandTemplate));
+            } else if (strcmp(key, "idrApiCommandTemplate") == 0) {
+                strncpy(cfg->idrApiCommandTemplate, value, sizeof(cfg->idrApiCommandTemplate));
+            } else if (strcmp(key, "apiCommandTemplate") == 0) {
+                strncpy(cfg->apiCommandTemplate, value, sizeof(cfg->apiCommandTemplate));
             } else if (strcmp(key, "customOSD") == 0) {
                 strncpy(cfg->customOSD, value, sizeof(cfg->customOSD));
             } else {
@@ -152,12 +146,4 @@ int config_load(alink_config_t *cfg, const char *filename) {
 
     fclose(file);
     return 0;
-}
-
-int config_update_param(const char *key, const char *value) {
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd),
-             "sed -i 's/^%s=.*/%s=%s/' %s",
-             key, key, value, CONFIG_FILE);
-    return system(cmd);
 }

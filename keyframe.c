@@ -4,6 +4,8 @@
  */
 #include "keyframe.h"
 #include "util.h"
+#include "command.h"
+#include <string.h>
 
 void keyframe_init(keyframe_state_t *ks) {
     memset(ks, 0, sizeof(*ks));
@@ -87,9 +89,10 @@ void keyframe_handle_special(keyframe_state_t *ks, const char *msg,
                              const alink_config_t *cfg,
                              float prevSetGop,
                              volatile bool *paused,
-                             pthread_mutex_t *pause_mutex) {
+                             pthread_mutex_t *pause_mutex,
+                             const cmd_ctx_t *cmd) {
     const char *cleaned_msg = msg + 8;  /* Skip "special:" */
-    const char *idrCommand = cfg->idrCommandTemplate;
+    const char *idrApiCommand = cfg->idrApiCommandTemplate;
 
     /* We need a mutable copy to split at ':' */
     char msg_buf[256];
@@ -116,12 +119,18 @@ void keyframe_handle_special(keyframe_state_t *ks, const char *msg,
             if (!code_exists(ks, code, &current_time)) {
                 add_code(ks, code, &current_time);
 
-                char quotedCommand[BUFFER_SIZE];
-                snprintf(quotedCommand, sizeof(quotedCommand), "\"%s\"", idrCommand);
-                if (cfg->verbose_mode) {
-                    printf("Special: Requesting Keyframe for code: %s\n", code);
+                /* Parse the IDR API URL and use native HTTP client */
+                char host[64];
+                int port = 80;
+                char url_path[BUFFER_SIZE];
+                
+                if (util_parse_url(idrApiCommand, host, sizeof(host), &port, url_path, sizeof(url_path)) != 0) {
+                    printf("Failed to parse IDR API URL: %s\n", idrApiCommand);
+                } else {
+                    if (cmd_http_get(host, port, url_path, NULL, 0, cmd) != 0) {
+                        printf("IDR API request failed: %s:%d%s\n", host, port, url_path);
+                    }
                 }
-                if (system(quotedCommand) != 0) { printf("Command failed: %s\n", quotedCommand); }
                 ks->last_request_time = current_time;
                 ks->total_requests++;
             } else {

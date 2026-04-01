@@ -5,10 +5,14 @@
  * The GS selects profiles; the drone just applies them. This module
  * handles command execution ordering (upgrade vs downgrade) and
  * delta detection to avoid redundant commands.
+ * 
+ * Optimized to use native HTTP client for API calls (no curl) and
+ * fork/exec for shell commands (faster than system()).
  */
 #include "profile.h"
 #include "osd.h"
 #include "util.h"
+#include <string.h>
 
 void profile_init(profile_state_t *ps, alink_config_t *cfg,
                   hw_state_t *hw, cmd_ctx_t *cmd) {
@@ -46,48 +50,58 @@ void profile_init(profile_state_t *ps, alink_config_t *cfg,
     ps->cmd = cmd;
 }
 
-void profile_apply_fec_bitrate(profile_state_t *ps, int new_fec_k, int new_fec_n, int new_bitrate) {
+void profile_apply_fec(profile_state_t *ps, int new_fec_k, int new_fec_n) {
     char fecCommand[MAX_COMMAND_SIZE];
-    char bitrateCommand[MAX_COMMAND_SIZE];
     alink_config_t *cfg = ps->cfg;
 
-    if (new_bitrate > ps->old_bitrate) {
-        const char *fecKeys[] = { "fecK", "fecN" };
-        char strFecK[10], strFecN[10];
-        snprintf(strFecK, sizeof(strFecK), "%d", new_fec_k);
-        snprintf(strFecN, sizeof(strFecN), "%d", new_fec_n);
-        const char *fecValues[] = { strFecK, strFecN };
-        cmd_format(fecCommand, sizeof(fecCommand), cfg->fecCommandTemplate, 2, fecKeys, fecValues);
-        cmd_exec(ps->cmd, fecCommand);
-        ps->old_fec_k = new_fec_k;
-        ps->old_fec_n = new_fec_n;
+    const char *fecKeys[] = { "fecK", "fecN" };
+    char strFecK[10], strFecN[10];
+    snprintf(strFecK, sizeof(strFecK), "%d", new_fec_k);
+    snprintf(strFecN, sizeof(strFecN), "%d", new_fec_n);
+    const char *fecValues[] = { strFecK, strFecN };
+    cmd_format(fecCommand, sizeof(fecCommand), cfg->fecCommandTemplate, 2, fecKeys, fecValues);
+    cmd_exec(ps->cmd, fecCommand);
+    ps->old_fec_k = new_fec_k;
+    ps->old_fec_n = new_fec_n;
+}
 
-        const char *brKeys[] = { "bitrate" };
-        char strBitrate[12];
-        snprintf(strBitrate, sizeof(strBitrate), "%d", new_bitrate);
-        const char *brValues[] = { strBitrate };
-        cmd_format(bitrateCommand, sizeof(bitrateCommand), cfg->bitrateCommandTemplate, 1, brKeys, brValues);
-        cmd_exec(ps->cmd, bitrateCommand);
-        ps->old_bitrate = new_bitrate;
-    } else {
-        const char *brKeys[] = { "bitrate" };
-        char strBitrate[12];
-        snprintf(strBitrate, sizeof(strBitrate), "%d", new_bitrate);
-        const char *brValues[] = { strBitrate };
-        cmd_format(bitrateCommand, sizeof(bitrateCommand), cfg->bitrateCommandTemplate, 1, brKeys, brValues);
-        cmd_exec(ps->cmd, bitrateCommand);
-        ps->old_bitrate = new_bitrate;
-
-        const char *fecKeys[] = { "fecK", "fecN" };
-        char strFecK[10], strFecN[10];
-        snprintf(strFecK, sizeof(strFecK), "%d", new_fec_k);
-        snprintf(strFecN, sizeof(strFecN), "%d", new_fec_n);
-        const char *fecValues[] = { strFecK, strFecN };
-        cmd_format(fecCommand, sizeof(fecCommand), cfg->fecCommandTemplate, 2, fecKeys, fecValues);
-        cmd_exec(ps->cmd, fecCommand);
-        ps->old_fec_k = new_fec_k;
-        ps->old_fec_n = new_fec_n;
+/**
+ * Build and execute a batched API command using native HTTP client.
+ * Combines qpDelta, bitrate, gop, and roiQp into a single HTTP request.
+ * 
+ * @param cfg Configuration with apiCommandTemplate
+ * @param qpDelta QP delta value
+ * @param bitrate Bitrate value
+ * @param gop GOP size
+ * @param roiQp ROI QP values
+ * @param cmd Command context for execution
+ * @return 0 on success, non-zero on failure
+ */
+int profile_apply_api_batch(const alink_config_t *cfg,
+                                   int qpDelta, int bitrate, float gop, const char *roiQp,
+                                   const cmd_ctx_t *cmd) {
+    char path[MAX_COMMAND_SIZE];
+    char qpDeltaStr[16], bitrateStr[16], gopStr[16];
+    
+    snprintf(qpDeltaStr, sizeof(qpDeltaStr), "%d", qpDelta);
+    snprintf(bitrateStr, sizeof(bitrateStr), "%d", bitrate);
+    snprintf(gopStr, sizeof(gopStr), "%.1f", gop);
+    
+    const char *keys[] = { "qpDelta", "bitrate", "gop", "roiQp" };
+    const char *values[] = { qpDeltaStr, bitrateStr, gopStr, roiQp };
+    
+    cmd_format(path, sizeof(path), cfg->apiCommandTemplate, 4, keys, values);
+    
+    /* Parse the URL to extract host, port, and path */
+    char host[64];
+    int port = 80;
+    char url_path[MAX_COMMAND_SIZE];
+    
+    if (util_parse_url(path, host, sizeof(host), &port, url_path, sizeof(url_path)) != 0) {
+        return -1;
     }
+    
+    return cmd_http_get(host, port, url_path, NULL, 0, cmd);
 }
 
 /*
@@ -101,11 +115,8 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
 
     char powerCommand[MAX_COMMAND_SIZE];
     char fpsCommand[MAX_COMMAND_SIZE];
-    char qpDeltaCommand[MAX_COMMAND_SIZE];
     char mcsCommand[MAX_COMMAND_SIZE];
-    char gopCommand[MAX_COMMAND_SIZE];
-    char roiCommand[MAX_COMMAND_SIZE];
-    const char *idrCommand = cfg->idrCommandTemplate;
+    const char *idrApiCommand = cfg->idrApiCommandTemplate;
 
     uint64_t now = util_now_ms();
     long timeElapsed = (long)((now - ps->prevTimeStamp) / 1000);
@@ -134,13 +145,6 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
 
     /* --- Build commands --- */
     {
-        const char *keys[] = { "qpDelta" };
-        char strQpDelta[10];
-        snprintf(strQpDelta, sizeof(strQpDelta), "%d", currentQpDelta);
-        const char *values[] = { strQpDelta };
-        cmd_format(qpDeltaCommand, sizeof(qpDeltaCommand), cfg->qpDeltaCommandTemplate, 1, keys, values);
-    }
-    {
         const char *keys[] = { "fps" };
         char strFPS[10];
         snprintf(strFPS, sizeof(strFPS), "%d", currentFPS);
@@ -162,13 +166,6 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
         cmd_format(powerCommand, sizeof(powerCommand), cfg->powerCommandTemplate, 1, keys, values);
     }
     {
-        const char *keys[] = { "gop" };
-        char strGop[10];
-        snprintf(strGop, sizeof(strGop), "%.1f", currentSetGop);
-        const char *values[] = { strGop };
-        cmd_format(gopCommand, sizeof(gopCommand), cfg->gopCommandTemplate, 1, keys, values);
-    }
-    {
         const char *keys[] = { "bandwidth", "gi", "stbc", "ldpc", "mcs" };
         char strBandwidth[10], strGI[10], strStbc[10], strLdpc[10], strMcs[10];
         snprintf(strBandwidth, sizeof(strBandwidth), "%d", currentBandwidth);
@@ -179,19 +176,10 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
         const char *values[] = { strBandwidth, strGI, strStbc, strLdpc, strMcs };
         cmd_format(mcsCommand, sizeof(mcsCommand), cfg->mcsCommandTemplate, 5, keys, values);
     }
-    {
-        const char *keys[] = { "roiQp" };
-        const char *values[] = { currentROIqp };
-        cmd_format(roiCommand, sizeof(roiCommand), cfg->roiCommandTemplate, 1, keys, values);
-    }
 
     /* --- Execute commands (ordering depends on direction) --- */
     if (job->currentProfile > job->previousProfile) {
         /* Upgrading: power before MCS */
-        if (currentQpDelta != ps->prevQpDelta) {
-            cmd_exec(ps->cmd, qpDeltaCommand);
-            ps->prevQpDelta = currentQpDelta;
-        }
         if (currentFPS != ps->prevFPS) {
             cmd_exec(ps->cmd, fpsCommand);
             ps->prevFPS = currentFPS;
@@ -199,10 +187,6 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
         if (cfg->allow_set_power && finalPower != ps->prevWfbPower) {
             cmd_exec(ps->cmd, powerCommand);
             ps->prevWfbPower = finalPower;
-        }
-        if (currentSetGop != ps->prevSetGop) {
-            cmd_exec(ps->cmd, gopCommand);
-            ps->prevSetGop = currentSetGop;
         }
         if (strcmp(currentSetGI, ps->prevSetGI) != 0 ||
             currentSetMCS != ps->prevSetMCS ||
@@ -212,38 +196,57 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
             strcpy(ps->prevSetGI, currentSetGI);
             ps->prevSetMCS = currentSetMCS;
         }
-        if (currentSetFecK != ps->prevSetFecK || currentSetFecN != ps->prevSetFecN || currentSetBitrate != ps->prevSetBitrate) {
-            profile_apply_fec_bitrate(ps, currentSetFecK, currentSetFecN, currentSetBitrate);
-            ps->prevSetBitrate = currentSetBitrate;
+        /* Apply FEC changes (uses wfb_tx_cmd) */
+        if (currentSetFecK != ps->prevSetFecK || currentSetFecN != ps->prevSetFecN) {
+            profile_apply_fec(ps, currentSetFecK, currentSetFecN);
             ps->prevSetFecK = currentSetFecK;
             ps->prevSetFecN = currentSetFecN;
         }
-        if (cfg->roi_focus_mode && strcmp(currentROIqp, ps->prevROIqp) != 0) {
-            cmd_exec(ps->cmd, roiCommand);
-            strcpy(ps->prevROIqp, currentROIqp);
+        /* Batch all API calls (qpDelta, bitrate, gop, roiQp) into one HTTP request */
+        if (currentQpDelta != ps->prevQpDelta || currentSetBitrate != ps->prevSetBitrate ||
+            currentSetGop != ps->prevSetGop ||
+            (cfg->roi_focus_mode && strcmp(currentROIqp, ps->prevROIqp) != 0)) {
+            profile_apply_api_batch(cfg, currentQpDelta, currentSetBitrate, currentSetGop, currentROIqp, ps->cmd);
+            ps->prevQpDelta = currentQpDelta;
+            ps->prevSetBitrate = currentSetBitrate;
+            ps->prevSetGop = currentSetGop;
+            if (cfg->roi_focus_mode) {
+                strcpy(ps->prevROIqp, currentROIqp);
+            }
         }
         if (cfg->idr_every_change) {
-            cmd_exec(ps->cmd, idrCommand);
+            /* Parse the IDR API URL and use native HTTP client */
+            char host[64];
+            int port = 80;
+            char url_path[MAX_COMMAND_SIZE];
+            
+            if (util_parse_url(idrApiCommand, host, sizeof(host), &port, url_path, sizeof(url_path)) == 0) {
+                cmd_http_get(host, port, url_path, NULL, 0, ps->cmd);
+            }
         }
     } else {
         /* Downgrading: MCS/FEC before power */
-        if (currentQpDelta != ps->prevQpDelta) {
-            cmd_exec(ps->cmd, qpDeltaCommand);
-            ps->prevQpDelta = currentQpDelta;
-        }
         if (currentFPS != ps->prevFPS) {
             cmd_exec(ps->cmd, fpsCommand);
             ps->prevFPS = currentFPS;
         }
-        if (currentSetFecK != ps->prevSetFecK || currentSetFecN != ps->prevSetFecN || currentSetBitrate != ps->prevSetBitrate) {
-            profile_apply_fec_bitrate(ps, currentSetFecK, currentSetFecN, currentSetBitrate);
-            ps->prevSetBitrate = currentSetBitrate;
+        /* Apply FEC changes (uses wfb_tx_cmd) */
+        if (currentSetFecK != ps->prevSetFecK || currentSetFecN != ps->prevSetFecN) {
+            profile_apply_fec(ps, currentSetFecK, currentSetFecN);
             ps->prevSetFecK = currentSetFecK;
             ps->prevSetFecN = currentSetFecN;
         }
-        if (currentSetGop != ps->prevSetGop) {
-            cmd_exec(ps->cmd, gopCommand);
+        /* Batch all API calls (qpDelta, bitrate, gop, roiQp) into one HTTP request */
+        if (currentQpDelta != ps->prevQpDelta || currentSetBitrate != ps->prevSetBitrate ||
+            currentSetGop != ps->prevSetGop ||
+            (cfg->roi_focus_mode && strcmp(currentROIqp, ps->prevROIqp) != 0)) {
+            profile_apply_api_batch(cfg, currentQpDelta, currentSetBitrate, currentSetGop, currentROIqp, ps->cmd);
+            ps->prevQpDelta = currentQpDelta;
+            ps->prevSetBitrate = currentSetBitrate;
             ps->prevSetGop = currentSetGop;
+            if (cfg->roi_focus_mode) {
+                strcpy(ps->prevROIqp, currentROIqp);
+            }
         }
         if (strcmp(currentSetGI, ps->prevSetGI) != 0 ||
             currentSetMCS != ps->prevSetMCS ||
@@ -257,12 +260,15 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
             cmd_exec(ps->cmd, powerCommand);
             ps->prevWfbPower = finalPower;
         }
-        if (cfg->roi_focus_mode && strcmp(currentROIqp, ps->prevROIqp) != 0) {
-            cmd_exec(ps->cmd, roiCommand);
-            strcpy(ps->prevROIqp, currentROIqp);
-        }
         if (cfg->idr_every_change) {
-            cmd_exec(ps->cmd, idrCommand);
+            /* Parse the IDR API URL and use native HTTP client */
+            char host[64];
+            int port = 80;
+            char url_path[MAX_COMMAND_SIZE];
+            
+            if (util_parse_url(idrApiCommand, host, sizeof(host), &port, url_path, sizeof(url_path)) == 0) {
+                cmd_http_get(host, port, url_path, NULL, 0, ps->cmd);
+            }
         }
     }
 

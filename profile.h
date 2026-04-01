@@ -86,7 +86,19 @@ void profile_apply_direct(profile_state_t *ps, const Profile *profile,
  */
 void profile_apply(profile_state_t *ps, Profile *profile, void *osd);
 
-void profile_apply_fec_bitrate(profile_state_t *ps, int fec_k, int fec_n, int bitrate);
+/**
+ * Apply FEC parameters using wfb_tx_cmd.
+ * Only handles FEC (fecK, fecN) - bitrate is handled via batched API.
+ */
+void profile_apply_fec(profile_state_t *ps, int fec_k, int fec_n);
+
+/**
+ * Apply batched API call for qpDelta, bitrate, gop, and roiQp.
+ * Used by tx_monitor for bitrate reduction/restore.
+ */
+int profile_apply_api_batch(const alink_config_t *cfg,
+                            int qpDelta, int bitrate, float gop, const char *roiQp,
+                            const cmd_ctx_t *cmd);
 
 /* Async worker thread entry point */
 void *profile_worker_func(void *arg);

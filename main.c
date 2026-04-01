@@ -16,7 +16,6 @@
 #include "rssi_monitor.h"
 #include "tx_monitor.h"
 #include "message.h"
-#include "cmd_server.h"
 #include "fallback.h"
 
 typedef struct {
@@ -127,7 +126,7 @@ int main(int argc, char *argv[]) {
 
     /* Initialize message processor */
     msg_init(&daemon.ms, &daemon.ps, &daemon.ks, &daemon.osd, &daemon.cfg,
-             &daemon.pause_mutex, &daemon.paused);
+             &daemon.pause_mutex, &daemon.paused, &daemon.cmd);
 
     /* Create UDP socket for incoming messages */
     if ((daemon.sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
@@ -149,22 +148,6 @@ int main(int argc, char *argv[]) {
     }
 
     printf("Listening on UDP port %d, IP: %s...\n", port, ip);
-
-    /* Start command listener thread */
-    cmdsrv_thread_arg_t cmdsrv_arg = {
-        .cfg = &daemon.cfg,
-        .ps = &daemon.ps,
-        .hw = &daemon.hw,
-        .rs = &daemon.rs,
-        .osd = &daemon.osd,
-        .tx_power_mutex = &daemon.tx_power_mutex,
-        .pause_mutex = &daemon.pause_mutex,
-        .paused = &daemon.paused
-    };
-    pthread_t alink_cmd_thread;
-    if (pthread_create(&alink_cmd_thread, NULL, cmdsrv_thread_func, &cmdsrv_arg) != 0) {
-        fprintf(stderr, "failed to start air_man command listener thread\n");
-    }
 
     /* Determine power factor and load tables if required */
     if (!daemon.cfg.use_0_to_4_txpower) {
@@ -304,7 +287,8 @@ int main(int argc, char *argv[]) {
             if (strncmp(message, "special:", 8) == 0) {
                 keyframe_handle_special(&daemon.ks, message, &daemon.cfg,
                                         daemon.ps.prevSetGop,
-                                        &daemon.paused, &daemon.pause_mutex);
+                                        &daemon.paused, &daemon.pause_mutex,
+                                        &daemon.cmd);
             } else {
                 msg_process(&daemon.ms, message);
             }

@@ -17,6 +17,47 @@ import string
 import configparser
 import math
 
+# ─── 802.11n MCS reference tables (single spatial stream) ────────────────────
+
+# Minimum SNR (dB) required for each MCS index
+MCS_SNR_THRESHOLDS = [5, 8, 11, 14, 17, 20, 23, 26]
+
+# PHY data rates in Mbps: [long_gi, short_gi]
+PHY_RATES_20MHZ = [
+    (6.5, 7.2),       # MCS 0 — BPSK 1/2
+    (13.0, 14.4),      # MCS 1 — QPSK 1/2
+    (19.5, 21.7),      # MCS 2 — QPSK 3/4
+    (26.0, 28.9),      # MCS 3 — 16-QAM 1/2
+    (39.0, 43.3),      # MCS 4 — 16-QAM 3/4
+    (52.0, 57.8),      # MCS 5 — 64-QAM 2/3
+    (58.5, 65.0),      # MCS 6 — 64-QAM 3/4
+    (65.0, 72.2),      # MCS 7 — 64-QAM 5/6
+]
+
+PHY_RATES_40MHZ = [
+    (13.5, 15.0),      # MCS 0
+    (27.0, 30.0),      # MCS 1
+    (40.5, 45.0),      # MCS 2
+    (54.0, 60.0),      # MCS 3
+    (81.0, 90.0),      # MCS 4
+    (108.0, 120.0),    # MCS 5
+    (121.5, 135.0),    # MCS 6
+    (135.0, 150.0),    # MCS 7
+]
+
+# Default FEC (fec_k, fec_n) per MCS level — smaller blocks at low MCS for
+# fast recovery, larger blocks at high MCS for efficiency.
+FEC_TABLE = [
+    (2, 3),    # MCS 0
+    (2, 3),    # MCS 1
+    (4, 6),    # MCS 2
+    (6, 9),    # MCS 3
+    (8, 12),   # MCS 4
+    (8, 12),   # MCS 5
+    (10, 12),  # MCS 6
+    (10, 12),  # MCS 7
+]
+
 # ─── Default configuration ───────────────────────────────────────────────────
 
 DEFAULT_CONFIG = """# adaptive-link VRX settings
@@ -78,6 +119,25 @@ predict_multi = 1.0
 fast_downgrade = True
 upward_confidence_loops = 3
 limit_max_score_to = 2000
+dynamic_mode = False
+
+[dynamic]
+snr_safety_margin = 3
+snr_ema_alpha = 0.3
+loss_margin_weight = 20
+fec_margin_weight = 5
+max_mcs = 7
+short_gi_snr_margin = 5
+loss_threshold_for_fec_downgrade = 0.05
+utilization_factor = 0.45
+max_bitrate = 30000
+min_bitrate = 2000
+max_power = 45
+min_power = 30
+bandwidth = 20
+gop = 10
+qp_delta = -12
+roi_qp = 0,0,0,0
 """
 
 REQUIRED_SECTIONS = {
@@ -219,6 +279,33 @@ class ProfileSelector:
         self.up_confidence_count = 0
         self.up_target_profile = -1
 
+        # Dynamic mode
+        self.dynamic_mode = config.getboolean(ps, 'dynamic_mode', fallback=False)
+        if self.dynamic_mode:
+            d = 'dynamic'
+            self.snr_safety_margin = config.getfloat(d, 'snr_safety_margin')
+            self.snr_ema_alpha = config.getfloat(d, 'snr_ema_alpha')
+            self.loss_margin_weight = config.getfloat(d, 'loss_margin_weight')
+            self.fec_margin_weight = config.getfloat(d, 'fec_margin_weight')
+            self.dyn_max_mcs = config.getint(d, 'max_mcs')
+            self.short_gi_snr_margin = config.getfloat(d, 'short_gi_snr_margin')
+            self.loss_threshold_for_fec_downgrade = config.getfloat(d, 'loss_threshold_for_fec_downgrade')
+            self.utilization_factor = config.getfloat(d, 'utilization_factor')
+            self.dyn_max_bitrate = config.getint(d, 'max_bitrate')
+            self.dyn_min_bitrate = config.getint(d, 'min_bitrate')
+            self.dyn_max_power = config.getint(d, 'max_power')
+            self.dyn_min_power = config.getint(d, 'min_power')
+            self.dyn_bandwidth = config.getint(d, 'bandwidth')
+            self.dyn_gop = config.getfloat(d, 'gop')
+            self.dyn_qp_delta = config.getint(d, 'qp_delta')
+            self.dyn_roi_qp = config.get(d, 'roi_qp')
+
+        # SNR EMA state (used in dynamic mode)
+        self.snr_ema = 0.0
+        self.snr_ema_initialized = False
+        self._current_loss_rate = 0.0
+        self._current_fec_pressure = 0.0
+
         # Packet delta tracking
         self.prev_all_packets = 0
         self.prev_lost_packets = 0
@@ -236,6 +323,65 @@ class ProfileSelector:
             if p['range_min'] <= score <= p['range_max']:
                 return i, p
         return None, None
+
+    def _compute_power(self, mcs):
+        """Scale TX power inversely with MCS level."""
+        pw_range = self.dyn_max_power - self.dyn_min_power
+        if mcs <= 1:
+            return self.dyn_max_power
+        elif mcs <= 3:
+            return self.dyn_max_power - pw_range // 3
+        elif mcs <= 5:
+            return self.dyn_min_power + pw_range // 3
+        else:
+            return self.dyn_min_power
+
+    def _compute_profile(self):
+        """Dynamically compute profile parameters from link metrics."""
+        snr = self.snr_ema
+        loss_rate = self._current_loss_rate
+        fec_pressure = self._current_fec_pressure
+
+        # Dynamic safety margin — widens when link is stressed
+        margin = (self.snr_safety_margin +
+                  loss_rate * self.loss_margin_weight +
+                  fec_pressure * self.fec_margin_weight)
+
+        # MCS selection: highest where SNR exceeds threshold + margin
+        mcs = 0
+        for m in range(min(7, self.dyn_max_mcs), -1, -1):
+            if snr >= MCS_SNR_THRESHOLDS[m] + margin:
+                mcs = m
+                break
+
+        # Guard interval: short only when SNR margin is comfortable
+        snr_above = snr - MCS_SNR_THRESHOLDS[mcs]
+        use_short_gi = (snr_above >= self.short_gi_snr_margin and
+                        loss_rate < 0.02 and fec_pressure < 0.3)
+
+        # FEC: base from MCS table, increase redundancy under loss
+        fec_k, fec_n = FEC_TABLE[mcs]
+        if loss_rate > self.loss_threshold_for_fec_downgrade:
+            fec_k = max(2, fec_k - 2)
+
+        # Bitrate: derived from PHY rate, FEC efficiency, utilization
+        phy_rates = PHY_RATES_40MHZ if self.dyn_bandwidth == 40 else PHY_RATES_20MHZ
+        phy_rate = phy_rates[mcs][1 if use_short_gi else 0]
+        bitrate = int(phy_rate * 1000 * (fec_k / fec_n) * self.utilization_factor)
+        bitrate = max(self.dyn_min_bitrate, min(self.dyn_max_bitrate, bitrate))
+
+        return {
+            'gi': 'short' if use_short_gi else 'long',
+            'mcs': mcs,
+            'fec_k': fec_k,
+            'fec_n': fec_n,
+            'bitrate': bitrate,
+            'gop': self.dyn_gop,
+            'power': self._compute_power(mcs),
+            'roi_qp': self.dyn_roi_qp,
+            'bandwidth': self.dyn_bandwidth,
+            'qp_delta': self.dyn_qp_delta,
+        }
 
     def compute_score(self, best_rssi, best_snr, min_rssi,
                       all_packets, lost_packets, fec_rec,
@@ -279,6 +425,17 @@ class ProfileSelector:
         self.prev_all_packets = all_packets
         self.prev_lost_packets = lost_packets
         self.prev_fec_rec = fec_rec
+
+        # Track SNR and condition metrics for dynamic mode
+        if self.dynamic_mode:
+            if not self.snr_ema_initialized:
+                self.snr_ema = best_snr
+                self.snr_ema_initialized = True
+            else:
+                self.snr_ema = (self.snr_ema_alpha * best_snr +
+                                (1.0 - self.snr_ema_alpha) * self.snr_ema)
+            self._current_loss_rate = loss_rate
+            self._current_fec_pressure = self._clamp(fec_pressure, 0, 1)
 
         return 1000 + combined * 1000
 
@@ -337,14 +494,21 @@ class ProfileSelector:
                 self._try_confidence_feed(combined_value)
             return False, self.current_profile_idx, self.current_profile
 
-        # Profile lookup
-        new_idx, new_profile = self._lookup_profile(combined_value)
-        if new_idx is None:
-            return False, self.current_profile_idx, self.current_profile
+        # Profile determination
+        if self.dynamic_mode:
+            new_profile = self._compute_profile()
+            new_idx = new_profile['mcs']
+        else:
+            new_idx, new_profile = self._lookup_profile(combined_value)
+            if new_idx is None:
+                return False, self.current_profile_idx, self.current_profile
 
         if new_idx == self.current_profile_idx:
             self.up_confidence_count = 0
             self.up_target_profile = -1
+            # In dynamic mode, update profile params even if MCS unchanged
+            if self.dynamic_mode:
+                self.current_profile = new_profile
             return False, self.current_profile_idx, self.current_profile
 
         # Direction
@@ -387,7 +551,11 @@ class ProfileSelector:
 
     def _try_confidence_feed(self, combined_value):
         """Feed the confidence counter even when hysteresis isn't met."""
-        new_idx, _ = self._lookup_profile(combined_value)
+        if self.dynamic_mode:
+            new_profile = self._compute_profile()
+            new_idx = new_profile['mcs']
+        else:
+            new_idx, _ = self._lookup_profile(combined_value)
         if new_idx is not None and new_idx != self.current_profile_idx and new_idx > self.current_profile_idx:
             if new_idx != self.up_target_profile:
                 self.up_target_profile = new_idx
@@ -490,15 +658,21 @@ def calculate_link():
     final_score = raw_score
 
     if verbose_mode:
-        print(f"Score: {final_score:.0f} | RSSI: {best_rssi} | SNR: {best_snr} | "
-              f"Lost: {lost_packets} | FEC rec: {fec_rec_packets}")
+        msg = (f"Score: {final_score:.0f} | RSSI: {best_rssi} | SNR: {best_snr} | "
+               f"Lost: {lost_packets} | FEC rec: {fec_rec_packets}")
+        if profile_selector.dynamic_mode:
+            msg += (f" | SNR_EMA: {profile_selector.snr_ema:.1f} | "
+                    f"loss: {profile_selector._current_loss_rate:.3f} | "
+                    f"fec_p: {profile_selector._current_fec_pressure:.2f}")
+        print(msg)
 
     # Run profile selection
     changed, idx, profile = profile_selector.select(final_score)
 
     if changed and verbose_mode and profile is not None:
         print(f">>> Profile change: idx={idx} mcs={profile['mcs']} "
-              f"bitrate={profile['bitrate']} fec={profile['fec_k']}/{profile['fec_n']}")
+              f"bitrate={profile['bitrate']} fec={profile['fec_k']}/{profile['fec_n']} "
+              f"gi={profile['gi']} power={profile['power']}")
 
     # Always send current profile — UDP is lossy, so repeating ensures
     # the drone converges even if messages are dropped. The drone's
@@ -646,11 +820,16 @@ if __name__ == "__main__":
     max_noise = config.getfloat('noise', 'max_noise')
     deduction_exponent = config.getfloat('noise', 'deduction_exponent')
 
-    # Load profiles
-    txprofiles_file = config.get('profile selection', 'txprofiles_file')
-    profiles = load_profiles(txprofiles_file)
-    if not profiles:
-        print(f"Warning: No profiles loaded from {txprofiles_file}")
+    # Load profiles (optional in dynamic mode)
+    dynamic_mode = config.getboolean('profile selection', 'dynamic_mode', fallback=False)
+    profiles = []
+    if not dynamic_mode:
+        txprofiles_file = config.get('profile selection', 'txprofiles_file')
+        profiles = load_profiles(txprofiles_file)
+        if not profiles:
+            print(f"Warning: No profiles loaded from {txprofiles_file}")
+    else:
+        print("Dynamic profile calculation enabled — txprofiles.conf not required")
 
     # Initialize profile selector
     profile_selector = ProfileSelector(profiles, config)

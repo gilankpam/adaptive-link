@@ -1,43 +1,31 @@
-CC      ?= gcc
-CFLAGS  ?= -std=c99 -Wall -Wextra -Werror -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE
-OPT     ?=
-LDFLAGS  = -lm -lpthread -rdynamic
+# Adaptive-Link Root Makefile
+# Delegates to sub-project Makefiles
 
-SRC = main.c util.c config.c hardware.c command.c http_client.c profile.c osd.c \
-      keyframe.c rssi_monitor.c tx_monitor.c message.c fallback.c
-OBJ = $(SRC:.c=.o)
-BIN = alink_drone
+.PHONY: all clean test test-c test-python drone ground-station
 
-# Unity test framework
-UNITY_DIR = test/unity
-UNITY_SRC = $(UNITY_DIR)/src/unity.c
-UNITY_INC = $(UNITY_DIR)/src
+all: drone
 
-# Test sources
-TEST_SRC = test/test_util.c
-TEST_BIN = test/test_util
+# Build drone daemon
+drone:
+	$(MAKE) -C drone
 
-.PHONY: all clean test test-util
+# Ground station is Python - no build needed
+ground-station:
+	@echo "Ground station is Python - no build required"
+	@python3 -m py_compile ground-station/alink_gs
 
-all: $(BIN)
+# Run all tests
+test: test-c test-python
 
-$(BIN): $(OBJ)
-	$(CC) $(OBJ) $(OPT) $(LDFLAGS) -o $@
+# Run C tests
+test-c:
+	$(MAKE) -C drone test
 
-%.o: %.c Makefile
-	$(CC) -c $< $(CFLAGS) $(OPT) -o $@
+# Run Python tests
+test-python:
+	python3 -m unittest discover -s test/python -v
 
+# Clean all
 clean:
-	rm -f $(OBJ) $(BIN)
-	rm -f $(TEST_BIN)
-
-# Test targets
-test: $(TEST_BIN)
-	./$(TEST_BIN)
-
-test-util: $(TEST_BIN)
-	./$(TEST_BIN)
-
-$(TEST_BIN): $(TEST_SRC) util.c $(UNITY_SRC)
-	$(CC) -I. -I$(UNITY_INC) $(CFLAGS) $(OPT) $(TEST_SRC) util.c $(UNITY_SRC) \
-		$(LDFLAGS) -ldl -o $@
+	$(MAKE) -C drone clean
+	rm -f test/test_util

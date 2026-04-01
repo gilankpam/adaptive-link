@@ -1,4 +1,32 @@
-.claude
+# Build artifacts
 *.o
+*.out
 alink_drone
+test/test_util
+
+# Python
 __pycache__/
+*.pyc
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+tmp/
+
+# Drone build artifacts
+drone/src/*.o
+drone/alink_drone

@@ -146,15 +146,6 @@ void cmd_format(char *dest, size_t dest_size, const char *tmpl,
     dest[dest_size-1] = '\0';
 }
 
-void cmd_exec_noquote(const cmd_ctx_t *ctx, const char *command) {
-    if (ctx->verbose) {
-        puts(command);
-    }
-
-    if (system(command) != 0) { printf("Command failed: %s\n", command); }
-    usleep(ctx->pace_exec_us);
-}
-
 int cmd_exec_with_timeout(const cmd_ctx_t *ctx, const char *command) {
     int result = exec_with_timeout(command, ctx->exec_timeout_ms, ctx->verbose);
     if (ctx->pace_exec_us > 0) {
@@ -176,17 +167,4 @@ int cmd_http_get(const char *host, int port, const char *path,
     }
     
     return result;
-}
-
-void cmd_exec(const cmd_ctx_t *ctx, const char *command) {
-    char quotedCommand[BUFFER_SIZE];
-    snprintf(quotedCommand, sizeof(quotedCommand), "\"%s\"", command);
-    if (ctx->verbose) {
-        puts(quotedCommand);
-    }
-    if (system(quotedCommand) != 0) { printf("Command failed: %s\n", quotedCommand); }
-    if (ctx->verbose) {
-        printf("Waiting %ldms\n", ctx->pace_exec_us / 1000);
-    }
-    usleep(ctx->pace_exec_us);
 }

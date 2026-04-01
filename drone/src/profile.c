@@ -50,7 +50,7 @@ void profile_init(profile_state_t *ps, alink_config_t *cfg,
     ps->cmd = cmd;
 }
 
-void profile_apply_fec(profile_state_t *ps, int new_fec_k, int new_fec_n) {
+int profile_apply_fec(profile_state_t *ps, int new_fec_k, int new_fec_n) {
     char fecCommand[MAX_COMMAND_SIZE];
     alink_config_t *cfg = ps->cfg;
 
@@ -60,9 +60,13 @@ void profile_apply_fec(profile_state_t *ps, int new_fec_k, int new_fec_n) {
     snprintf(strFecN, sizeof(strFecN), "%d", new_fec_n);
     const char *fecValues[] = { strFecK, strFecN };
     cmd_format(fecCommand, sizeof(fecCommand), cfg->fecCommandTemplate, 2, fecKeys, fecValues);
-    cmd_exec(ps->cmd, fecCommand);
+    int result = cmd_exec_with_timeout(ps->cmd, fecCommand);
+    if (result != 0) {
+        fprintf(stderr, "FEC command failed: %s\n", fecCommand);
+    }
     ps->old_fec_k = new_fec_k;
     ps->old_fec_n = new_fec_n;
+    return result;
 }
 
 /**
@@ -181,24 +185,32 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
     if (job->currentProfile > job->previousProfile) {
         /* Upgrading: power before MCS */
         if (currentFPS != ps->prevFPS) {
-            cmd_exec(ps->cmd, fpsCommand);
+            if (cmd_exec_with_timeout(ps->cmd, fpsCommand) != 0) {
+                fprintf(stderr, "FPS command failed: %s\n", fpsCommand);
+            }
             ps->prevFPS = currentFPS;
         }
         if (cfg->allow_set_power && finalPower != ps->prevWfbPower) {
-            cmd_exec(ps->cmd, powerCommand);
+            if (cmd_exec_with_timeout(ps->cmd, powerCommand) != 0) {
+                fprintf(stderr, "Power command failed: %s\n", powerCommand);
+            }
             ps->prevWfbPower = finalPower;
         }
         if (strcmp(currentSetGI, ps->prevSetGI) != 0 ||
             currentSetMCS != ps->prevSetMCS ||
             currentBandwidth != ps->prevBandwidth) {
-            cmd_exec(ps->cmd, mcsCommand);
+            if (cmd_exec_with_timeout(ps->cmd, mcsCommand) != 0) {
+                fprintf(stderr, "MCS command failed: %s\n", mcsCommand);
+            }
             ps->prevBandwidth = currentBandwidth;
             strcpy(ps->prevSetGI, currentSetGI);
             ps->prevSetMCS = currentSetMCS;
         }
         /* Apply FEC changes (uses wfb_tx_cmd) */
         if (currentSetFecK != ps->prevSetFecK || currentSetFecN != ps->prevSetFecN) {
-            profile_apply_fec(ps, currentSetFecK, currentSetFecN);
+            if (profile_apply_fec(ps, currentSetFecK, currentSetFecN) != 0) {
+                fprintf(stderr, "Failed to apply FEC settings\n");
+            }
             ps->prevSetFecK = currentSetFecK;
             ps->prevSetFecN = currentSetFecN;
         }
@@ -206,7 +218,9 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
         if (currentQpDelta != ps->prevQpDelta || currentSetBitrate != ps->prevSetBitrate ||
             currentSetGop != ps->prevSetGop ||
             (cfg->roi_focus_mode && strcmp(currentROIqp, ps->prevROIqp) != 0)) {
-            profile_apply_api_batch(cfg, currentQpDelta, currentSetBitrate, currentSetGop, currentROIqp, ps->cmd);
+            if (profile_apply_api_batch(cfg, currentQpDelta, currentSetBitrate, currentSetGop, currentROIqp, ps->cmd) != 0) {
+                fprintf(stderr, "API batch command failed\n");
+            }
             ps->prevQpDelta = currentQpDelta;
             ps->prevSetBitrate = currentSetBitrate;
             ps->prevSetGop = currentSetGop;
@@ -221,18 +235,24 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
             char url_path[MAX_COMMAND_SIZE];
             
             if (util_parse_url(idrApiCommand, host, sizeof(host), &port, url_path, sizeof(url_path)) == 0) {
-                cmd_http_get(host, port, url_path, NULL, 0, ps->cmd);
+                if (cmd_http_get(host, port, url_path, NULL, 0, ps->cmd) != 0) {
+                    fprintf(stderr, "IDR command failed: %s\n", idrApiCommand);
+                }
             }
         }
     } else {
         /* Downgrading: MCS/FEC before power */
         if (currentFPS != ps->prevFPS) {
-            cmd_exec(ps->cmd, fpsCommand);
+            if (cmd_exec_with_timeout(ps->cmd, fpsCommand) != 0) {
+                fprintf(stderr, "FPS command failed: %s\n", fpsCommand);
+            }
             ps->prevFPS = currentFPS;
         }
         /* Apply FEC changes (uses wfb_tx_cmd) */
         if (currentSetFecK != ps->prevSetFecK || currentSetFecN != ps->prevSetFecN) {
-            profile_apply_fec(ps, currentSetFecK, currentSetFecN);
+            if (profile_apply_fec(ps, currentSetFecK, currentSetFecN) != 0) {
+                fprintf(stderr, "Failed to apply FEC settings\n");
+            }
             ps->prevSetFecK = currentSetFecK;
             ps->prevSetFecN = currentSetFecN;
         }
@@ -240,7 +260,9 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
         if (currentQpDelta != ps->prevQpDelta || currentSetBitrate != ps->prevSetBitrate ||
             currentSetGop != ps->prevSetGop ||
             (cfg->roi_focus_mode && strcmp(currentROIqp, ps->prevROIqp) != 0)) {
-            profile_apply_api_batch(cfg, currentQpDelta, currentSetBitrate, currentSetGop, currentROIqp, ps->cmd);
+            if (profile_apply_api_batch(cfg, currentQpDelta, currentSetBitrate, currentSetGop, currentROIqp, ps->cmd) != 0) {
+                fprintf(stderr, "API batch command failed\n");
+            }
             ps->prevQpDelta = currentQpDelta;
             ps->prevSetBitrate = currentSetBitrate;
             ps->prevSetGop = currentSetGop;
@@ -251,13 +273,17 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
         if (strcmp(currentSetGI, ps->prevSetGI) != 0 ||
             currentSetMCS != ps->prevSetMCS ||
             currentBandwidth != ps->prevBandwidth) {
-            cmd_exec(ps->cmd, mcsCommand);
+            if (cmd_exec_with_timeout(ps->cmd, mcsCommand) != 0) {
+                fprintf(stderr, "MCS command failed: %s\n", mcsCommand);
+            }
             ps->prevBandwidth = currentBandwidth;
             strcpy(ps->prevSetGI, currentSetGI);
             ps->prevSetMCS = currentSetMCS;
         }
         if (cfg->allow_set_power && finalPower != ps->prevWfbPower) {
-            cmd_exec(ps->cmd, powerCommand);
+            if (cmd_exec_with_timeout(ps->cmd, powerCommand) != 0) {
+                fprintf(stderr, "Power command failed: %s\n", powerCommand);
+            }
             ps->prevWfbPower = finalPower;
         }
         if (cfg->idr_every_change) {
@@ -267,7 +293,9 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
             char url_path[MAX_COMMAND_SIZE];
             
             if (util_parse_url(idrApiCommand, host, sizeof(host), &port, url_path, sizeof(url_path)) == 0) {
-                cmd_http_get(host, port, url_path, NULL, 0, ps->cmd);
+                if (cmd_http_get(host, port, url_path, NULL, 0, ps->cmd) != 0) {
+                    fprintf(stderr, "IDR command failed: %s\n", idrApiCommand);
+                }
             }
         }
     }

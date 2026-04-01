@@ -89,8 +89,13 @@ void profile_apply(profile_state_t *ps, Profile *profile, void *osd);
 /**
  * Apply FEC parameters using wfb_tx_cmd.
  * Only handles FEC (fecK, fecN) - bitrate is handled via batched API.
+ *
+ * @param ps Profile state
+ * @param fec_k FEC K value
+ * @param fec_n FEC N value
+ * @return 0 on success, non-zero on failure
  */
-void profile_apply_fec(profile_state_t *ps, int fec_k, int fec_n);
+int profile_apply_fec(profile_state_t *ps, int fec_k, int fec_n);
 
 /**
  * Apply batched API call for qpDelta, bitrate, gop, and roiQp.

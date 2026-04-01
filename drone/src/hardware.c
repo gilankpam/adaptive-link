@@ -4,6 +4,7 @@
  */
 #include "hardware.h"
 #include "util.h"
+#include "command.h"
 
 static int check_module_loaded(const char *module_name) {
     FILE *fp = fopen("/proc/modules", "r");
@@ -242,7 +243,7 @@ int hw_get_video_fps(void) {
     return fps;
 }
 
-int hw_setup_roi(const hw_state_t *hw) {
+int hw_setup_roi(const hw_state_t *hw, const cmd_ctx_t *ctx) {
     FILE *fp;
 
     int rounded_x_res = (int)floor(hw->x_res / 32) * 32;
@@ -292,10 +293,14 @@ int hw_setup_roi(const hw_state_t *hw) {
     enabled_status[strcspn(enabled_status, "\n")] = 0;
 
     if (strcmp(enabled_status, "true") != 0 && strcmp(enabled_status, "false") != 0) {
-        if (system("cli -s .fpv.enabled true") != 0) { printf("problem with reading fpv.enabled status\n"); }
+        if (cmd_exec_with_timeout(ctx, "cli -s .fpv.enabled true") != 0) {
+            printf("problem with reading fpv.enabled status\n");
+        }
     }
 
-    if (system(command) != 0) { printf("set ROI command failed\n"); }
+    if (cmd_exec_with_timeout(ctx, command) != 0) {
+        printf("set ROI command failed\n");
+    }
 
     char roi_qp_status[32];
     fp = popen("cli -g .fpv.roiQp", "r");
@@ -304,7 +309,7 @@ int hw_setup_roi(const hw_state_t *hw) {
         return 1;
     }
 
-    if (fgets(roi_qp_status, sizeof(roi_qp_status) - 1, fp) == NULL) { printf("fgets failed\n"); }
+    if (fgets(roi_qp_status, sizeof(roi_qp_status) - 1, fp) == NULL) { printf("fgets failed"); }
     pclose(fp);
 
     roi_qp_status[strcspn(roi_qp_status, "\n")] = 0;
@@ -317,7 +322,9 @@ int hw_setup_roi(const hw_state_t *hw) {
     }
 
     if (num_count != 4) {
-        if (system("cli -s .fpv.roiQp 0,0,0,0") != 0) { printf("Command failed\n"); }
+        if (cmd_exec_with_timeout(ctx, "cli -s .fpv.roiQp 0,0,0,0") != 0) {
+            printf("Command failed\n");
+        }
     }
 
     return 0;

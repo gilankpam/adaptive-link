@@ -69,7 +69,7 @@ adaptive-link/
 │       ├── util.c / util.h              # String helpers, time calculations, URL parsing
 │       ├── config.c / config.h          # alink.conf + txprofiles.conf parsing
 │       ├── hardware.c / hardware.h      # WiFi adapter, power tables, camera/video
-│       ├── command.c / command.h        # Template substitution, system() execution with timeout
+│       ├── command.c / command.h        # Template substitution, timeout execution via fork/exec
 │       ├── profile.c / profile.h        # Profile application only (selection moved to GS)
 │       ├── osd.c / osd.h                # OSD string assembly, display thread
 │       ├── keyframe.c / keyframe.h      # Keyframe request deduplication
@@ -291,6 +291,8 @@ idrCommandTemplate   = http_get localhost 80 /request/idr
 
 **Native HTTP client:** HTTP requests use `http_client.c` (socket-based) instead of curl, with `cmd_exec_with_timeout()` providing millisecond-precision timeout via fork/exec.
 
+**Command execution:** All shell commands use `cmd_exec_with_timeout()` for execution. The legacy `cmd_exec()` and `cmd_exec_noquote()` functions have been removed. Commands that exceed the timeout (default 500ms) are killed and return -1.
+
 This decouples the control logic from hardware-specific commands, making it adaptable to different camera/radio stacks.
 
 ---
@@ -393,6 +395,7 @@ The drone receives `P:` messages and applies profiles via `profile_apply_direct(
 
 5. Dispatch to async worker thread (non-blocking)
    - Apply commands in order: QpDelta → FPS → Power → GOP → MCS → FEC/Bitrate → ROI → IDR
+   - Execute via cmd_exec_with_timeout() (500ms default timeout)
    - Pace execution with configurable delays
    - Use native HTTP client for camera API requests
 ```
@@ -635,7 +638,7 @@ sudo ./scripts/install.sh drone remove
 
 ### Architecture
 
-1. **`system()` for command execution:** Most hardware control goes through `system()` calls with string-interpolated commands. This works but is fragile (shell injection risk if config values are not sanitized, no structured error handling from commands, subprocess overhead per call).
+1. **Command execution via fork/exec:** All shell commands use `cmd_exec_with_timeout()` with fork/exec and millisecond-precision timeout via select(). Commands that exceed the timeout (default 500ms) are killed. The legacy `cmd_exec()` and `cmd_exec_noquote()` functions have been removed.
 
 2. **One-directional communication:** The GS sends profiles to the drone, but the drone has no channel to send feedback to the GS (e.g., confirming profile changes, reporting TX drops). This limits coordination.
 

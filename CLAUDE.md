@@ -52,7 +52,7 @@ Module structure:
 - `util.c` — string/time helpers, URL parsing (`util_now_ms()`, `util_parse_url()`)
 - `config.c` — alink.conf and txprofiles.conf parsing (`alink_config_t`)
 - `hardware.c` — WiFi adapter, power tables, camera/video (`hw_state_t`)
-- `command.c` — template substitution, system() execution with timeout (`cmd_ctx_t`)
+- `command.c` — template substitution, timeout command execution via fork/exec (`cmd_ctx_t`)
 - `profile.c` — async profile application only (`profile_state_t`)
 - `osd.c` — OSD string assembly and output (`osd_state_t`)
 - `keyframe.c` — keyframe request deduplication (`keyframe_state_t`)
@@ -90,7 +90,7 @@ Settings are applied via shell commands with placeholder substitution (`{mcs}`, 
 
 **API batching:** The `apiCommandTemplate` batches multiple camera parameters (qpDelta, bitrate, gop, roiQp) into a single HTTP request for efficiency.
 
-**Timeout execution:** Commands use `cmd_exec_with_timeout()` with millisecond-precision timeout via fork/exec.
+**Timeout execution:** All commands use `cmd_exec_with_timeout()` with millisecond-precision timeout via fork/exec. The legacy `cmd_exec()` and `cmd_exec_noquote()` functions have been removed.
 
 ### Ground Station Algorithm
 
@@ -126,7 +126,8 @@ The GS implements the full adaptive link algorithm:
 - Two mutexes fully encapsulated in their modules (keyframe, rssi_monitor); two shared via `main.c`; one in `profile_state_t` for the async worker
 - Functions that can fail return `int` (0 = success) or pointer (`NULL` = failure)
 - String operations use bounded `strncpy` with explicit null termination
-- System commands executed via `cmd_exec_with_timeout()` after template placeholder substitution
+- System commands executed via `cmd_exec_with_timeout()` (fork/exec with timeout) after template placeholder substitution
+- Legacy `cmd_exec()` and `cmd_exec_noquote()` removed in favor of timeout-based execution
 - HTTP requests use native socket-based client (`http_client.c`) instead of curl
 - Compiled with `-Wall -Wextra -Werror`
 - Unity test framework for C unit tests in `test/c/`

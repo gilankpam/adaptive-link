@@ -138,6 +138,13 @@ bandwidth = 20
 gop = 10
 qp_delta = -12
 roi_qp = 0,0,0,0
+
+[telemetry]
+log_enabled = False
+log_dir = /var/log/alink
+log_rotate_mb = 50
+outcome_window_ticks = 10
+adapter_id = default
 """
 
 REQUIRED_SECTIONS = {
@@ -223,6 +230,140 @@ class KalmanFilter:
         return self.estimate
 
 
+# ─── Telemetry logger ────────────────────────────────────────────────────────
+
+class TelemetryLogger:
+    """Append-only JSONL telemetry logger for ML training data collection.
+
+    Logs one record per calculate_link() tick (~10Hz) with all link metrics,
+    scoring sub-components, and selected profile parameters. Includes outcome
+    labeling that tracks link quality in the ticks following a profile change.
+    """
+
+    def __init__(self, log_dir, rotate_mb=50, outcome_window=10):
+        self.log_dir = log_dir
+        self.rotate_bytes = rotate_mb * 1024 * 1024
+        self.outcome_window = outcome_window
+        self._file = None
+        self._file_size = 0
+        self._file_index = 0
+
+        # Outcome tracking: ring buffer of loss_rate after profile changes
+        self._outcome_ticks_remaining = 0
+        self._outcome_losses = []
+        self._outcome_change_record = None
+        self._pending_outcomes = []  # completed outcome labels to flush
+
+        os.makedirs(log_dir, exist_ok=True)
+        self._open_file()
+
+    def _log_path(self):
+        return os.path.join(self.log_dir, f"telemetry_{self._file_index}.jsonl")
+
+    def _open_file(self):
+        path = self._log_path()
+        if os.path.exists(path):
+            self._file_size = os.path.getsize(path)
+        else:
+            self._file_size = 0
+        self._file = open(path, 'a')
+
+    def _rotate_if_needed(self):
+        if self._file_size >= self.rotate_bytes:
+            self._file.close()
+            self._file_index += 1
+            self._open_file()
+
+    def _write_record(self, record):
+        line = json.dumps(record, separators=(',', ':')) + '\n'
+        self._file.write(line)
+        self._file.flush()
+        self._file_size += len(line.encode('utf-8'))
+        self._rotate_if_needed()
+
+    def log(self, timestamp_ms, best_rssi, best_snr, min_rssi, num_antennas,
+            all_packets, lost_packets, fec_rec_packets, fec_k, fec_n,
+            loss_rate, fec_pressure, rf_score, loss_score, fec_score,
+            diversity_score, combined_score, ema_fast, ema_slow, snr_ema,
+            profile, profile_changed, adapter_id='default'):
+        record = {
+            'ts': timestamp_ms,
+            'rssi': best_rssi,
+            'snr': best_snr,
+            'rssi_min': min_rssi,
+            'ant': num_antennas,
+            'pkt_all': all_packets,
+            'pkt_lost': lost_packets,
+            'pkt_fec': fec_rec_packets,
+            'fec_k': fec_k,
+            'fec_n': fec_n,
+            'loss_rate': round(loss_rate, 6),
+            'fec_pressure': round(fec_pressure, 4),
+            'rf_score': round(rf_score, 4),
+            'loss_score': round(loss_score, 4),
+            'fec_score': round(fec_score, 4),
+            'div_score': round(diversity_score, 4),
+            'score': round(combined_score, 1),
+            'ema_fast': round(ema_fast, 1),
+            'ema_slow': round(ema_slow, 1),
+            'snr_ema': round(snr_ema, 2),
+            'changed': profile_changed,
+            'adapter': adapter_id,
+        }
+        if profile is not None:
+            record['mcs'] = profile['mcs']
+            record['gi'] = profile['gi']
+            record['sel_fec_k'] = profile['fec_k']
+            record['sel_fec_n'] = profile['fec_n']
+            record['bitrate'] = profile['bitrate']
+            record['power'] = profile['power']
+
+        self._write_record(record)
+
+        # Outcome tracking
+        if profile_changed:
+            # Finalize any pending outcome window
+            self._finalize_outcome()
+            self._outcome_ticks_remaining = self.outcome_window
+            self._outcome_losses = []
+            self._outcome_change_record = {'ts': timestamp_ms}
+
+        if self._outcome_ticks_remaining > 0:
+            self._outcome_losses.append(loss_rate)
+            self._outcome_ticks_remaining -= 1
+            if self._outcome_ticks_remaining == 0:
+                self._finalize_outcome()
+
+    def _finalize_outcome(self):
+        if not self._outcome_losses or self._outcome_change_record is None:
+            return
+        avg_loss = sum(self._outcome_losses) / len(self._outcome_losses)
+        max_loss = max(self._outcome_losses)
+        if max_loss > 0.05:
+            label = 'bad'
+        elif avg_loss > 0.02:
+            label = 'marginal'
+        else:
+            label = 'good'
+        outcome = {
+            'type': 'outcome',
+            'change_ts': self._outcome_change_record['ts'],
+            'avg_loss': round(avg_loss, 6),
+            'max_loss': round(max_loss, 6),
+            'label': label,
+            'ticks': len(self._outcome_losses),
+        }
+        self._write_record(outcome)
+        self._outcome_change_record = None
+        self._outcome_losses = []
+
+    def close(self):
+        self._finalize_outcome()
+        if self._file:
+            self._file.close()
+            self._file = None
+
+
 # ─── Profile selector ────────────────────────────────────────────────────────
 
 class ProfileSelector:
@@ -305,6 +446,12 @@ class ProfileSelector:
         self.snr_ema_initialized = False
         self._current_loss_rate = 0.0
         self._current_fec_pressure = 0.0
+
+        # Sub-score tracking (for telemetry)
+        self._last_rf_score = 0.0
+        self._last_loss_score = 1.0
+        self._last_fec_score = 1.0
+        self._last_diversity_score = 1.0
 
         # Packet delta tracking
         self.prev_all_packets = 0
@@ -426,7 +573,14 @@ class ProfileSelector:
         self.prev_lost_packets = lost_packets
         self.prev_fec_rec = fec_rec
 
-        # Track SNR and condition metrics for dynamic mode
+        # Track sub-scores and condition metrics
+        self._last_rf_score = rf_score
+        self._last_loss_score = loss_score
+        self._last_fec_score = fec_score
+        self._last_diversity_score = diversity_score
+        self._current_loss_rate = loss_rate
+        self._current_fec_pressure = self._clamp(fec_pressure, 0, 1)
+
         if self.dynamic_mode:
             if not self.snr_ema_initialized:
                 self.snr_ema = best_snr
@@ -434,8 +588,6 @@ class ProfileSelector:
             else:
                 self.snr_ema = (self.snr_ema_alpha * best_snr +
                                 (1.0 - self.snr_ema_alpha) * self.snr_ema)
-            self._current_loss_rate = loss_rate
-            self._current_fec_pressure = self._clamp(fec_pressure, 0, 1)
 
         return 1000 + combined * 1000
 
@@ -674,6 +826,34 @@ def calculate_link():
               f"bitrate={profile['bitrate']} fec={profile['fec_k']}/{profile['fec_n']} "
               f"gi={profile['gi']} power={profile['power']}")
 
+    # Telemetry logging
+    if telemetry_logger is not None:
+        telemetry_logger.log(
+            timestamp_ms=int(time.monotonic() * 1000),
+            best_rssi=best_rssi,
+            best_snr=best_snr,
+            min_rssi=min_rssi,
+            num_antennas=num_antennas,
+            all_packets=all_packets,
+            lost_packets=lost_packets,
+            fec_rec_packets=fec_rec_packets,
+            fec_k=fec_k,
+            fec_n=fec_n,
+            loss_rate=profile_selector._current_loss_rate,
+            fec_pressure=profile_selector._current_fec_pressure,
+            rf_score=profile_selector._last_rf_score,
+            loss_score=profile_selector._last_loss_score,
+            fec_score=profile_selector._last_fec_score,
+            diversity_score=profile_selector._last_diversity_score,
+            combined_score=final_score,
+            ema_fast=profile_selector.ema_fast,
+            ema_slow=profile_selector.ema_slow,
+            snr_ema=profile_selector.snr_ema,
+            profile=profile,
+            profile_changed=changed,
+            adapter_id=telemetry_adapter_id,
+        )
+
     # Always send current profile — UDP is lossy, so repeating ensures
     # the drone converges even if messages are dropped. The drone's
     # delta detection prevents redundant command execution.
@@ -841,6 +1021,16 @@ if __name__ == "__main__":
         process_variance=config.getfloat('error estimation', 'process_variance'),
         measurement_variance=config.getfloat('error estimation', 'measurement_variance'),
     )
+
+    # Initialize telemetry logger
+    telemetry_logger = None
+    telemetry_adapter_id = config.get('telemetry', 'adapter_id', fallback='default')
+    if config.getboolean('telemetry', 'log_enabled', fallback=False):
+        log_dir = config.get('telemetry', 'log_dir', fallback='/var/log/alink')
+        rotate_mb = config.getint('telemetry', 'log_rotate_mb', fallback=50)
+        outcome_window = config.getint('telemetry', 'outcome_window_ticks', fallback=10)
+        telemetry_logger = TelemetryLogger(log_dir, rotate_mb, outcome_window)
+        print(f"Telemetry logging enabled: {log_dir}")
 
     # Global state variables
     best_rssi = -101

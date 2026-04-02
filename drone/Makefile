@@ -13,13 +13,13 @@ OBJ = $(addprefix $(SRC_DIR)/, $(SRC:.c=.o))
 BIN = alink_drone
 
 # Unity test framework
-UNITY_DIR = ../test/unity
+UNITY_DIR = test/unity
 UNITY_SRC = $(UNITY_DIR)/src/unity.c
 UNITY_INC = $(UNITY_DIR)/src
 
 # Test sources
-TEST_SRC = ../test/c/test_util.c
-TEST_BIN = ../test/test_util
+TEST_SRC = test/test_util.c
+TEST_BIN = test/test_util
 
 .PHONY: all clean test test-util
 

@@ -22,7 +22,7 @@ The build compiles 12 C source files into a single binary (in `drone/src/`). No 
 
 The project includes:
 - **Unity test framework** for C unit tests (`make test`)
-- **Python test suite** for ground station (`test/python/test_dynamic_profile.py`)
+- **Python test suite** for ground station (`ground-station/test/test_dynamic_profile.py`)
 
 ## Architecture
 
@@ -130,8 +130,8 @@ The GS implements the full adaptive link algorithm:
 - Legacy `cmd_exec()` and `cmd_exec_noquote()` removed in favor of timeout-based execution
 - HTTP requests use native socket-based client (`http_client.c`) instead of curl
 - Compiled with `-Wall -Wextra -Werror`
-- Unity test framework for C unit tests in `test/c/`
-- Python test suite for GS in `test/python/`
+- Unity test framework for C unit tests in `drone/test/`
+- Python test suite for GS in `ground-station/test/`
 
 ## Testing
 
@@ -141,11 +141,11 @@ make test         # Run all Unity tests
 make clean        # Clean test artifacts
 ```
 
-Tests are in `test/c/test_util.c` covering URL parsing, command formatting, and utility functions.
+Tests are in `drone/test/test_util.c` covering URL parsing, command formatting, and utility functions.
 
 ### Python Tests
 ```bash
-python3 -m pytest test/python/test_dynamic_profile.py -v
+python3 -m pytest ground-station/test/test_dynamic_profile.py -v
 ```
 
 Tests cover MCS selection, guard interval logic, FEC parameters, bitrate computation, and power scaling.

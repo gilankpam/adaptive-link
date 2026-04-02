@@ -23,9 +23,9 @@ test-c:
 
 # Run Python tests
 test-python:
-	python3 -m unittest discover -s test/python -v
+	python3 -m unittest discover -s ground-station/test -v
 
 # Clean all
 clean:
 	$(MAKE) -C drone clean
-	rm -f test/test_util
+	rm -f drone/test/test_util

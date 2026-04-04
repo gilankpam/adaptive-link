@@ -88,19 +88,24 @@ void *osd_thread_func(void *arg) {
             printf("Weak drone antenna detected!\n");
         }
 
-        os->set_osd_colour = (ps->previousProfile < 1) ? 2 : (ps->previousProfile < 2) ? 5 : 3;
+        os->set_osd_colour = (ps->currentProfile == 0) ? 6 : (ps->currentProfile < 2) ? 5 : 3;
 
         char local_regular_osd[64];
         snprintf(local_regular_osd, sizeof(local_regular_osd), cfg->customOSD, os->set_osd_colour, os->set_osd_font_size);
 
         char full_osd_string[600];
+        int osd_off = 0;
 
-        if (cfg->osd_level >= 6) {
-            snprintf(full_osd_string, sizeof(full_osd_string), "%s %s\n%s\n%s\n%s\n%s\n%s",
-                    os->profile, os->profile_fec, local_regular_osd, os->score_related, os->gs_stats, os->extra_stats, hw->camera_bin);
-        } else if (cfg->osd_level == 5) {
-            snprintf(full_osd_string, sizeof(full_osd_string), "%s %s\n%s\n%s\n%s\n%s",
-                    os->profile, os->profile_fec, local_regular_osd, os->score_related, os->gs_stats, os->extra_stats);
+        if (cfg->osd_level >= 5) {
+            osd_off = snprintf(full_osd_string, sizeof(full_osd_string), "%s %s\n%s",
+                    os->profile, os->profile_fec, local_regular_osd);
+            if (os->score_related[0] != '\0')
+                osd_off += snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off, "\n%s", os->score_related);
+            if (os->gs_stats[0] != '\0')
+                osd_off += snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off, "\n%s", os->gs_stats);
+            osd_off += snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off, "\n%s", os->extra_stats);
+            if (cfg->osd_level >= 6)
+                snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off, "\n%s", hw->camera_bin);
         } else if (cfg->osd_level == 4) {
             snprintf(full_osd_string, sizeof(full_osd_string), "%s %s | %s | %s | %s | %s",
                     os->profile, os->profile_fec, local_regular_osd, os->score_related, os->gs_stats, os->extra_stats);

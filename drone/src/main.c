@@ -47,6 +47,7 @@ static void print_usage(void) {
     printf("  --ip         IP address to bind to (default: %s)\n", DEFAULT_IP);
     printf("  --port       Port to listen on (default: %d)\n", DEFAULT_PORT);
     printf("  --verbose    Enable verbose output\n");
+    printf("  --debug-log  Enable debug logging of parameter changes\n");
     printf("  --pace-exec  Maj/wfb control execution pacing interval in milliseconds (default: %d ms)\n", DEFAULT_PACE_EXEC_MS);
 }
 
@@ -88,6 +89,8 @@ int main(int argc, char *argv[]) {
             strncpy(ip, argv[++i], INET_ADDRSTRLEN);
         } else if (strcmp(argv[i], "--verbose") == 0) {
             daemon.cfg.verbose_mode = true;
+        } else if (strcmp(argv[i], "--debug-log") == 0) {
+            daemon.cfg.debug_log = true;
         } else if (strcmp(argv[i], "--pace-exec") == 0 && i + 1 < argc) {
             int ms = atoi(argv[++i]);
             pace_exec = ms * 1000L;

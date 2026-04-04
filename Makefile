@@ -1,9 +1,15 @@
 # Adaptive-Link Root Makefile
 # Delegates to sub-project Makefiles
 
-.PHONY: all clean test test-c test-python drone ground-station
+.PHONY: all clean test test-c test-python drone ground-station ssc338q
 
 all: drone
+
+# Cross-compile for SSC338Q (ARM Cortex-A7)
+ssc338q:
+	$(MAKE) -C drone CC=armv7l-unknown-linux-musleabihf-gcc \
+		OPT="-march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard -Os" \
+		LDFLAGS="-lm -lpthread -static"
 
 # Build drone daemon
 drone:

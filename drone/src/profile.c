@@ -185,12 +185,14 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
     if (job->currentProfile > job->previousProfile) {
         /* Upgrading: power before MCS */
         if (currentFPS != ps->prevFPS) {
+            DEBUG_LOG(cfg, "FPS: %d -> %d\n", ps->prevFPS, currentFPS);
             if (cmd_exec_with_timeout(ps->cmd, fpsCommand) != 0) {
                 fprintf(stderr, "FPS command failed: %s\n", fpsCommand);
             }
             ps->prevFPS = currentFPS;
         }
         if (cfg->allow_set_power && finalPower != ps->prevWfbPower) {
+            DEBUG_LOG(cfg, "Power: %d -> %d\n", ps->prevWfbPower, finalPower);
             if (cmd_exec_with_timeout(ps->cmd, powerCommand) != 0) {
                 fprintf(stderr, "Power command failed: %s\n", powerCommand);
             }
@@ -199,6 +201,9 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
         if (strcmp(currentSetGI, ps->prevSetGI) != 0 ||
             currentSetMCS != ps->prevSetMCS ||
             currentBandwidth != ps->prevBandwidth) {
+            DEBUG_LOG(cfg, "MCS: %d -> %d, GI: %s -> %s, BW: %d -> %d\n",
+                       ps->prevSetMCS, currentSetMCS, ps->prevSetGI, currentSetGI,
+                       ps->prevBandwidth, currentBandwidth);
             if (cmd_exec_with_timeout(ps->cmd, mcsCommand) != 0) {
                 fprintf(stderr, "MCS command failed: %s\n", mcsCommand);
             }
@@ -208,6 +213,8 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
         }
         /* Apply FEC changes (uses wfb_tx_cmd) */
         if (currentSetFecK != ps->prevSetFecK || currentSetFecN != ps->prevSetFecN) {
+            DEBUG_LOG(cfg, "FEC: %d/%d -> %d/%d\n",
+                       ps->prevSetFecK, ps->prevSetFecN, currentSetFecK, currentSetFecN);
             if (profile_apply_fec(ps, currentSetFecK, currentSetFecN) != 0) {
                 fprintf(stderr, "Failed to apply FEC settings\n");
             }
@@ -218,14 +225,18 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
         if (currentQpDelta != ps->prevQpDelta || currentSetBitrate != ps->prevSetBitrate ||
             currentSetGop != ps->prevSetGop ||
             (cfg->roi_focus_mode && strcmp(currentROIqp, ps->prevROIqp) != 0)) {
-            if (profile_apply_api_batch(cfg, currentQpDelta, currentSetBitrate, currentSetGop, currentROIqp, ps->cmd) != 0) {
+            DEBUG_LOG(cfg, "Bitrate: %d -> %d, GOP: %.1f -> %.1f, QpDelta: %d -> %d\n",
+                       ps->prevSetBitrate, currentSetBitrate, ps->prevSetGop, currentSetGop,
+                       ps->prevQpDelta, currentQpDelta);
+            if (profile_apply_api_batch(cfg, currentQpDelta, currentSetBitrate, currentSetGop, currentROIqp, ps->cmd) == 0) {
+                ps->prevQpDelta = currentQpDelta;
+                ps->prevSetBitrate = currentSetBitrate;
+                ps->prevSetGop = currentSetGop;
+                if (cfg->roi_focus_mode) {
+                    strcpy(ps->prevROIqp, currentROIqp);
+                }
+            } else {
                 fprintf(stderr, "API batch command failed\n");
-            }
-            ps->prevQpDelta = currentQpDelta;
-            ps->prevSetBitrate = currentSetBitrate;
-            ps->prevSetGop = currentSetGop;
-            if (cfg->roi_focus_mode) {
-                strcpy(ps->prevROIqp, currentROIqp);
             }
         }
         if (cfg->idr_every_change) {
@@ -243,6 +254,7 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
     } else {
         /* Downgrading: MCS/FEC before power */
         if (currentFPS != ps->prevFPS) {
+            DEBUG_LOG(cfg, "FPS: %d -> %d\n", ps->prevFPS, currentFPS);
             if (cmd_exec_with_timeout(ps->cmd, fpsCommand) != 0) {
                 fprintf(stderr, "FPS command failed: %s\n", fpsCommand);
             }
@@ -250,6 +262,8 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
         }
         /* Apply FEC changes (uses wfb_tx_cmd) */
         if (currentSetFecK != ps->prevSetFecK || currentSetFecN != ps->prevSetFecN) {
+            DEBUG_LOG(cfg, "FEC: %d/%d -> %d/%d\n",
+                       ps->prevSetFecK, ps->prevSetFecN, currentSetFecK, currentSetFecN);
             if (profile_apply_fec(ps, currentSetFecK, currentSetFecN) != 0) {
                 fprintf(stderr, "Failed to apply FEC settings\n");
             }
@@ -260,19 +274,26 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
         if (currentQpDelta != ps->prevQpDelta || currentSetBitrate != ps->prevSetBitrate ||
             currentSetGop != ps->prevSetGop ||
             (cfg->roi_focus_mode && strcmp(currentROIqp, ps->prevROIqp) != 0)) {
-            if (profile_apply_api_batch(cfg, currentQpDelta, currentSetBitrate, currentSetGop, currentROIqp, ps->cmd) != 0) {
+            DEBUG_LOG(cfg, "Bitrate: %d -> %d, GOP: %.1f -> %.1f, QpDelta: %d -> %d\n",
+                       ps->prevSetBitrate, currentSetBitrate, ps->prevSetGop, currentSetGop,
+                       ps->prevQpDelta, currentQpDelta);
+            if (profile_apply_api_batch(cfg, currentQpDelta, currentSetBitrate, currentSetGop, currentROIqp, ps->cmd) == 0) {
+                ps->prevQpDelta = currentQpDelta;
+                ps->prevSetBitrate = currentSetBitrate;
+                ps->prevSetGop = currentSetGop;
+                if (cfg->roi_focus_mode) {
+                    strcpy(ps->prevROIqp, currentROIqp);
+                }
+            } else {
                 fprintf(stderr, "API batch command failed\n");
-            }
-            ps->prevQpDelta = currentQpDelta;
-            ps->prevSetBitrate = currentSetBitrate;
-            ps->prevSetGop = currentSetGop;
-            if (cfg->roi_focus_mode) {
-                strcpy(ps->prevROIqp, currentROIqp);
             }
         }
         if (strcmp(currentSetGI, ps->prevSetGI) != 0 ||
             currentSetMCS != ps->prevSetMCS ||
             currentBandwidth != ps->prevBandwidth) {
+            DEBUG_LOG(cfg, "MCS: %d -> %d, GI: %s -> %s, BW: %d -> %d\n",
+                       ps->prevSetMCS, currentSetMCS, ps->prevSetGI, currentSetGI,
+                       ps->prevBandwidth, currentBandwidth);
             if (cmd_exec_with_timeout(ps->cmd, mcsCommand) != 0) {
                 fprintf(stderr, "MCS command failed: %s\n", mcsCommand);
             }
@@ -281,6 +302,7 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
             ps->prevSetMCS = currentSetMCS;
         }
         if (cfg->allow_set_power && finalPower != ps->prevWfbPower) {
+            DEBUG_LOG(cfg, "Power: %d -> %d\n", ps->prevWfbPower, finalPower);
             if (cmd_exec_with_timeout(ps->cmd, powerCommand) != 0) {
                 fprintf(stderr, "Power command failed: %s\n", powerCommand);
             }
@@ -353,6 +375,11 @@ void profile_apply_direct(profile_state_t *ps, const Profile *profile,
     ps->previousProfile = ps->currentProfile;
     ps->currentProfile = profile_index;
     ps->prevTimeStamp = util_now_ms();
+
+    {
+        const char *direction = (profile_index > ps->previousProfile) ? "upgrade" : "downgrade";
+        DEBUG_LOG(ps->cfg, "Profile change: %d -> %d (%s)\n", ps->previousProfile, profile_index, direction);
+    }
 
     profile_apply(ps, (Profile *)profile, osd_ptr);
 }

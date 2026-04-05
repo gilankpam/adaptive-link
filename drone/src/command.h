@@ -15,10 +15,10 @@
 typedef struct {
     long pace_exec_us;    /* microseconds between commands */
     int exec_timeout_ms;  /* timeout for command execution in milliseconds */
-    bool verbose;
+    log_level_t log_level;
 } cmd_ctx_t;
 
-void cmd_init(cmd_ctx_t *ctx, long pace_exec_us, bool verbose);
+void cmd_init(cmd_ctx_t *ctx, long pace_exec_us, log_level_t log_level);
 void cmd_format(char *dest, size_t dest_size, const char *tmpl,
                 int count, const char **keys, const char **values);
 

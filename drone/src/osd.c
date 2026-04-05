@@ -85,7 +85,7 @@ void *osd_thread_func(void *arg) {
             strncat(os->extra_stats,
                     "\nPersistent VTX antenna mismatch >= 20dB detected! Check antennas...",
                     sizeof(os->extra_stats) - strlen(os->extra_stats) - 1);
-            printf("Weak drone antenna detected!\n");
+            INFO_LOG(cfg, "Weak drone antenna detected!\n");
         }
 
         os->set_osd_colour = (ps->currentProfile == 0) ? 6 : (ps->currentProfile < 2) ? 5 : 3;

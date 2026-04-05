@@ -41,8 +41,7 @@ void *txmon_thread_func(void *arg) {
                 /* Apply bitrate via batched API */
                 profile_apply_api_batch(cfg, new_bitrate, ps->prevSetGop, cmd);
                 ps->bitrate_reduced = true;
-                if (cfg->verbose_mode)
-                    printf("Reduced bitrate due to tx-drops\n");
+                INFO_LOG(cfg, "Reduced bitrate due to tx-drops\n");
             }
             last_xtx_time = now;
         }
@@ -52,9 +51,8 @@ void *txmon_thread_func(void *arg) {
             /* Apply bitrate via batched API */
             profile_apply_api_batch(cfg, (int)ps->prevSetBitrate, ps->prevSetGop, cmd);
             ps->bitrate_reduced = false;
-            if (cfg->verbose_mode)
-                printf("Restored normal bitrate after %ld ms without tx-drops\n",
-                       since_xtx_ms);
+            INFO_LOG(cfg, "Restored normal bitrate after %ld ms without tx-drops\n",
+                   since_xtx_ms);
         }
 
         long elapsed_kf_ms = util_elapsed_ms_timespec(&now, &ks->last_request_time);
@@ -66,17 +64,16 @@ void *txmon_thread_func(void *arg) {
             char url_path[BUFFER_SIZE];
             
             if (util_parse_url(idrCommand, host, sizeof(host), &port, url_path, sizeof(url_path)) != 0) {
-                printf("Failed to parse IDR URL: %s\n", idrCommand);
+                ERROR_LOG(cfg, "Failed to parse IDR URL: %s\n", idrCommand);
             } else {
                 if (cmd_http_get(host, port, url_path, NULL, 0, cmd) != 0) {
-                    printf("IDR request failed: %s:%d%s\n", host, port, url_path);
+                    ERROR_LOG(cfg, "IDR request failed: %s:%d%s\n", host, port, url_path);
                 }
             }
             
             ks->last_request_time = now;
             ks->total_requests_xtx++;
-            if (cfg->verbose_mode)
-                printf("Requesting keyframe for locally dropped tx packet\n");
+            INFO_LOG(cfg, "Requesting keyframe for locally dropped tx packet\n");
         }
 
         usleep(cfg->check_xtx_period_ms * 1000);

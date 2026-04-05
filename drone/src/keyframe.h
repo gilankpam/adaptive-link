@@ -20,6 +20,7 @@ typedef struct {
     int total_requests_xtx;
     struct timespec last_request_time;
     pthread_mutex_t mutex;
+    log_level_t log_level;
 } keyframe_state_t;
 
 void keyframe_init(keyframe_state_t *ks);

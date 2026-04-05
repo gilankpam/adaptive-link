@@ -60,7 +60,7 @@ int profile_apply_fec(profile_state_t *ps, int new_fec_k, int new_fec_n) {
     cmd_format(fecCommand, sizeof(fecCommand), cfg->fecCommandTemplate, 2, fecKeys, fecValues);
     int result = cmd_exec_with_timeout(ps->cmd, fecCommand);
     if (result != 0) {
-        fprintf(stderr, "FEC command failed: %s\n", fecCommand);
+        ERROR_LOG(ps->cfg, "FEC command failed: %s\n", fecCommand);
     }
     ps->old_fec_k = new_fec_k;
     ps->old_fec_n = new_fec_n;
@@ -199,14 +199,14 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
         if (currentFPS != ps->prevFPS) {
             DEBUG_LOG(cfg, "FPS: %d -> %d\n", ps->prevFPS, currentFPS);
             if (cmd_exec_with_timeout(ps->cmd, fpsCommand) != 0) {
-                fprintf(stderr, "FPS command failed: %s\n", fpsCommand);
+                ERROR_LOG(ps->cfg, "FPS command failed: %s\n", fpsCommand);
             }
             ps->prevFPS = currentFPS;
         }
         if (cfg->allow_set_power && finalPower != ps->prevWfbPower) {
             DEBUG_LOG(cfg, "Power: %d -> %d\n", ps->prevWfbPower, finalPower);
             if (cmd_exec_with_timeout(ps->cmd, powerCommand) != 0) {
-                fprintf(stderr, "Power command failed: %s\n", powerCommand);
+                ERROR_LOG(ps->cfg, "Power command failed: %s\n", powerCommand);
             }
             ps->prevWfbPower = finalPower;
         }
@@ -217,7 +217,7 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
                        ps->prevSetMCS, currentSetMCS, ps->prevSetGI, currentSetGI,
                        ps->prevBandwidth, currentBandwidth);
             if (cmd_exec_with_timeout(ps->cmd, mcsCommand) != 0) {
-                fprintf(stderr, "MCS command failed: %s\n", mcsCommand);
+                ERROR_LOG(ps->cfg, "MCS command failed: %s\n", mcsCommand);
             }
             ps->prevBandwidth = currentBandwidth;
             strcpy(ps->prevSetGI, currentSetGI);
@@ -228,7 +228,7 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
             DEBUG_LOG(cfg, "FEC: %d/%d -> %d/%d\n",
                        ps->prevSetFecK, ps->prevSetFecN, currentSetFecK, currentSetFecN);
             if (profile_apply_fec(ps, currentSetFecK, currentSetFecN) != 0) {
-                fprintf(stderr, "Failed to apply FEC settings\n");
+                ERROR_LOG(ps->cfg, "Failed to apply FEC settings\n");
             }
             ps->prevSetFecK = currentSetFecK;
             ps->prevSetFecN = currentSetFecN;
@@ -242,7 +242,7 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
                 ps->prevSetBitrate = currentSetBitrate;
                 ps->prevSetGop = currentSetGop;
             } else {
-                fprintf(stderr, "API batch command failed\n");
+                ERROR_LOG(ps->cfg, "API batch command failed\n");
             }
         }
         if (cfg->idr_every_change) {
@@ -253,7 +253,7 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
             
             if (util_parse_url(idrApiCommand, host, sizeof(host), &port, url_path, sizeof(url_path)) == 0) {
                 if (cmd_http_get(host, port, url_path, NULL, 0, ps->cmd) != 0) {
-                    fprintf(stderr, "IDR command failed: %s\n", idrApiCommand);
+                    ERROR_LOG(ps->cfg, "IDR command failed: %s\n", idrApiCommand);
                 }
             }
         }
@@ -262,7 +262,7 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
         if (currentFPS != ps->prevFPS) {
             DEBUG_LOG(cfg, "FPS: %d -> %d\n", ps->prevFPS, currentFPS);
             if (cmd_exec_with_timeout(ps->cmd, fpsCommand) != 0) {
-                fprintf(stderr, "FPS command failed: %s\n", fpsCommand);
+                ERROR_LOG(ps->cfg, "FPS command failed: %s\n", fpsCommand);
             }
             ps->prevFPS = currentFPS;
         }
@@ -271,7 +271,7 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
             DEBUG_LOG(cfg, "FEC: %d/%d -> %d/%d\n",
                        ps->prevSetFecK, ps->prevSetFecN, currentSetFecK, currentSetFecN);
             if (profile_apply_fec(ps, currentSetFecK, currentSetFecN) != 0) {
-                fprintf(stderr, "Failed to apply FEC settings\n");
+                ERROR_LOG(ps->cfg, "Failed to apply FEC settings\n");
             }
             ps->prevSetFecK = currentSetFecK;
             ps->prevSetFecN = currentSetFecN;
@@ -285,7 +285,7 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
                 ps->prevSetBitrate = currentSetBitrate;
                 ps->prevSetGop = currentSetGop;
             } else {
-                fprintf(stderr, "API batch command failed\n");
+                ERROR_LOG(ps->cfg, "API batch command failed\n");
             }
         }
         if (strcmp(currentSetGI, ps->prevSetGI) != 0 ||
@@ -295,7 +295,7 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
                        ps->prevSetMCS, currentSetMCS, ps->prevSetGI, currentSetGI,
                        ps->prevBandwidth, currentBandwidth);
             if (cmd_exec_with_timeout(ps->cmd, mcsCommand) != 0) {
-                fprintf(stderr, "MCS command failed: %s\n", mcsCommand);
+                ERROR_LOG(ps->cfg, "MCS command failed: %s\n", mcsCommand);
             }
             ps->prevBandwidth = currentBandwidth;
             strcpy(ps->prevSetGI, currentSetGI);
@@ -304,7 +304,7 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
         if (cfg->allow_set_power && finalPower != ps->prevWfbPower) {
             DEBUG_LOG(cfg, "Power: %d -> %d\n", ps->prevWfbPower, finalPower);
             if (cmd_exec_with_timeout(ps->cmd, powerCommand) != 0) {
-                fprintf(stderr, "Power command failed: %s\n", powerCommand);
+                ERROR_LOG(ps->cfg, "Power command failed: %s\n", powerCommand);
             }
             ps->prevWfbPower = finalPower;
         }
@@ -316,7 +316,7 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
             
             if (util_parse_url(idrApiCommand, host, sizeof(host), &port, url_path, sizeof(url_path)) == 0) {
                 if (cmd_http_get(host, port, url_path, NULL, 0, ps->cmd) != 0) {
-                    fprintf(stderr, "IDR command failed: %s\n", idrApiCommand);
+                    ERROR_LOG(ps->cfg, "IDR command failed: %s\n", idrApiCommand);
                 }
             }
         }

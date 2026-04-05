@@ -3,6 +3,7 @@
  * @brief Hardware detection, power tables, camera/video queries.
  */
 #include "hardware.h"
+#include "config.h"
 #include "util.h"
 #include "command.h"
 
@@ -11,12 +12,12 @@ static int get_resolution_inner(hw_state_t *hw) {
 
     FILE *fp = popen("cli -g .video0.size", "r");
     if (fp == NULL) {
-        printf("Failed to run get resolution command\n");
+        ERROR_LOG_LEVEL(hw->log_level, "Failed to run get resolution command\n");
         return 1;
     }
 
     if (fgets(resolution, sizeof(resolution) - 1, fp) == NULL) {
-        printf("fgets failed\n");
+        ERROR_LOG_LEVEL(hw->log_level, "fgets failed\n");
         pclose(fp);
         return 1;
     }
@@ -24,11 +25,11 @@ static int get_resolution_inner(hw_state_t *hw) {
     pclose(fp);
 
     if (sscanf(resolution, "%dx%d", &hw->x_res, &hw->y_res) != 2) {
-        printf("Failed to parse resolution\n");
+        ERROR_LOG_LEVEL(hw->log_level, "Failed to parse resolution\n");
         return 1;
     }
 
-    printf("Video Size: %dx%d\n", hw->x_res, hw->y_res);
+    INFO_LOG_LEVEL(hw->log_level, "Video Size: %dx%d\n", hw->x_res, hw->y_res);
     return 0;
 }
 
@@ -54,7 +55,7 @@ void hw_load_vtx_info(hw_state_t *hw) {
 
     pipe = popen(command1, "r");
     if (pipe == NULL) {
-        fprintf(stderr, "Failed to run yaml reader for ldpc_tx\n");
+        ERROR_LOG_LEVEL(hw->log_level, "Failed to run yaml reader for ldpc_tx\n");
         return;
     }
     if (fgets(buffer, sizeof(buffer), pipe) != NULL) {
@@ -64,7 +65,7 @@ void hw_load_vtx_info(hw_state_t *hw) {
 
     pipe = popen(command2, "r");
     if (pipe == NULL) {
-        fprintf(stderr, "Failed to run yaml reader for stbc\n");
+        ERROR_LOG_LEVEL(hw->log_level, "Failed to run yaml reader for stbc\n");
         return;
     }
     if (fgets(buffer, sizeof(buffer), pipe) != NULL) {
@@ -78,12 +79,12 @@ int hw_get_camera_bin(hw_state_t *hw) {
 
     FILE *fp = popen("cli -g .isp.sensorConfig", "r");
     if (fp == NULL) {
-        printf("Failed to run sensorConfig command\n");
+        ERROR_LOG_LEVEL(hw->log_level, "Failed to run sensorConfig command\n");
         return 1;
     }
 
     if (fgets(sensor_config, sizeof(sensor_config), fp) == NULL) {
-        printf("fgets failed\n");
+        ERROR_LOG_LEVEL(hw->log_level, "fgets failed\n");
         pclose(fp);
         return 1;
     }
@@ -101,13 +102,13 @@ int hw_get_camera_bin(hw_state_t *hw) {
 
     hw->camera_bin[sizeof(hw->camera_bin) - 1] = '\0';
 
-    printf("Camera Bin: %s\n", hw->camera_bin);
+    INFO_LOG_LEVEL(hw->log_level, "Camera Bin: %s\n", hw->camera_bin);
     return 0;
 }
 
 int hw_get_resolution(hw_state_t *hw) {
     if (get_resolution_inner(hw) != 0) {
-        printf("Failed to get resolution. Assuming 1920x1080\n");
+        ERROR_LOG_LEVEL(hw->log_level, "Failed to get resolution. Assuming 1920x1080\n");
         hw->x_res = 1920;
         hw->y_res = 1080;
     }
@@ -115,7 +116,7 @@ int hw_get_resolution(hw_state_t *hw) {
     return 0;
 }
 
-int hw_get_video_fps(void) {
+int hw_get_video_fps(hw_state_t *hw) {
     char command[] = "cli -g .video0.fps";
     char buffer[128];
     FILE *pipe;
@@ -123,7 +124,7 @@ int hw_get_video_fps(void) {
 
     pipe = popen(command, "r");
     if (pipe == NULL) {
-        fprintf(stderr, "Failed to run cli -g .video0.fps\n");
+        ERROR_LOG_LEVEL(hw->log_level, "Failed to run cli -g .video0.fps\n");
         return -1;
     }
 

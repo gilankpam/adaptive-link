@@ -34,10 +34,10 @@ static void msg_handle_time_sync(msg_state_t *ms, int transmitted_time) {
         tv.tv_sec = transmitted_time;
         tv.tv_usec = 0;
         if (settimeofday(&tv, NULL) == 0) {
-            printf("System time synchronized with transmitted time: %ld\n", (long)transmitted_time);
+            INFO_LOG(ms->cfg, "System time synchronized with transmitted time: %ld\n", (long)transmitted_time);
             ms->time_synced = true;
         } else {
-            perror("Failed to set system time");
+            ERROR_LOG(ms->cfg, "Failed to set system time\n");
         }
     }
 }
@@ -70,7 +70,7 @@ static void msg_process_profile(msg_state_t *ms, const char *msg) {
 
     char *msgCopy = strdup(msg);
     if (msgCopy == NULL) {
-        perror("Failed to allocate memory");
+        ERROR_LOG(ms->cfg, "Failed to allocate memory\n");
         return;
     }
 
@@ -138,7 +138,7 @@ static void msg_process_profile(msg_state_t *ms, const char *msg) {
     if (!*(ms->paused)) {
         profile_apply_direct(ms->ps, &profile, profile_index, ms->osd);
     } else {
-        printf("Adaptive mode paused, waiting for resume command...\n");
+        INFO_LOG(ms->cfg, "Adaptive mode paused, waiting for resume command...\n");
     }
     pthread_mutex_unlock(ms->pause_mutex);
 }
@@ -147,6 +147,6 @@ void msg_process(msg_state_t *ms, const char *msg) {
     if (msg[0] == 'P' && msg[1] == ':') {
         msg_process_profile(ms, msg + 2);
     } else {
-        printf("Unknown message format: %.20s...\n", msg);
+        ERROR_LOG(ms->cfg, "Unknown message format: %.20s...\n", msg);
     }
 }

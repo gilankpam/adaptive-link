@@ -22,13 +22,14 @@ typedef struct {
     int total_pixels;
     bool tx_dropped_initialized;
     long global_total_tx_dropped;
+    log_level_t log_level;
 } hw_state_t;
 
 void hw_init(hw_state_t *hw);
 void hw_load_vtx_info(hw_state_t *hw);
 int  hw_get_camera_bin(hw_state_t *hw);
 int  hw_get_resolution(hw_state_t *hw);
-int  hw_get_video_fps(void);
+int  hw_get_video_fps(hw_state_t *hw);
 void hw_read_wfb_status(int *k, int *n, int *stbc_val, int *ldpc, int *short_gi,
                         int *actual_bandwidth, int *mcs_index, int *vht_mode, int *vht_nss);
 int  hw_get_wlan0_channel(void);

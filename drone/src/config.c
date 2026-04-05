@@ -36,8 +36,7 @@ void config_set_defaults(alink_config_t *cfg) {
     cfg->get_card_info_from_yaml = false;
     cfg->osd_level = 4;
     cfg->multiply_font_size_by = 0.5f;
-    cfg->verbose_mode = false;
-    cfg->debug_log = false;
+    cfg->log_level = LOG_LEVEL_INFO;
     cfg->roiqp_hi = 11000;
     cfg->roiqp_lo = 2000;
     cfg->roiqp_base = 0;
@@ -112,8 +111,10 @@ int config_load(alink_config_t *cfg, const char *filename) {
                 cfg->multiply_font_size_by = atof(value);
             } else if (strcmp(key, "check_xtx_period_ms") == 0) {
                 cfg->check_xtx_period_ms = atoi(value);
-            } else if (strcmp(key, "debug_log") == 0) {
-                cfg->debug_log = atoi(value);
+            } else if (strcmp(key, "log_level") == 0) {
+                if (strcmp(value, "debug") == 0) cfg->log_level = LOG_LEVEL_DEBUG;
+                else if (strcmp(value, "info") == 0) cfg->log_level = LOG_LEVEL_INFO;
+                else if (strcmp(value, "error") == 0) cfg->log_level = LOG_LEVEL_ERROR;
             } else if (strcmp(key, "roiqp_hi") == 0) {
                 cfg->roiqp_hi = atoi(value);
             } else if (strcmp(key, "roiqp_lo") == 0) {

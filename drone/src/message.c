@@ -58,7 +58,7 @@ static void msg_handle_idr(msg_state_t *ms, const char *idr_code) {
 }
 
 /**
- * Process a profile message: P:<index>:<GI>:<MCS>:<FecK>:<FecN>:<Bitrate>:<GOP>:<Power>:<ROIqp>:<Bandwidth>:<QpDelta>:<timestamp>[:<idr_code>]
+ * Process a profile message: P:<index>:<GI>:<MCS>:<FecK>:<FecN>:<Bitrate>:<GOP>:<Power>:<Bandwidth>:<timestamp>[:<idr_code>]
  */
 static void msg_process_profile(msg_state_t *ms, const char *msg) {
     Profile profile;
@@ -105,19 +105,12 @@ static void msg_process_profile(msg_state_t *ms, const char *msg) {
                 profile.wfbPower = atoi(token);
                 break;
             case 8:
-                strncpy(profile.ROIqp, token, sizeof(profile.ROIqp) - 1);
-                profile.ROIqp[sizeof(profile.ROIqp) - 1] = '\0';
-                break;
-            case 9:
                 profile.bandwidth = atoi(token);
                 break;
-            case 10:
-                profile.setQpDelta = atoi(token);
-                break;
-            case 11:
+            case 9:
                 transmitted_time = atoi(token);
                 break;
-            case 12:
+            case 10:
                 strncpy(idr_code, token, sizeof(idr_code) - 1);
                 idr_code[sizeof(idr_code) - 1] = '\0';
                 break;

@@ -27,13 +27,11 @@ void profile_init(profile_state_t *ps, alink_config_t *cfg,
     ps->prevBandwidth = -20;
     strncpy(ps->prevSetGI, "-1", sizeof(ps->prevSetGI));
     ps->prevSetMCS = -1;
-    strncpy(ps->prevROIqp, "-1", sizeof(ps->prevROIqp));
     ps->prevSetFecK = -1;
     ps->prevSetFecN = -1;
     ps->prevSetBitrate = -1;
     ps->prevDivideFpsBy = -1;
     ps->prevFPS = -1;
-    ps->prevQpDelta = -100;
 
     ps->old_bitrate = -1;
     ps->old_fec_k = -1;
@@ -70,41 +68,62 @@ int profile_apply_fec(profile_state_t *ps, int new_fec_k, int new_fec_n) {
 }
 
 /**
+ * Compute ROI QP from bitrate (kbps).
+ * Linearly scales roiqp_base between hi and lo thresholds.
+ */
+int calc_roiQp_from_bitrate(int kbps, int hi, int lo, int roiqp_base) {
+    const int span = hi - lo;
+
+    if (kbps > hi) return 0;
+    if (roiqp_base == 0) return 0;
+    if (kbps <= lo) return roiqp_base;
+
+    /* pct = 25 .. 100 linearly as kbps falls from hi -> lo */
+    int x = hi - kbps;                             /* 0 .. span-1 */
+    int pct = 25 + (x * 75 + (span / 2)) / span;   /* rounded */
+
+    long v = (long)roiqp_base * (long)pct;
+    if (v >= 0) v = (v + 50) / 100;
+    else        v = (v - 50) / 100;  /* round negatives correctly */
+    return (int)v;
+}
+
+/**
  * Build and execute a batched API command using native HTTP client.
- * Combines qpDelta, bitrate, gop, and roiQp into a single HTTP request.
- * 
- * @param cfg Configuration with apiCommandTemplate
- * @param qpDelta QP delta value
- * @param bitrate Bitrate value
+ * Combines bitrate, gop, and drone-computed roiQp into a single HTTP request.
+ *
+ * @param cfg Configuration with apiCommandTemplate and roiQp params
+ * @param bitrate Bitrate value (kbps)
  * @param gop GOP size
- * @param roiQp ROI QP values
  * @param cmd Command context for execution
  * @return 0 on success, non-zero on failure
  */
 int profile_apply_api_batch(const alink_config_t *cfg,
-                                   int qpDelta, int bitrate, float gop, const char *roiQp,
+                                   int bitrate, float gop,
                                    const cmd_ctx_t *cmd) {
     char path[MAX_COMMAND_SIZE];
-    char qpDeltaStr[16], bitrateStr[16], gopStr[16];
-    
-    snprintf(qpDeltaStr, sizeof(qpDeltaStr), "%d", qpDelta);
+    char bitrateStr[16], gopStr[16], roiQpStr[32];
+
+    int roiQp = calc_roiQp_from_bitrate(bitrate, cfg->roiqp_hi, cfg->roiqp_lo, cfg->roiqp_base);
+
     snprintf(bitrateStr, sizeof(bitrateStr), "%d", bitrate);
     snprintf(gopStr, sizeof(gopStr), "%.1f", gop);
-    
-    const char *keys[] = { "qpDelta", "bitrate", "gop", "roiQp" };
-    const char *values[] = { qpDeltaStr, bitrateStr, gopStr, roiQp };
-    
-    cmd_format(path, sizeof(path), cfg->apiCommandTemplate, 4, keys, values);
-    
+    snprintf(roiQpStr, sizeof(roiQpStr), "%d", roiQp);
+
+    const char *keys[] = { "bitrate", "gop", "roiQp" };
+    const char *values[] = { bitrateStr, gopStr, roiQpStr };
+
+    cmd_format(path, sizeof(path), cfg->apiCommandTemplate, 3, keys, values);
+
     /* Parse the URL to extract host, port, and path */
     char host[64];
     int port = 80;
     char url_path[MAX_COMMAND_SIZE];
-    
+
     if (util_parse_url(path, host, sizeof(host), &port, url_path, sizeof(url_path)) != 0) {
         return -1;
     }
-    
+
     return cmd_http_get(host, port, url_path, NULL, 0, cmd);
 }
 
@@ -133,10 +152,7 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
     int currentSetFecK = profile->setFecK;
     int currentSetFecN = profile->setFecN;
     int currentSetBitrate = profile->setBitrate;
-    char currentROIqp[20];
-    strcpy(currentROIqp, profile->ROIqp);
     int currentBandwidth = profile->bandwidth;
-    int currentQpDelta = profile->setQpDelta;
 
     int currentFPS = hw->global_fps;
     int finalPower;
@@ -217,20 +233,14 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
             ps->prevSetFecK = currentSetFecK;
             ps->prevSetFecN = currentSetFecN;
         }
-        /* Batch all API calls (qpDelta, bitrate, gop, roiQp) into one HTTP request */
-        if (currentQpDelta != ps->prevQpDelta || currentSetBitrate != ps->prevSetBitrate ||
-            currentSetGop != ps->prevSetGop ||
-            (cfg->roi_focus_mode && strcmp(currentROIqp, ps->prevROIqp) != 0)) {
-            DEBUG_LOG(cfg, "Bitrate: %d -> %d, GOP: %.1f -> %.1f, QpDelta: %d -> %d\n",
-                       ps->prevSetBitrate, currentSetBitrate, ps->prevSetGop, currentSetGop,
-                       ps->prevQpDelta, currentQpDelta);
-            if (profile_apply_api_batch(cfg, currentQpDelta, currentSetBitrate, currentSetGop, currentROIqp, ps->cmd) == 0) {
-                ps->prevQpDelta = currentQpDelta;
+        /* Batch API call (bitrate, gop, drone-computed roiQp) */
+        if (currentSetBitrate != ps->prevSetBitrate ||
+            currentSetGop != ps->prevSetGop) {
+            DEBUG_LOG(cfg, "Bitrate: %d -> %d, GOP: %.1f -> %.1f\n",
+                       ps->prevSetBitrate, currentSetBitrate, ps->prevSetGop, currentSetGop);
+            if (profile_apply_api_batch(cfg, currentSetBitrate, currentSetGop, ps->cmd) == 0) {
                 ps->prevSetBitrate = currentSetBitrate;
                 ps->prevSetGop = currentSetGop;
-                if (cfg->roi_focus_mode) {
-                    strcpy(ps->prevROIqp, currentROIqp);
-                }
             } else {
                 fprintf(stderr, "API batch command failed\n");
             }
@@ -266,20 +276,14 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
             ps->prevSetFecK = currentSetFecK;
             ps->prevSetFecN = currentSetFecN;
         }
-        /* Batch all API calls (qpDelta, bitrate, gop, roiQp) into one HTTP request */
-        if (currentQpDelta != ps->prevQpDelta || currentSetBitrate != ps->prevSetBitrate ||
-            currentSetGop != ps->prevSetGop ||
-            (cfg->roi_focus_mode && strcmp(currentROIqp, ps->prevROIqp) != 0)) {
-            DEBUG_LOG(cfg, "Bitrate: %d -> %d, GOP: %.1f -> %.1f, QpDelta: %d -> %d\n",
-                       ps->prevSetBitrate, currentSetBitrate, ps->prevSetGop, currentSetGop,
-                       ps->prevQpDelta, currentQpDelta);
-            if (profile_apply_api_batch(cfg, currentQpDelta, currentSetBitrate, currentSetGop, currentROIqp, ps->cmd) == 0) {
-                ps->prevQpDelta = currentQpDelta;
+        /* Batch API call (bitrate, gop, drone-computed roiQp) */
+        if (currentSetBitrate != ps->prevSetBitrate ||
+            currentSetGop != ps->prevSetGop) {
+            DEBUG_LOG(cfg, "Bitrate: %d -> %d, GOP: %.1f -> %.1f\n",
+                       ps->prevSetBitrate, currentSetBitrate, ps->prevSetGop, currentSetGop);
+            if (profile_apply_api_batch(cfg, currentSetBitrate, currentSetGop, ps->cmd) == 0) {
                 ps->prevSetBitrate = currentSetBitrate;
                 ps->prevSetGop = currentSetGop;
-                if (cfg->roi_focus_mode) {
-                    strcpy(ps->prevROIqp, currentROIqp);
-                }
             } else {
                 fprintf(stderr, "API batch command failed\n");
             }

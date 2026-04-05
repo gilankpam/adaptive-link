@@ -248,6 +248,77 @@ class AdapterOptimizer:
         return result.total_fitness, result
 
 
+def print_param_importance(study, top_n=20):
+    """Print parameter importance ranking from optimization study.
+    
+    Uses Fanova importance analysis to determine which parameters
+    most influence the fitness score.
+    
+    Args:
+        study: Completed optuna study object.
+        top_n: Number of top parameters to display.
+    """
+    try:
+        importances = optuna.importance.get_param_importances(
+            study,
+            evaluator=optuna.importance.FanovaImportanceEvaluator(
+                n_trees=64,      # Number of trees for ensemble
+                max_depth=32,    # Maximum tree depth
+                seed=42          # Random seed for reproducibility
+            )
+        )
+        
+        # Sort by importance (descending)
+        sorted_importances = sorted(
+            importances.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+        
+        print(f"\n  Parameter Importance (top {top_n}):")
+        print(f"  {'='*50}")
+        
+        total_importance = sum(importances.values()) or 1.0
+        
+        # Categorize importance levels
+        high_importance = []
+        medium_importance = []
+        low_importance = []
+        noise_params = []
+        
+        for param, importance in sorted_importances[:top_n]:
+            pct = (importance / total_importance) * 100
+            bar = '█' * int(pct / 2)  # Visual bar (max 50 chars)
+            
+            # Categorize based on relative importance
+            if pct >= 5:
+                high_importance.append((param, pct))
+            elif pct >= 2:
+                medium_importance.append((param, pct))
+            elif pct >= 0.5:
+                low_importance.append((param, pct))
+            else:
+                noise_params.append((param, pct))
+            
+            print(f"    {pct:5.1f}% |{bar:<30}| {param}")
+        
+        # Print categorization summary
+        print(f"\n  Importance Categories:")
+        print(f"    High (>5%):   {len(high_importance)} params - {', '.join(p[0] for p in high_importance[:5])}{'...' if len(high_importance) > 5 else ''}")
+        print(f"    Medium (2-5%): {len(medium_importance)} params")
+        print(f"    Low (0.5-2%):  {len(low_importance)} params")
+        print(f"    Noise (<0.5%): {len(noise_params)} params - likely candidates to fix at defaults")
+        
+        if noise_params:
+            print(f"\n  Low-impact parameters (consider fixing to defaults):")
+            for param, pct in noise_params:
+                print(f"    {param}: {pct:.2f}%")
+                
+    except Exception as e:
+        print(f"\n  Could not compute parameter importance: {e}")
+        print("  (This may happen with too few trials or insufficient parameter variation)")
+
+
 def write_optimized_config(config, output_path, adapter_id, n_trials,
                            default_fitness, optimized_fitness):
     """Write optimized config as INI file with metadata header.
@@ -346,6 +417,9 @@ def main():
         print(f"\n  Optimized fitness: {best_fitness:.4f}")
         improvement = ((best_fitness - default_fitness) / max(abs(default_fitness), 0.001)) * 100
         print(f"  Improvement: {improvement:+.1f}%")
+
+        # Print parameter importance analysis
+        print_param_importance(study)
 
         # Write output config
         output_path = os.path.join(args.output_dir,

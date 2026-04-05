@@ -21,9 +21,7 @@ void config_set_defaults(alink_config_t *cfg) {
     cfg->fallback_profile.setBitrate = 4096;
     cfg->fallback_profile.setGop = 1.0f;
     cfg->fallback_profile.wfbPower = 2500;
-    strncpy(cfg->fallback_profile.ROIqp, "0,0,0,0", sizeof(cfg->fallback_profile.ROIqp));
     cfg->fallback_profile.bandwidth = 20;
-    cfg->fallback_profile.setQpDelta = 0;
 
     cfg->allow_xtx_reduce_bitrate = 1;
     cfg->xtx_reduce_bitrate_factor = 0.5f;
@@ -35,12 +33,14 @@ void config_set_defaults(alink_config_t *cfg) {
     cfg->idr_every_change = false;
 
     cfg->limitFPS = 1;
-    cfg->roi_focus_mode = false;
     cfg->get_card_info_from_yaml = false;
     cfg->osd_level = 4;
     cfg->multiply_font_size_by = 0.5f;
     cfg->verbose_mode = false;
     cfg->debug_log = false;
+    cfg->roiqp_hi = 11000;
+    cfg->roiqp_lo = 2000;
+    cfg->roiqp_base = 0;
 
     strncpy(cfg->customOSD, "&L%d0&F%d&B &C tx&Wc", sizeof(cfg->customOSD));
 }
@@ -88,13 +88,8 @@ int config_load(alink_config_t *cfg, const char *filename) {
                 cfg->fallback_profile.setGop = atof(value);
             } else if (strcmp(key, "fallback_power") == 0) {
                 cfg->fallback_profile.wfbPower = atoi(value);
-            } else if (strcmp(key, "fallback_roiqp") == 0) {
-                strncpy(cfg->fallback_profile.ROIqp, value, sizeof(cfg->fallback_profile.ROIqp) - 1);
-                cfg->fallback_profile.ROIqp[sizeof(cfg->fallback_profile.ROIqp) - 1] = '\0';
             } else if (strcmp(key, "fallback_bandwidth") == 0) {
                 cfg->fallback_profile.bandwidth = atoi(value);
-            } else if (strcmp(key, "fallback_qpdelta") == 0) {
-                cfg->fallback_profile.setQpDelta = atoi(value);
             } else if (strcmp(key, "request_keyframe_interval_ms") == 0) {
                 cfg->request_keyframe_interval_ms = atoi(value);
             } else if (strcmp(key, "idr_every_change") == 0) {
@@ -105,8 +100,6 @@ int config_load(alink_config_t *cfg, const char *filename) {
                 cfg->get_card_info_from_yaml = atoi(value);
             } else if (strcmp(key, "allow_rq_kf_by_tx_d") == 0) {
                 cfg->allow_rq_kf_by_tx_d = atoi(value);
-            } else if (strcmp(key, "roi_focus_mode") == 0) {
-                cfg->roi_focus_mode = atoi(value);
             } else if (strcmp(key, "allow_spike_fix_fps") == 0) {
                 cfg->limitFPS = atoi(value);
             } else if (strcmp(key, "allow_xtx_reduce_bitrate") == 0) {
@@ -121,6 +114,12 @@ int config_load(alink_config_t *cfg, const char *filename) {
                 cfg->check_xtx_period_ms = atoi(value);
             } else if (strcmp(key, "debug_log") == 0) {
                 cfg->debug_log = atoi(value);
+            } else if (strcmp(key, "roiqp_hi") == 0) {
+                cfg->roiqp_hi = atoi(value);
+            } else if (strcmp(key, "roiqp_lo") == 0) {
+                cfg->roiqp_lo = atoi(value);
+            } else if (strcmp(key, "roiqp_base") == 0) {
+                cfg->roiqp_base = atoi(value);
             }
             /* Command templates */
             else if (strcmp(key, "powerCommandTemplate") == 0) {

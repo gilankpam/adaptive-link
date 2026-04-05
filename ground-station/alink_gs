@@ -55,97 +55,6 @@ FEC_BITRATE_TIERS = [
 ]
 FEC_N_MAX = 15     # > 25 Mbps: maximum block size
 
-# ─── Default configuration ───────────────────────────────────────────────────
-
-DEFAULT_CONFIG = """# adaptive-link VRX settings
-
-[outgoing]
-udp_ip = 10.5.0.10
-udp_port = 9999
-
-[json]
-HOST = 127.0.0.1
-PORT = 8103
-
-[weights]
-snr_weight = 0.5
-rssi_weight = 0.5
-
-[ranges]
-SNR_MIN = 10
-SNR_MAX = 36
-RSSI_MIN = -85
-RSSI_MAX = -40
-
-[keyframe]
-allow_idr = True
-idr_max_messages = 20
-
-[dynamic refinement]
-allow_penalty = False
-
-[noise]
-min_noise = 0.01
-max_noise = 0.1
-deduction_exponent = 0.5
-
-[error estimation]
-kalman_estimate = 0.005
-kalman_error_estimate = 0.1
-process_variance = 1e-5
-measurement_variance = 0.01
-
-[scoring]
-rf_weight = 0.5
-loss_weight = 0.25
-fec_weight = 0.15
-diversity_weight = 0.1
-max_loss_rate = 0.1
-max_rssi_spread = 20
-
-[profile selection]
-txprofiles_file = /etc/txprofiles.conf
-hold_fallback_mode_ms = 1000
-hold_modes_down_ms = 3000
-min_between_changes_ms = 200
-hysteresis_percent = 5
-hysteresis_percent_down = 5
-ema_fast_alpha = 0.5
-ema_slow_alpha = 0.15
-predict_multi = 1.0
-fast_downgrade = True
-upward_confidence_loops = 3
-limit_max_score_to = 2000
-dynamic_mode = False
-
-[dynamic]
-snr_safety_margin = 3
-snr_ema_alpha = 0.3
-loss_margin_weight = 20
-fec_margin_weight = 5
-max_mcs = 7
-short_gi_snr_margin = 5
-loss_threshold_for_fec_downgrade = 0.05
-fec_redundancy_ratio = 0.25
-utilization_factor = 0.45
-max_bitrate = 30000
-min_bitrate = 2000
-max_power = 2500
-min_power = 200
-bandwidth = 20
-gop = 10
-qp_delta = -12
-roi_qp = 0,0,0,0
-max_mcs_step_up = 1
-
-[telemetry]
-log_enabled = False
-log_dir = /var/log/alink
-log_rotate_mb = 50
-outcome_window_ticks = 10
-adapter_id = default
-"""
-
 REQUIRED_SECTIONS = {
     'outgoing', 'json', 'weights', 'ranges',
     'keyframe', 'dynamic refinement', 'noise', 'error estimation',
@@ -155,23 +64,12 @@ REQUIRED_SECTIONS = {
 
 # ─── Configuration helpers ───────────────────────────────────────────────────
 
-def create_default_config(config_file):
-    target = os.path.realpath(config_file) if os.path.islink(config_file) else config_file
-    try:
-        with open(target, 'w') as f:
-            f.write(DEFAULT_CONFIG)
-        print(f"Created default config file at {target}")
-    except Exception as e:
-        print(f"Error writing default config file: {e}")
-
-
 def load_configuration(config_file):
     config = configparser.ConfigParser()
     read_files = config.read(config_file)
     if not read_files or not REQUIRED_SECTIONS.issubset(set(config.sections())):
-        print("Configuration file missing or invalid. Creating default configuration...")
-        create_default_config(config_file)
-        config.read(config_file)
+        print("Error: Configuration file missing or invalid.")
+        exit(1)
     return config
 
 
@@ -202,9 +100,7 @@ def load_profiles(filename):
                     'bitrate': int(parts[7]),
                     'gop': float(parts[8]),
                     'power': int(parts[9]),
-                    'roi_qp': parts[10],
                     'bandwidth': int(parts[11]),
-                    'qp_delta': int(parts[12]) if len(parts) > 12 else 0,
                 })
     except FileNotFoundError:
         print(f"Error: Profiles file not found: {filename}")
@@ -438,8 +334,6 @@ class ProfileSelector:
             self.dyn_min_power = config.getint(d, 'min_power')
             self.dyn_bandwidth = config.getint(d, 'bandwidth')
             self.dyn_gop = config.getfloat(d, 'gop')
-            self.dyn_qp_delta = config.getint(d, 'qp_delta')
-            self.dyn_roi_qp = config.get(d, 'roi_qp')
             self.max_mcs_step_up = config.getint(d, 'max_mcs_step_up', fallback=1)
 
         # SNR EMA state (used in dynamic mode)
@@ -537,9 +431,7 @@ class ProfileSelector:
             'bitrate': bitrate,
             'gop': self.dyn_gop,
             'power': self._compute_power(mcs),
-            'roi_qp': self.dyn_roi_qp,
             'bandwidth': self.dyn_bandwidth,
-            'qp_delta': self.dyn_qp_delta,
         }
 
     def compute_score(self, best_rssi, best_snr, min_rssi,
@@ -772,9 +664,7 @@ def generate_profile_message(profile_idx, profile):
         str(profile['bitrate']),
         str(profile['gop']),
         str(profile['power']),
-        profile['roi_qp'],
         str(profile['bandwidth']),
-        str(profile['qp_delta']),
         str(timestamp),
     ]
 

@@ -34,20 +34,12 @@ void *txmon_thread_func(void *arg) {
 
         long since_xtx_ms = util_elapsed_ms_timespec(&now, &last_xtx_time);
 
-        /* Disable ROI to help mitigate spikes using batched API */
-        if (cfg->roi_focus_mode && latest_tx_dropped > 0 && strcmp(ps->prevROIqp, "0,0,0,0") != 0) {
-            profile_apply_api_batch(cfg, ps->prevQpDelta, ps->prevSetBitrate, ps->prevSetGop,
-                                    "0,0,0,0", cmd);
-            strcpy(ps->prevROIqp, "0,0,0,0");
-        }
-
         /* If we see dropped-tx, reduce bitrate (once) and reset timer */
         if (cfg->allow_xtx_reduce_bitrate && latest_tx_dropped > 0) {
             if (!ps->bitrate_reduced) {
                 int new_bitrate = (int)(ps->prevSetBitrate * cfg->xtx_reduce_bitrate_factor);
                 /* Apply bitrate via batched API */
-                profile_apply_api_batch(cfg, ps->prevQpDelta, new_bitrate, ps->prevSetGop,
-                                        cfg->roi_focus_mode ? ps->prevROIqp : "0,0,0,0", cmd);
+                profile_apply_api_batch(cfg, new_bitrate, ps->prevSetGop, cmd);
                 ps->bitrate_reduced = true;
                 if (cfg->verbose_mode)
                     printf("Reduced bitrate due to tx-drops\n");
@@ -58,8 +50,7 @@ void *txmon_thread_func(void *arg) {
         /* If we've reduced, but no new tx-drops for >= restore_interval_ms, restore */
         else if (ps->bitrate_reduced && since_xtx_ms >= restore_interval_ms) {
             /* Apply bitrate via batched API */
-            profile_apply_api_batch(cfg, ps->prevQpDelta, (int)ps->prevSetBitrate, ps->prevSetGop,
-                                    cfg->roi_focus_mode ? ps->prevROIqp : "0,0,0,0", cmd);
+            profile_apply_api_batch(cfg, (int)ps->prevSetBitrate, ps->prevSetGop, cmd);
             ps->bitrate_reduced = false;
             if (cfg->verbose_mode)
                 printf("Restored normal bitrate after %ld ms without tx-drops\n",

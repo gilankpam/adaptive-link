@@ -179,15 +179,6 @@ int main(int argc, char *argv[]) {
         daemon.cfg.limitFPS = 0;
     }
 
-    /* Check if roi_focus_mode is enabled */
-    if (daemon.cfg.roi_focus_mode) {
-        if (hw_setup_roi(&daemon.hw, &daemon.cmd) != 0) {
-            printf("Failed to set up focus mode regions based on majestic resolution\n");
-        } else {
-            printf("Focus mode regions set in majestic.yaml\n");
-        }
-    }
-
     /* Start drone antenna monitoring thread */
     pthread_t rssi_thread;
     if (pthread_create(&rssi_thread, NULL, rssi_thread_func, &daemon.rs)) {

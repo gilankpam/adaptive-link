@@ -14,11 +14,97 @@ with open(_gs_path) as _f:
     _code = _f.read().split("if __name__")[0]
 exec(_code)
 
+TEST_CONFIG_STRING = """# adaptive-link VRX settings
+
+[outgoing]
+udp_ip = 10.5.0.10
+udp_port = 9999
+
+[json]
+HOST = 127.0.0.1
+PORT = 8103
+
+[weights]
+snr_weight = 0.5
+rssi_weight = 0.5
+
+[ranges]
+SNR_MIN = 10
+SNR_MAX = 36
+RSSI_MIN = -85
+RSSI_MAX = -40
+
+[keyframe]
+allow_idr = True
+idr_max_messages = 20
+
+[dynamic refinement]
+allow_penalty = False
+
+[noise]
+min_noise = 0.01
+max_noise = 0.1
+deduction_exponent = 0.5
+
+[error estimation]
+kalman_estimate = 0.005
+kalman_error_estimate = 0.1
+process_variance = 1e-5
+measurement_variance = 0.01
+
+[scoring]
+rf_weight = 0.5
+loss_weight = 0.25
+fec_weight = 0.15
+diversity_weight = 0.1
+max_loss_rate = 0.1
+max_rssi_spread = 20
+
+[profile selection]
+txprofiles_file = /etc/txprofiles.conf
+hold_fallback_mode_ms = 1000
+hold_modes_down_ms = 3000
+min_between_changes_ms = 200
+hysteresis_percent = 5
+hysteresis_percent_down = 5
+ema_fast_alpha = 0.5
+ema_slow_alpha = 0.15
+predict_multi = 1.0
+fast_downgrade = True
+upward_confidence_loops = 3
+limit_max_score_to = 2000
+dynamic_mode = False
+
+[dynamic]
+snr_safety_margin = 3
+snr_ema_alpha = 0.3
+loss_margin_weight = 20
+fec_margin_weight = 5
+max_mcs = 7
+short_gi_snr_margin = 5
+loss_threshold_for_fec_downgrade = 0.05
+fec_redundancy_ratio = 0.25
+utilization_factor = 0.45
+max_bitrate = 30000
+min_bitrate = 2000
+max_power = 2500
+min_power = 200
+bandwidth = 20
+gop = 10
+max_mcs_step_up = 1
+
+[telemetry]
+log_enabled = False
+log_dir = /var/log/alink
+log_rotate_mb = 50
+outcome_window_ticks = 10
+adapter_id = default
+"""
 
 def _make_config(overrides=None):
-    """Create a configparser with DEFAULT_CONFIG and optional overrides."""
+    """Create a configparser with TEST_CONFIG_STRING and optional overrides."""
     config = configparser.ConfigParser()
-    config.read_string(DEFAULT_CONFIG)
+    config.read_string(TEST_CONFIG_STRING)
     config.set('profile selection', 'dynamic_mode', 'True')
     if overrides:
         for section, kvs in overrides.items():
@@ -278,17 +364,7 @@ class TestFixedParams(unittest.TestCase):
         profile = ps._compute_profile()
         self.assertEqual(profile['gop'], 5.0)
 
-    def test_qp_delta_from_config(self):
-        ps = _make_selector()
-        _feed_score(ps, best_snr=20)
-        profile = ps._compute_profile()
-        self.assertEqual(profile['qp_delta'], -12)
 
-    def test_roi_qp_from_config(self):
-        ps = _make_selector()
-        _feed_score(ps, best_snr=20)
-        profile = ps._compute_profile()
-        self.assertEqual(profile['roi_qp'], '0,0,0,0')
 
     def test_bandwidth_from_config(self):
         ps = _make_selector()
@@ -443,20 +519,20 @@ class TestBackwardCompat(unittest.TestCase):
 
     def test_table_mode_default(self):
         config = configparser.ConfigParser()
-        config.read_string(DEFAULT_CONFIG)
+        config.read_string(TEST_CONFIG_STRING)
         ps = ProfileSelector([], config)
         self.assertFalse(ps.dynamic_mode)
 
     def test_table_mode_uses_lookup(self):
         config = configparser.ConfigParser()
-        config.read_string(DEFAULT_CONFIG)
+        config.read_string(TEST_CONFIG_STRING)
         profiles = [
             {'range_min': 1000, 'range_max': 1500, 'gi': 'long', 'mcs': 1,
              'fec_k': 8, 'fec_n': 12, 'bitrate': 4000, 'gop': 10.0,
-             'power': 45, 'roi_qp': '0,0,0,0', 'bandwidth': 20, 'qp_delta': -12},
+             'power': 45, 'bandwidth': 20},
             {'range_min': 1501, 'range_max': 2000, 'gi': 'short', 'mcs': 5,
              'fec_k': 10, 'fec_n': 12, 'bitrate': 20000, 'gop': 10.0,
-             'power': 30, 'roi_qp': '0,0,0,0', 'bandwidth': 20, 'qp_delta': -12},
+             'power': 30, 'bandwidth': 20},
         ]
         ps = ProfileSelector(profiles, config)
         idx, profile = ps._lookup_profile(1200)

@@ -44,13 +44,11 @@ typedef struct {
     int prevBandwidth;
     char prevSetGI[10];
     int prevSetMCS;
-    char prevROIqp[20];
     int prevSetFecK;
     int prevSetFecN;
     int prevSetBitrate;
     int prevDivideFpsBy;
     int prevFPS;
-    int prevQpDelta;
 
     /* FEC/bitrate restore tracking */
     int old_bitrate;
@@ -98,11 +96,17 @@ void profile_apply(profile_state_t *ps, Profile *profile, void *osd);
 int profile_apply_fec(profile_state_t *ps, int fec_k, int fec_n);
 
 /**
- * Apply batched API call for qpDelta, bitrate, gop, and roiQp.
+ * Compute ROI QP from bitrate (kbps).
+ * Returns scaled roiqp_base based on bitrate position between lo and hi.
+ */
+int calc_roiQp_from_bitrate(int kbps, int hi, int lo, int roiqp_base);
+
+/**
+ * Apply batched API call for bitrate, gop, and drone-computed roiQp.
  * Used by tx_monitor for bitrate reduction/restore.
  */
 int profile_apply_api_batch(const alink_config_t *cfg,
-                            int qpDelta, int bitrate, float gop, const char *roiQp,
+                            int bitrate, float gop,
                             const cmd_ctx_t *cmd);
 
 /* Async worker thread entry point */

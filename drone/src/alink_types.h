@@ -82,9 +82,7 @@ typedef struct {
     int setBitrate;
     float setGop;
     int wfbPower;
-    char ROIqp[20];
     int bandwidth;
-    int setQpDelta;
 } Profile;
 
 /* ─── OSD UDP output config ─── */

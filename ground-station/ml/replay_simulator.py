@@ -123,11 +123,11 @@ class ReplaySimulator:
     """
 
     # Fitness weights
-    W_THROUGHPUT = 0.1
-    W_RELIABILITY = 0.6
+    W_THROUGHPUT = 0.3
+    W_RELIABILITY = 0.4
     W_STABILITY = 0.1
-    W_CRASH = 10.0
-    CRASH_LOSS_THRESHOLD = 0.05
+    W_CRASH = 5.0
+    CRASH_LOSS_THRESHOLD = 0.5
 
     def __init__(self, ticks_df, config, link_model=None):
         """Initialize replay simulator.

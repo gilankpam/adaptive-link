@@ -32,7 +32,9 @@ typedef struct {
 
     /* Camera/display */
     bool limitFPS;
-    bool roi_focus_mode;
+    int roiqp_hi;
+    int roiqp_lo;
+    int roiqp_base;
     bool get_card_info_from_yaml;
     int osd_level;
     float multiply_font_size_by;
@@ -47,8 +49,8 @@ typedef struct {
     /* IDR API command template - uses native HTTP client (no curl) */
     char idrApiCommandTemplate[100];
 
-    /* Batched API command template - combines qpDelta, bitrate, gop, and roiQp */
-    /* Placeholders: {qpDelta}, {bitrate}, {gop}, {roiQp} */
+    /* Batched API command template - combines bitrate, gop, and drone-computed roiQp */
+    /* Placeholders: {bitrate}, {gop}, {roiQp} */
     char apiCommandTemplate[256];
 
     /* Custom OSD format string */

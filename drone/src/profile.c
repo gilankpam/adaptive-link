@@ -108,7 +108,7 @@ int profile_apply_api_batch(const alink_config_t *cfg,
 
     snprintf(bitrateStr, sizeof(bitrateStr), "%d", bitrate);
     snprintf(gopStr, sizeof(gopStr), "%.1f", gop);
-    snprintf(roiQpStr, sizeof(roiQpStr), "%d", roiQp);
+    snprintf(roiQpStr, sizeof(roiQpStr), "0,%d,0", roiQp);
 
     const char *keys[] = { "bitrate", "gop", "roiQp" };
     const char *values[] = { bitrateStr, gopStr, roiQpStr };

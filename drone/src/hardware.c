@@ -193,6 +193,41 @@ int hw_get_wlan0_channel(void) {
     return channel;
 }
 
+int hw_setup_roi(hw_state_t *hw) {
+    /* Round resolution to multiples of 32 (macroblock alignment) */
+    int rx = (hw->x_res / 32) * 32;
+    int ry = (hw->y_res / 32) * 32;
+
+    /* 3 zones: left 25%, center 50%, right = remainder */
+    int left_w   = (rx / 4 / 32) * 32;
+    int center_w = (rx / 2 / 32) * 32;
+    int right_w  = ((rx - left_w - center_w) / 32) * 32;
+
+    int coord0 = 0;
+    int coord1 = left_w;
+    int coord2 = left_w + center_w;
+
+    char roi_rect[256];
+    snprintf(roi_rect, sizeof(roi_rect),
+             "%dx%dx%dx%d,%dx%dx%dx%d,%dx%dx%dx%d",
+             coord0, 0, left_w, ry,
+             coord1, 0, center_w, ry,
+             coord2, 0, right_w, ry);
+
+    char command[512];
+    snprintf(command, sizeof(command), "cli -s .fpv.roiRect %s", roi_rect);
+
+    INFO_LOG_LEVEL(hw->log_level, "Setting ROI rect: %s\n", roi_rect);
+
+    FILE *fp = popen(command, "r");
+    if (fp == NULL) {
+        ERROR_LOG_LEVEL(hw->log_level, "Failed to set fpv.roiRect\n");
+        return 1;
+    }
+    pclose(fp);
+    return 0;
+}
+
 long hw_get_tx_dropped(hw_state_t *hw) {
     const char *path = "/sys/class/net/wlan0/statistics/tx_dropped";
     FILE *fp = fopen(path, "r");

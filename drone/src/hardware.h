@@ -34,5 +34,6 @@ void hw_read_wfb_status(int *k, int *n, int *stbc_val, int *ldpc, int *short_gi,
                         int *actual_bandwidth, int *mcs_index, int *vht_mode, int *vht_nss);
 int  hw_get_wlan0_channel(void);
 long hw_get_tx_dropped(hw_state_t *hw);
+int  hw_setup_roi(hw_state_t *hw);
 
 #endif /* ALINK_HARDWARE_H */

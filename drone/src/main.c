@@ -170,6 +170,7 @@ int main(int argc, char *argv[]) {
     }
 
     hw_get_resolution(&daemon.hw);
+    hw_setup_roi(&daemon.hw);
     osd_adjust_font_size(&daemon.osd, daemon.hw.x_res, daemon.cfg.multiply_font_size_by);
 
     /* Get FPS value from majestic */

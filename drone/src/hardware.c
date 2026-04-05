@@ -17,6 +17,8 @@ static int get_resolution_inner(hw_state_t *hw) {
 
     if (fgets(resolution, sizeof(resolution) - 1, fp) == NULL) {
         printf("fgets failed\n");
+        pclose(fp);
+        return 1;
     }
 
     pclose(fp);
@@ -39,88 +41,8 @@ void hw_init(hw_state_t *hw) {
     hw->global_fps = 120;
     hw->total_pixels = 1920 * 1080;
     hw->camera_bin[0] = '\0';
+    hw->tx_dropped_initialized = false;
     hw->global_total_tx_dropped = 0;
-}
-
-void hw_load_tx_power_table(hw_state_t *hw) {
-    char adapter[MAX_OUTPUT];
-    char cmd[MAX_CMD];
-    char raw[RAW_BUF];
-    char tmp[MAX_OUTPUT];
-    FILE *fp;
-
-    snprintf(cmd, sizeof(cmd),
-             "yaml-cli-multi -i %s -g .wireless.wlan_adapter",
-             WFB_YAML);
-    fp = popen(cmd, "r");
-    if (!fp || !fgets(adapter, sizeof(adapter), fp)) {
-        fprintf(stderr, "Error: Could not detect WiFi adapter.\n");
-        if (fp) pclose(fp);
-        return;
-    }
-    pclose(fp);
-    util_strip_newline(adapter);
-    printf("\n\nUsing wlan adapter: %s\n\n", adapter);
-
-    for (int mcs = 0; mcs < MCS_COUNT; ++mcs) {
-        memset(hw->tx_power_table[mcs], 0,
-               sizeof(hw->tx_power_table[mcs]));
-
-        snprintf(cmd, sizeof(cmd),
-                 "yaml-cli-multi -i %s -g \".profiles.%s.tx_power.mcs%d\" | sed 's/[][]//g'",
-                 WIFI_ADAPTERS_YAML, adapter, mcs);
-
-        fp = popen(cmd, "r");
-        if (!fp) {
-            fprintf(stderr, "Failed to run yaml-cli-multi for MCS%d\n", mcs);
-            continue;
-        }
-
-        raw[0] = '\0';
-        while (fgets(tmp, sizeof(tmp), fp)) {
-            util_strip_newline(tmp);
-            strncat(raw, tmp, sizeof(raw) - strlen(raw) - 1);
-        }
-        pclose(fp);
-
-        for (char *p = raw; *p; ++p) {
-            if (*p == '"') *p = ' ';
-        }
-
-        int idx = 0;
-        int last_value = 0;
-        char *tok = strtok(raw, ", \t");
-        while (tok && idx < POWER_LEVELS) {
-            while (*tok == ' ') tok++;
-            last_value = atoi(tok);
-            hw->tx_power_table[mcs][idx++] = last_value;
-            tok = strtok(NULL, ", \t");
-        }
-
-        for (; idx < POWER_LEVELS; idx++) {
-            hw->tx_power_table[mcs][idx] = last_value;
-        }
-    }
-}
-
-void hw_print_tx_power_table(const hw_state_t *hw) {
-    printf("TX Power Table (MCS x Power Index):\n");
-
-    printf("        ");
-    for (int i = 0; i < POWER_LEVELS; i++) {
-        char hdr[5];
-        snprintf(hdr, sizeof(hdr), "P%02d", i);
-        printf("%5s ", hdr);
-    }
-    printf("\n");
-
-    for (int m = 0; m < MCS_COUNT; m++) {
-        printf("MCS%-3d: ", m);
-        for (int p = 0; p < POWER_LEVELS; p++) {
-            printf("%5d ", hw->tx_power_table[m][p]);
-        }
-        printf("\n");
-    }
 }
 
 void hw_load_vtx_info(hw_state_t *hw) {
@@ -160,7 +82,7 @@ int hw_get_camera_bin(hw_state_t *hw) {
         return 1;
     }
 
-    if (fgets(sensor_config, sizeof(sensor_config) - 1, fp) == NULL) {
+    if (fgets(sensor_config, sizeof(sensor_config), fp) == NULL) {
         printf("fgets failed\n");
         pclose(fp);
         return 1;
@@ -286,5 +208,11 @@ long hw_get_tx_dropped(hw_state_t *hw) {
 
     long delta = tx_dropped - hw->global_total_tx_dropped;
     hw->global_total_tx_dropped = tx_dropped;
+    
+    if (!hw->tx_dropped_initialized) {
+        hw->tx_dropped_initialized = true;
+        return 0;
+    }
+    
     return delta;
 }

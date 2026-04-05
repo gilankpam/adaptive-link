@@ -11,6 +11,7 @@
 #include <sys/select.h>
 #include <errno.h>
 #include <signal.h>
+#include <fcntl.h>
 
 #define DEFAULT_EXEC_TIMEOUT_MS 500
 
@@ -44,7 +45,7 @@ static int exec_with_timeout(const char *command, int timeout_ms, bool verbose) 
     pid_t pid;
     int status;
     
-    // Create pipe for child-to-parent communication
+    // Create pipe for child lifetime tracking (death signal)
     if (pipe(pipefd) < 0) {
         perror("pipe");
         return -1;
@@ -63,12 +64,18 @@ static int exec_with_timeout(const char *command, int timeout_ms, bool verbose) 
         // Child process
         close(pipefd[0]);  // Close read end
         
-        // Redirect stdout and stderr to pipe
-        if (dup2(pipefd[1], STDOUT_FILENO) < 0 || dup2(pipefd[1], STDERR_FILENO) < 0) {
-            _exit(127);
+        // Redirect stdout safely to /dev/null to prevent log spam
+        // We do NOT redirect to the pipe, so select() only triggers on process exit.
+        int nullfd = open("/dev/null", O_WRONLY);
+        if (nullfd >= 0) {
+            dup2(nullfd, STDOUT_FILENO);
+            if (!verbose) {
+                dup2(nullfd, STDERR_FILENO);
+            }
+            close(nullfd);
         }
-        close(pipefd[1]);
         
+        // pipefd[1] remains open. The OS will close it when exactly this process tree dies.
         execl("/bin/sh", "sh", "-c", command, NULL);
         _exit(127);  // execl failed
     }
@@ -76,7 +83,7 @@ static int exec_with_timeout(const char *command, int timeout_ms, bool verbose) 
     // Parent process
     close(pipefd[1]);  // Close write end
     
-    // Set up select with timeout
+    // Set up select with timeout waiting for EOF on the pipe
     fd_set readfds;
     struct timeval tv;
     int select_result;
@@ -87,26 +94,23 @@ static int exec_with_timeout(const char *command, int timeout_ms, bool verbose) 
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
     
+    // Block until the child closes the pipe (i.e. exits) or we timeout
     select_result = select(pipefd[0] + 1, &readfds, NULL, NULL, &tv);
     close(pipefd[0]);
     
-    if (select_result < 0) {
-        // select was interrupted
-        perror("select");
-        kill(pid, SIGKILL);
-        waitpid(pid, &status, 0);
-        return -1;
-    } else if (select_result == 0) {
-        // Timeout occurred
-        kill(pid, SIGKILL);
-        waitpid(pid, &status, 0);
-        if (verbose) {
+    if (select_result <= 0) {
+        // select_result == 0 is Timeout, < 0 is error/interrupted
+        if (select_result == 0 && verbose) {
             fprintf(stderr, "Command timed out after %d ms: %s\n", timeout_ms, command);
+        } else if (select_result < 0 && verbose) {
+            perror("select interrupted");
         }
+        kill(pid, SIGKILL);
+        waitpid(pid, &status, 0);
         return -1;
     }
     
-    // Command completed (or failed) - wait for child to reap
+    // Command completed - wait for child to reap
     pid_t waited = waitpid(pid, &status, 0);
     
     if (waited < 0) {

@@ -15,18 +15,16 @@
 typedef struct {
     int ldpc_tx;
     int stbc;
-    int tx_power_table[MCS_COUNT][POWER_LEVELS];
     char camera_bin[64];
     int x_res;
     int y_res;
     int global_fps;
     int total_pixels;
+    bool tx_dropped_initialized;
     long global_total_tx_dropped;
 } hw_state_t;
 
 void hw_init(hw_state_t *hw);
-void hw_load_tx_power_table(hw_state_t *hw);
-void hw_print_tx_power_table(const hw_state_t *hw);
 void hw_load_vtx_info(hw_state_t *hw);
 int  hw_get_camera_bin(hw_state_t *hw);
 int  hw_get_resolution(hw_state_t *hw);

@@ -28,7 +28,7 @@ void *fallback_thread_func(void *arg) {
              * attempt (e.g. API batch timeout) get retried. Delta detection
              * in profile_apply_exec still skips already-applied params. */
             ta->ps->previousProfile = ta->ps->currentProfile;
-            ta->ps->currentProfile = 0;
+            ta->ps->currentProfile = -1;
             ta->ps->prevTimeStamp = util_now_ms();
             profile_apply(ta->ps, &ta->cfg->fallback_profile, ta->osd);
         } else {

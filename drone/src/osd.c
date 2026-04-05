@@ -88,7 +88,7 @@ void *osd_thread_func(void *arg) {
             INFO_LOG(cfg, "Weak drone antenna detected!\n");
         }
 
-        os->set_osd_colour = (ps->currentProfile == 0) ? 6 : (ps->currentProfile < 2) ? 5 : 3;
+        os->set_osd_colour = (ps->currentProfile == -1) ? 2 : 3;
 
         char local_regular_osd[64];
         snprintf(local_regular_osd, sizeof(local_regular_osd), cfg->customOSD, os->set_osd_colour, os->set_osd_font_size);

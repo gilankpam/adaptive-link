@@ -152,16 +152,6 @@ int main(int argc, char *argv[]) {
 
     printf("Listening on UDP port %d, IP: %s...\n", port, ip);
 
-    /* Determine power factor and load tables if required */
-    if (!daemon.cfg.use_0_to_4_txpower) {
-        hw_determine_tx_factor(&daemon.hw);
-    } else {
-        daemon.hw.tx_factor = 1;
-        hw_load_tx_power_table(&daemon.hw);
-        hw_print_tx_power_table(&daemon.hw);
-    }
-    printf("TX Power Factor: %d\n", daemon.hw.tx_factor);
-
     /* Get required values from wfb.yaml */
     if (daemon.cfg.get_card_info_from_yaml) {
         hw_load_vtx_info(&daemon.hw);

@@ -10,8 +10,6 @@ void config_set_defaults(alink_config_t *cfg) {
     memset(cfg, 0, sizeof(*cfg));
 
     cfg->allow_set_power = 1;
-    cfg->use_0_to_4_txpower = 0;
-    cfg->power_level_0_to_4 = 0;
 
     cfg->fallback_ms = 1000;
 
@@ -22,7 +20,7 @@ void config_set_defaults(alink_config_t *cfg) {
     cfg->fallback_profile.setFecN = 12;
     cfg->fallback_profile.setBitrate = 4096;
     cfg->fallback_profile.setGop = 1.0f;
-    cfg->fallback_profile.wfbPower = 58;
+    cfg->fallback_profile.wfbPower = 2500;
     strncpy(cfg->fallback_profile.ROIqp, "0,0,0,0", sizeof(cfg->fallback_profile.ROIqp));
     cfg->fallback_profile.bandwidth = 20;
     cfg->fallback_profile.setQpDelta = 0;
@@ -73,10 +71,6 @@ int config_load(alink_config_t *cfg, const char *filename) {
             }
             if (strcmp(key, "allow_set_power") == 0) {
                 cfg->allow_set_power = atoi(value);
-            } else if (strcmp(key, "use_0_to_4_txpower") == 0) {
-                cfg->use_0_to_4_txpower = atoi(value);
-            } else if (strcmp(key, "power_level_0_to_4") == 0) {
-                cfg->power_level_0_to_4 = atoi(value);
             } else if (strcmp(key, "fallback_ms") == 0) {
                 cfg->fallback_ms = atoi(value);
             } else if (strcmp(key, "fallback_gi") == 0) {

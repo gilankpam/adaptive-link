@@ -45,18 +45,15 @@ PHY_RATES_40MHZ = [
     (135.0, 150.0),    # MCS 7
 ]
 
-# Default FEC (fec_k, fec_n) per MCS level — smaller blocks at low MCS for
-# fast recovery, larger blocks at high MCS for efficiency.
-FEC_TABLE = [
-    (2, 3),    # MCS 0
-    (2, 3),    # MCS 1
-    (4, 6),    # MCS 2
-    (6, 9),    # MCS 3
-    (8, 12),   # MCS 4
-    (8, 12),   # MCS 5
-    (10, 12),  # MCS 6
-    (10, 12),  # MCS 7
+# FEC block size tiers based on bitrate (kbps).
+# Higher bitrate → larger blocks for better burst protection.
+# Lower bitrate → smaller blocks for lower latency.
+FEC_BITRATE_TIERS = [
+    (4000,  6),    # <= 4 Mbps:  small blocks, fast recovery
+    (12000, 9),    # <= 12 Mbps: medium blocks
+    (25000, 12),   # <= 25 Mbps: large blocks, good burst protection
 ]
+FEC_N_MAX = 15     # > 25 Mbps: maximum block size
 
 # ─── Default configuration ───────────────────────────────────────────────────
 
@@ -129,15 +126,17 @@ fec_margin_weight = 5
 max_mcs = 7
 short_gi_snr_margin = 5
 loss_threshold_for_fec_downgrade = 0.05
+fec_redundancy_ratio = 0.25
 utilization_factor = 0.45
 max_bitrate = 30000
 min_bitrate = 2000
-max_power = 45
-min_power = 30
+max_power = 2500
+min_power = 200
 bandwidth = 20
 gop = 10
 qp_delta = -12
 roi_qp = 0,0,0,0
+max_mcs_step_up = 1
 
 [telemetry]
 log_enabled = False
@@ -431,6 +430,7 @@ class ProfileSelector:
             self.dyn_max_mcs = config.getint(d, 'max_mcs')
             self.short_gi_snr_margin = config.getfloat(d, 'short_gi_snr_margin')
             self.loss_threshold_for_fec_downgrade = config.getfloat(d, 'loss_threshold_for_fec_downgrade')
+            self.fec_redundancy_ratio = config.getfloat(d, 'fec_redundancy_ratio')
             self.utilization_factor = config.getfloat(d, 'utilization_factor')
             self.dyn_max_bitrate = config.getint(d, 'max_bitrate')
             self.dyn_min_bitrate = config.getint(d, 'min_bitrate')
@@ -440,6 +440,7 @@ class ProfileSelector:
             self.dyn_gop = config.getfloat(d, 'gop')
             self.dyn_qp_delta = config.getint(d, 'qp_delta')
             self.dyn_roi_qp = config.get(d, 'roi_qp')
+            self.max_mcs_step_up = config.getint(d, 'max_mcs_step_up', fallback=1)
 
         # SNR EMA state (used in dynamic mode)
         self.snr_ema = 0.0
@@ -472,18 +473,14 @@ class ProfileSelector:
         return None, None
 
     def _compute_power(self, mcs):
-        """Scale TX power inversely with MCS level."""
-        pw_range = self.dyn_max_power - self.dyn_min_power
-        if mcs <= 1:
+        """Scale TX power inversely with MCS level (linear)."""
+        max_mcs = min(7, self.dyn_max_mcs)
+        if max_mcs <= 0:
             return self.dyn_max_power
-        elif mcs <= 3:
-            return self.dyn_max_power - pw_range // 3
-        elif mcs <= 5:
-            return self.dyn_min_power + pw_range // 3
-        else:
-            return self.dyn_min_power
+        t = self._clamp(mcs / max_mcs, 0.0, 1.0)
+        return round(self.dyn_max_power - t * (self.dyn_max_power - self.dyn_min_power))
 
-    def _compute_profile(self):
+    def _compute_profile(self, mcs_override=None):
         """Dynamically compute profile parameters from link metrics."""
         snr = self.snr_ema
         loss_rate = self._current_loss_rate
@@ -495,25 +492,40 @@ class ProfileSelector:
                   fec_pressure * self.fec_margin_weight)
 
         # MCS selection: highest where SNR exceeds threshold + margin
-        mcs = 0
-        for m in range(min(7, self.dyn_max_mcs), -1, -1):
-            if snr >= MCS_SNR_THRESHOLDS[m] + margin:
-                mcs = m
-                break
+        if mcs_override is not None:
+            mcs = mcs_override
+        else:
+            mcs = 0
+            for m in range(min(7, self.dyn_max_mcs), -1, -1):
+                if snr >= MCS_SNR_THRESHOLDS[m] + margin:
+                    mcs = m
+                    break
 
         # Guard interval: short only when SNR margin is comfortable
         snr_above = snr - MCS_SNR_THRESHOLDS[mcs]
         use_short_gi = (snr_above >= self.short_gi_snr_margin and
                         loss_rate < 0.02 and fec_pressure < 0.3)
 
-        # FEC: base from MCS table, increase redundancy under loss
-        fec_k, fec_n = FEC_TABLE[mcs]
+        # Bitrate & FEC: compute together — FEC block size scales with bitrate
+        phy_rates = PHY_RATES_40MHZ if self.dyn_bandwidth == 40 else PHY_RATES_20MHZ
+        phy_rate = phy_rates[mcs][1 if use_short_gi else 0]
+
+        # Preliminary bitrate (before FEC) to determine block size tier
+        raw_bitrate = int(phy_rate * 1000 * self.utilization_factor)
+
+        # FEC block size from bitrate tier
+        fec_n = FEC_N_MAX
+        for threshold, n in FEC_BITRATE_TIERS:
+            if raw_bitrate <= threshold:
+                fec_n = n
+                break
+        fec_k = max(2, round(fec_n * (1 - self.fec_redundancy_ratio)))
+
+        # Increase redundancy under loss
         if loss_rate > self.loss_threshold_for_fec_downgrade:
             fec_k = max(2, fec_k - 2)
 
-        # Bitrate: derived from PHY rate, FEC efficiency, utilization
-        phy_rates = PHY_RATES_40MHZ if self.dyn_bandwidth == 40 else PHY_RATES_20MHZ
-        phy_rate = phy_rates[mcs][1 if use_short_gi else 0]
+        # Final bitrate with FEC efficiency
         bitrate = int(phy_rate * 1000 * (fec_k / fec_n) * self.utilization_factor)
         bitrate = max(self.dyn_min_bitrate, min(self.dyn_max_bitrate, bitrate))
 
@@ -650,6 +662,14 @@ class ProfileSelector:
         if self.dynamic_mode:
             new_profile = self._compute_profile()
             new_idx = new_profile['mcs']
+            # Limit upward MCS step size to prevent power-coupling oscillation
+            if (self.current_profile_idx >= 0 and
+                    new_idx > self.current_profile_idx and
+                    self.max_mcs_step_up > 0):
+                capped_mcs = self.current_profile_idx + self.max_mcs_step_up
+                if new_idx > capped_mcs:
+                    new_idx = capped_mcs
+                    new_profile = self._compute_profile(mcs_override=capped_mcs)
         else:
             new_idx, new_profile = self._lookup_profile(combined_value)
             if new_idx is None:
@@ -706,6 +726,11 @@ class ProfileSelector:
         if self.dynamic_mode:
             new_profile = self._compute_profile()
             new_idx = new_profile['mcs']
+            # Apply step limit so confidence targets the reachable MCS
+            if (self.current_profile_idx >= 0 and
+                    new_idx > self.current_profile_idx and
+                    self.max_mcs_step_up > 0):
+                new_idx = min(new_idx, self.current_profile_idx + self.max_mcs_step_up)
         else:
             new_idx, _ = self._lookup_profile(combined_value)
         if new_idx is not None and new_idx != self.current_profile_idx and new_idx > self.current_profile_idx:

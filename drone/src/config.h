@@ -14,8 +14,6 @@
 typedef struct {
     /* Power config */
     bool allow_set_power;
-    bool use_0_to_4_txpower;
-    int power_level_0_to_4;
 
     /* Fallback */
     int fallback_ms;

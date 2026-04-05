@@ -159,11 +159,7 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
         const char *keys[] = { "power" };
         char strPower[10];
 
-        if (cfg->use_0_to_4_txpower) {
-            finalPower = hw->tx_power_table[currentSetMCS][cfg->power_level_0_to_4];
-        } else {
-            finalPower = currentWfbPower * hw->tx_factor;
-        }
+        finalPower = currentWfbPower;
 
         snprintf(strPower, sizeof(strPower), "%d", finalPower);
         const char *values[] = { strPower };
@@ -328,13 +324,12 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
     const char *gi_string = short_gi ? "short" : "long";
     int pwr = cfg->allow_set_power ? finalPower : 0;
 
-    sprintf(os->profile, "%lds %d %d%s%d Pw(%d)%d g%.1f",
+    sprintf(os->profile, "%lds %d %d%s%d Pw%d g%.1f",
             timeElapsed,
             profile->setBitrate,
             actual_bandwidth,
             gi_string,
             mcs_index,
-            cfg->power_level_0_to_4,
             pwr,
             profile->setGop);
 

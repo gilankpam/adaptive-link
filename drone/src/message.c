@@ -133,6 +133,13 @@ static void msg_process_profile(msg_state_t *ms, const char *msg) {
     msg_handle_idr(ms, idr_code);
     msg_handle_time_sync(ms, transmitted_time);
 
+    /* Clear init placeholder text on first profile message */
+    if (!ms->gs_connected) {
+        ms->gs_connected = true;
+        ms->osd->gs_stats[0] = '\0';
+        ms->osd->score_related[0] = '\0';
+    }
+
     /* Apply profile if not paused */
     pthread_mutex_lock(ms->pause_mutex);
     if (!*(ms->paused)) {

@@ -14,8 +14,6 @@
 typedef struct {
     /* Power config */
     bool allow_set_power;
-    bool use_0_to_4_txpower;
-    int power_level_0_to_4;
 
     /* Fallback */
     int fallback_ms;
@@ -39,6 +37,7 @@ typedef struct {
     int osd_level;
     float multiply_font_size_by;
     bool verbose_mode;
+    bool debug_log;
 
     /* Command templates */
     char fpsCommandTemplate[150];
@@ -55,6 +54,22 @@ typedef struct {
     /* Custom OSD format string */
     char customOSD[64];
 } alink_config_t;
+
+/**
+ * Print a debug log line with wall-clock timestamp prefix.
+ * Usage: DEBUG_LOG(cfg, "Power: %d -> %d\n", old, new);
+ */
+#define DEBUG_LOG(cfg, fmt, ...) do { \
+    if ((cfg)->debug_log) { \
+        struct timespec _ts; \
+        clock_gettime(CLOCK_REALTIME, &_ts); \
+        struct tm _tm; \
+        localtime_r(&_ts.tv_sec, &_tm); \
+        printf("[DEBUG %02d:%02d:%02d.%03ld] " fmt, \
+               _tm.tm_hour, _tm.tm_min, _tm.tm_sec, \
+               _ts.tv_nsec / 1000000, ##__VA_ARGS__); \
+    } \
+} while (0)
 
 /**
  * Initialize config struct with default values.

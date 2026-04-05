@@ -47,6 +47,7 @@ static void print_usage(void) {
     printf("  --ip         IP address to bind to (default: %s)\n", DEFAULT_IP);
     printf("  --port       Port to listen on (default: %d)\n", DEFAULT_PORT);
     printf("  --verbose    Enable verbose output\n");
+    printf("  --debug-log  Enable debug logging of parameter changes\n");
     printf("  --pace-exec  Maj/wfb control execution pacing interval in milliseconds (default: %d ms)\n", DEFAULT_PACE_EXEC_MS);
 }
 
@@ -88,6 +89,8 @@ int main(int argc, char *argv[]) {
             strncpy(ip, argv[++i], INET_ADDRSTRLEN);
         } else if (strcmp(argv[i], "--verbose") == 0) {
             daemon.cfg.verbose_mode = true;
+        } else if (strcmp(argv[i], "--debug-log") == 0) {
+            daemon.cfg.debug_log = true;
         } else if (strcmp(argv[i], "--pace-exec") == 0 && i + 1 < argc) {
             int ms = atoi(argv[++i]);
             pace_exec = ms * 1000L;
@@ -148,16 +151,6 @@ int main(int argc, char *argv[]) {
     }
 
     printf("Listening on UDP port %d, IP: %s...\n", port, ip);
-
-    /* Determine power factor and load tables if required */
-    if (!daemon.cfg.use_0_to_4_txpower) {
-        hw_determine_tx_factor(&daemon.hw);
-    } else {
-        daemon.hw.tx_factor = 1;
-        hw_load_tx_power_table(&daemon.hw);
-        hw_print_tx_power_table(&daemon.hw);
-    }
-    printf("TX Power Factor: %d\n", daemon.hw.tx_factor);
 
     /* Get required values from wfb.yaml */
     if (daemon.cfg.get_card_info_from_yaml) {

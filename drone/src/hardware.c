@@ -6,25 +6,6 @@
 #include "util.h"
 #include "command.h"
 
-static int check_module_loaded(const char *module_name) {
-    FILE *fp = fopen("/proc/modules", "r");
-    if (!fp) {
-        perror("Failed to open /proc/modules");
-        return 0;
-    }
-
-    char line[256];
-    while (fgets(line, sizeof(line), fp)) {
-        if (strncmp(line, module_name, strlen(module_name)) == 0) {
-            fclose(fp);
-            return 1;
-        }
-    }
-
-    fclose(fp);
-    return 0;
-}
-
 static int get_resolution_inner(hw_state_t *hw) {
     char resolution[32];
 
@@ -51,7 +32,6 @@ static int get_resolution_inner(hw_state_t *hw) {
 
 void hw_init(hw_state_t *hw) {
     memset(hw, 0, sizeof(*hw));
-    hw->tx_factor = 50;
     hw->ldpc_tx = 1;
     hw->stbc = 1;
     hw->x_res = 1920;
@@ -169,16 +149,6 @@ void hw_load_vtx_info(hw_state_t *hw) {
         hw->stbc = atoi(buffer);
     }
     pclose(pipe);
-}
-
-void hw_determine_tx_factor(hw_state_t *hw) {
-    if (check_module_loaded("88XXau")) {
-        hw->tx_factor = -100;
-        printf("Found 88XXau card\n");
-    } else {
-        hw->tx_factor = 50;
-        printf("Did not find 88XXau\n");
-    }
 }
 
 int hw_get_camera_bin(hw_state_t *hw) {

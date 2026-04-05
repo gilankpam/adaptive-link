@@ -26,6 +26,7 @@ typedef struct {
     const cmd_ctx_t *cmd;
 
     bool time_synced;
+    bool gs_connected;
 } msg_state_t;
 
 void msg_init(msg_state_t *ms, profile_state_t *ps, keyframe_state_t *ks,

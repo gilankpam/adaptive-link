@@ -10,8 +10,6 @@ void config_set_defaults(alink_config_t *cfg) {
     memset(cfg, 0, sizeof(*cfg));
 
     cfg->allow_set_power = 1;
-    cfg->use_0_to_4_txpower = 0;
-    cfg->power_level_0_to_4 = 0;
 
     cfg->fallback_ms = 1000;
 
@@ -22,7 +20,7 @@ void config_set_defaults(alink_config_t *cfg) {
     cfg->fallback_profile.setFecN = 12;
     cfg->fallback_profile.setBitrate = 4096;
     cfg->fallback_profile.setGop = 1.0f;
-    cfg->fallback_profile.wfbPower = 58;
+    cfg->fallback_profile.wfbPower = 2500;
     strncpy(cfg->fallback_profile.ROIqp, "0,0,0,0", sizeof(cfg->fallback_profile.ROIqp));
     cfg->fallback_profile.bandwidth = 20;
     cfg->fallback_profile.setQpDelta = 0;
@@ -42,6 +40,7 @@ void config_set_defaults(alink_config_t *cfg) {
     cfg->osd_level = 4;
     cfg->multiply_font_size_by = 0.5f;
     cfg->verbose_mode = false;
+    cfg->debug_log = false;
 
     strncpy(cfg->customOSD, "&L%d0&F%d&B &C tx&Wc", sizeof(cfg->customOSD));
 }
@@ -64,12 +63,14 @@ int config_load(alink_config_t *cfg, const char *filename) {
         char *value = strtok(NULL, "\n");
 
         if (key && value) {
+            /* Strip surrounding quotes from value */
+            size_t vlen = strlen(value);
+            if (vlen >= 2 && value[0] == '"' && value[vlen - 1] == '"') {
+                value[vlen - 1] = '\0';
+                value++;
+            }
             if (strcmp(key, "allow_set_power") == 0) {
                 cfg->allow_set_power = atoi(value);
-            } else if (strcmp(key, "use_0_to_4_txpower") == 0) {
-                cfg->use_0_to_4_txpower = atoi(value);
-            } else if (strcmp(key, "power_level_0_to_4") == 0) {
-                cfg->power_level_0_to_4 = atoi(value);
             } else if (strcmp(key, "fallback_ms") == 0) {
                 cfg->fallback_ms = atoi(value);
             } else if (strcmp(key, "fallback_gi") == 0) {
@@ -118,6 +119,8 @@ int config_load(alink_config_t *cfg, const char *filename) {
                 cfg->multiply_font_size_by = atof(value);
             } else if (strcmp(key, "check_xtx_period_ms") == 0) {
                 cfg->check_xtx_period_ms = atoi(value);
+            } else if (strcmp(key, "debug_log") == 0) {
+                cfg->debug_log = atoi(value);
             }
             /* Command templates */
             else if (strcmp(key, "powerCommandTemplate") == 0) {

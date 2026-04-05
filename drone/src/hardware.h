@@ -13,7 +13,6 @@
 #include "command.h"
 
 typedef struct {
-    int tx_factor;
     int ldpc_tx;
     int stbc;
     int tx_power_table[MCS_COUNT][POWER_LEVELS];
@@ -29,7 +28,6 @@ void hw_init(hw_state_t *hw);
 void hw_load_tx_power_table(hw_state_t *hw);
 void hw_print_tx_power_table(const hw_state_t *hw);
 void hw_load_vtx_info(hw_state_t *hw);
-void hw_determine_tx_factor(hw_state_t *hw);
 int  hw_get_camera_bin(hw_state_t *hw);
 int  hw_get_resolution(hw_state_t *hw);
 int  hw_get_video_fps(void);

@@ -159,40 +159,66 @@ int http_get(const char *host, int port, const char *path,
         return -1;
     }
     
-    // Receive response with timeout
-    if (response != NULL && resp_size > 0) {
-        // Use response buffer directly, tracking position with recv_ptr
-        char *recv_ptr = response;
-        
-        while ((bytes_received = socket_recv_with_timeout(sock, recv_ptr, resp_size - total_received - 1, timeout_ms)) > 0) {
+    // Receive response — always read at least the status line to detect errors
+    {
+        char local_buf[HTTP_RECV_BUFFER];
+        char *recv_buf = (response != NULL && resp_size > 0) ? response : local_buf;
+        size_t recv_size = (response != NULL && resp_size > 0) ? resp_size : sizeof(local_buf);
+        char *recv_ptr = recv_buf;
+
+        while ((bytes_received = socket_recv_with_timeout(sock, recv_ptr,
+                    recv_size - total_received - 1, timeout_ms)) > 0) {
             total_received += bytes_received;
-            recv_ptr += bytes_received;  // Advance buffer pointer
-            if (total_received >= (int)resp_size - 1) {
+            recv_ptr += bytes_received;
+            if (total_received >= (int)recv_size - 1)
                 break;
-            }
         }
-        
-        // Null-terminate the received data
         recv_ptr[0] = '\0';
-        
-        if (bytes_received < 0) {
-            // Timeout or error
+
+        if (total_received == 0) {
+            fprintf(stderr, "http_get: no response from %s:%d%s\n", host, port, path);
             close(sock);
             return -1;
         }
-        
-        // Parse and extract body from response buffer
-        size_t body_len = 0;
-        const char *body = parse_http_response(response, (size_t)total_received, &body_len);
-        if (body && body_len > 0) {
-            // Move body to the start of response buffer
-            size_t copy_len = body_len < resp_size - 1 ? body_len : resp_size - 1;
-            memmove(response, body, copy_len);
-            response[copy_len] = '\0';
+
+        // Check HTTP status code
+        int http_status = 0;
+        if (strncmp(recv_buf, "HTTP/", 5) == 0) {
+            const char *sp = strchr(recv_buf, ' ');
+            if (sp) http_status = atoi(sp + 1);
         }
-        // If no body, response already contains the full response (headers included)
+
+        if (http_status < 200 || http_status >= 300) {
+            // Extract just the status line for the error message
+            char status_line[128];
+            const char *eol = strstr(recv_buf, "\r\n");
+            size_t slen = eol ? (size_t)(eol - recv_buf) : strlen(recv_buf);
+            if (slen >= sizeof(status_line)) slen = sizeof(status_line) - 1;
+            memcpy(status_line, recv_buf, slen);
+            status_line[slen] = '\0';
+
+            size_t body_len = 0;
+            const char *body = parse_http_response(recv_buf, (size_t)total_received, &body_len);
+            fprintf(stderr, "http_get: %s:%d%s -> %s | %.*s\n",
+                    host, port, path, status_line,
+                    (int)(body_len > 200 ? 200 : body_len),
+                    body ? body : "(no body)");
+            close(sock);
+            return -1;
+        }
+
+        // If caller wants the response body, extract it
+        if (response != NULL && resp_size > 0) {
+            size_t body_len = 0;
+            const char *body = parse_http_response(response, (size_t)total_received, &body_len);
+            if (body && body_len > 0) {
+                size_t copy_len = body_len < resp_size - 1 ? body_len : resp_size - 1;
+                memmove(response, body, copy_len);
+                response[copy_len] = '\0';
+            }
+        }
     }
-    
+
     close(sock);
     return 0;
 }

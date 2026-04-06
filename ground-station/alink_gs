@@ -327,6 +327,7 @@ class ProfileSelector:
             self.short_gi_snr_margin = config.getfloat(d, 'short_gi_snr_margin')
             self.loss_threshold_for_fec_downgrade = config.getfloat(d, 'loss_threshold_for_fec_downgrade')
             self.fec_redundancy_ratio = config.getfloat(d, 'fec_redundancy_ratio')
+            self.max_fec_redundancy = config.getfloat(d, 'max_fec_redundancy', fallback=0.5)
             self.utilization_factor = config.getfloat(d, 'utilization_factor')
             self.dyn_max_bitrate = config.getint(d, 'max_bitrate')
             self.dyn_min_bitrate = config.getint(d, 'min_bitrate')
@@ -413,11 +414,17 @@ class ProfileSelector:
             if raw_bitrate <= threshold:
                 fec_n = n
                 break
+        
+        # Calculate fec_k with max_fec_redundancy enforcement
         fec_k = max(2, round(fec_n * (1 - self.fec_redundancy_ratio)))
+        
+        # Enforce max_fec_redundancy (minimum fec_k to prevent excessive redundancy)
+        min_fec_k = round(fec_n * (1 - self.max_fec_redundancy))
+        fec_k = max(fec_k, min_fec_k)
 
-        # Increase redundancy under loss
+        # Increase redundancy under loss (but respect max_fec_redundancy)
         if loss_rate > self.loss_threshold_for_fec_downgrade:
-            fec_k = max(2, fec_k - 2)
+            fec_k = max(min_fec_k, fec_k - 2)
 
         # Final bitrate with FEC efficiency
         bitrate = int(phy_rate * 1000 * (fec_k / fec_n) * self.utilization_factor)

@@ -275,12 +275,14 @@ class TestFEC(unittest.TestCase):
         self.assertEqual(profile['fec_n'], 9)
 
     def test_fec_downgrade_floor(self):
-        """fec_k should not go below 2."""
+        """fec_k should respect max_fec_redundancy (50% max = min fec_k = fec_n * 0.5)."""
         ps = _make_selector()
-        _feed_score(ps, best_snr=7)  # MCS0, fec_k=4
-        ps._current_loss_rate = 0.06
+        _feed_score(ps, best_snr=7)  # MCS0, fec_n=6
+        ps._current_loss_rate = 0.06  # Triggers downgrade
         profile = ps._compute_profile()
-        self.assertEqual(profile['fec_k'], 2)  # max(2, 4-2) = 2
+        # With max_fec_redundancy=0.5, min_fec_k = round(6 * 0.5) = 3
+        # So fec_k stays at 3, not 2
+        self.assertEqual(profile['fec_k'], 3)  # max(3, 4-2) = 3 (enforced by max_fec_redundancy)
 
 
 class TestBitrate(unittest.TestCase):

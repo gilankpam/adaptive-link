@@ -45,15 +45,11 @@ PHY_RATES_40MHZ = [
     (135.0, 150.0),    # MCS 7
 ]
 
-# FEC block size tiers based on bitrate (kbps).
-# Higher bitrate → larger blocks for better burst protection.
-# Lower bitrate → smaller blocks for lower latency.
-FEC_BITRATE_TIERS = [
-    (4000,  6),    # <= 4 Mbps:  small blocks, fast recovery
-    (12000, 9),    # <= 12 Mbps: medium blocks
-    (25000, 12),   # <= 25 Mbps: large blocks, good burst protection
-]
-FEC_N_MAX = 15     # > 25 Mbps: maximum block size
+# Fixed video frame rate (static config for now)
+VIDEO_FPS = 60
+
+# WFB-NG MTU payload byte size (standard for OpenIPC)
+MTU_PAYLOAD_BYTES = 1446
 
 REQUIRED_SECTIONS = {
     'outgoing', 'json', 'weights', 'ranges',
@@ -375,6 +371,33 @@ class ProfileSelector:
         t = self._clamp(mcs / max_mcs, 0.0, 1.0)
         return round(self.dyn_max_power - t * (self.dyn_max_power - self.dyn_min_power))
 
+    def _compute_fec_from_bitrate(self, bitrate_bps, redundancy_ratio=None):
+        """Compute FEC K,N from bitrate using frame-aligned algorithm.
+        
+        Args:
+            bitrate_bps: Target video bitrate in bits per second
+            redundancy_ratio: FEC redundancy ratio (default: self.fec_redundancy_ratio)
+        
+        Returns:
+            Tuple of (fec_k, fec_n) integers
+        """
+        # Use config value if not provided
+        if redundancy_ratio is None:
+            redundancy_ratio = self.fec_redundancy_ratio
+        
+        # Step 1: Packets per frame = bitrate / (fps * 8 * mtu)
+        packets_per_frame = bitrate_bps / (VIDEO_FPS * 8 * MTU_PAYLOAD_BYTES)
+        
+        # Step 2: K = ceil(packets_per_frame) for minimal latency
+        fec_k = max(2, math.ceil(packets_per_frame))
+        
+        # Step 3: Apply configurable redundancy ratio
+        # N = K / (1 - redundancy_ratio)
+        # For 25% redundancy (0.25): N = K / 0.75 = K * 1.333...
+        fec_n = math.ceil(fec_k / (1 - redundancy_ratio))
+        
+        return fec_k, fec_n
+
     def _compute_profile(self, mcs_override=None):
         """Dynamically compute profile parameters from link metrics."""
         snr = self.snr_ema
@@ -405,29 +428,32 @@ class ProfileSelector:
         phy_rates = PHY_RATES_40MHZ if self.dyn_bandwidth == 40 else PHY_RATES_20MHZ
         phy_rate = phy_rates[mcs][1 if use_short_gi else 0]
 
-        # Preliminary bitrate (before FEC) to determine block size tier
-        raw_bitrate = int(phy_rate * 1000 * self.utilization_factor)
+        # Raw air capacity in bps (PHY rate × utilization factor)
+        link_bandwidth_bps = int(1000 * 1000 * phy_rate * self.utilization_factor)
 
-        # FEC block size from bitrate tier
-        fec_n = FEC_N_MAX
-        for threshold, n in FEC_BITRATE_TIERS:
-            if raw_bitrate <= threshold:
-                fec_n = n
-                break
-        
-        # Calculate fec_k with max_fec_redundancy enforcement
-        fec_k = max(2, round(fec_n * (1 - self.fec_redundancy_ratio)))
-        
-        # Enforce max_fec_redundancy (minimum fec_k to prevent excessive redundancy)
-        min_fec_k = round(fec_n * (1 - self.max_fec_redundancy))
-        fec_k = max(fec_k, min_fec_k)
+        # Target video bitrate = raw capacity × (1 - redundancy_ratio)
+        # This reserves fec_redundancy_ratio portion of air capacity for FEC overhead
+        target_bitrate_bps = int(link_bandwidth_bps * (1 - self.fec_redundancy_ratio))
 
-        # Increase redundancy under loss (but respect max_fec_redundancy)
+        # FEC calculation based on target video bitrate and frame rate
+        # This sizes the FEC block to match the video frame packet count
+        fec_k, fec_n = self._compute_fec_from_bitrate(target_bitrate_bps)
+
+        # Increase redundancy under loss (reduce K, keep N constant)
         if loss_rate > self.loss_threshold_for_fec_downgrade:
-            fec_k = max(min_fec_k, fec_k - 2)
+            fec_k = max(2, fec_k - 1)
+            # fec_n stays constant - redundancy increases!
 
-        # Final bitrate with FEC efficiency
-        bitrate = int(phy_rate * 1000 * (fec_k / fec_n) * self.utilization_factor)
+        # Enforce max_fec_redundancy
+        # Calculate actual redundancy ratio
+        actual_redundancy = (fec_n - fec_k) / fec_n if fec_n > 0 else 0
+        if actual_redundancy > self.max_fec_redundancy:
+            # Recalculate fec_k to match max_fec_redundancy
+            fec_k = math.ceil(fec_n * (1 - self.max_fec_redundancy))
+            fec_k = max(2, fec_k)
+
+        # Final bitrate in kbps (target video bitrate)
+        bitrate = int(target_bitrate_bps / 1000)
         bitrate = max(self.dyn_min_bitrate, min(self.dyn_max_bitrate, bitrate))
 
         return {

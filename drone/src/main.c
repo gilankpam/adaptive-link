@@ -42,11 +42,11 @@ typedef struct {
 } alink_daemon_t;
 
 static void print_usage(void) {
-    printf("Usage: ./udp_server --port <port> --pace-exec <time> --verbose\n");
+    printf("Usage: ./udp_server --port <port> --pace-exec <time> --log-level <level>\n");
     printf("Options:\n");
     printf("  --ip         IP address to bind to (default: %s)\n", DEFAULT_IP);
     printf("  --port       Port to listen on (default: %d)\n", DEFAULT_PORT);
-    printf("  --verbose    Enable verbose output\n");
+    printf("  --log-level  Logging verbosity (debug, info, error)\n");
     printf("  --pace-exec  Maj/wfb control execution pacing interval in milliseconds (default: %d ms)\n", DEFAULT_PACE_EXEC_MS);
 }
 
@@ -86,8 +86,14 @@ int main(int argc, char *argv[]) {
             port = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--ip") == 0 && i + 1 < argc) {
             strncpy(ip, argv[++i], INET_ADDRSTRLEN);
-        } else if (strcmp(argv[i], "--verbose") == 0) {
-            daemon.cfg.verbose_mode = true;
+        } else if (strcmp(argv[i], "--log-level") == 0 && i + 1 < argc) {
+            const char* level = argv[++i];
+            if (strcmp(level, "debug") == 0) daemon.cfg.log_level = LOG_LEVEL_DEBUG;
+            else if (strcmp(level, "info") == 0) daemon.cfg.log_level = LOG_LEVEL_INFO;
+            else if (strcmp(level, "error") == 0) daemon.cfg.log_level = LOG_LEVEL_ERROR;
+            else {
+                fprintf(stderr, "Unknown log level: %s\n", level);
+            }
         } else if (strcmp(argv[i], "--pace-exec") == 0 && i + 1 < argc) {
             int ms = atoi(argv[++i]);
             pace_exec = ms * 1000L;
@@ -104,25 +110,28 @@ int main(int argc, char *argv[]) {
             }
 
             if ((daemon.osd_udp.udp_out_sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
-                perror("Error creating outgoing UDP socket");
+                ERROR_LOG(&daemon.cfg, "Error creating outgoing UDP socket\n");
                 return 1;
             }
 
-            printf("OSD UDP output enabled to %s:%d\n", daemon.osd_udp.udp_out_ip, daemon.osd_udp.udp_out_port);
+            INFO_LOG(&daemon.cfg, "OSD UDP output enabled to %s:%d\n", daemon.osd_udp.udp_out_ip, daemon.osd_udp.udp_out_port);
         } else {
             print_usage();
             return 1;
         }
     }
 
+    daemon.hw.log_level = daemon.cfg.log_level;
+    daemon.ks.log_level = daemon.cfg.log_level;
+
     /* Initialize command context */
-    cmd_init(&daemon.cmd, pace_exec, daemon.cfg.verbose_mode);
+    cmd_init(&daemon.cmd, pace_exec, daemon.cfg.log_level);
 
     /* Initialize profile state */
     profile_init(&daemon.ps, &daemon.cfg, &daemon.hw, &daemon.cmd);
 
     /* Initialize RSSI monitor */
-    rssi_init(&daemon.rs, daemon.cfg.verbose_mode);
+    rssi_init(&daemon.rs, daemon.cfg.log_level);
 
     /* Initialize message processor */
     msg_init(&daemon.ms, &daemon.ps, &daemon.ks, &daemon.osd, &daemon.cfg,
@@ -130,7 +139,7 @@ int main(int argc, char *argv[]) {
 
     /* Create UDP socket for incoming messages */
     if ((daemon.sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
-        perror("Socket creation failed. TX connected? Make sure video and tunnel are working");
+        ERROR_LOG(&daemon.cfg, "Socket creation failed. TX connected? Make sure video and tunnel are working\n");
         osd_error("Adaptive-Link:  Check wfb tunnel functionality");
         exit(EXIT_FAILURE);
     }
@@ -141,64 +150,46 @@ int main(int argc, char *argv[]) {
     server_addr.sin_port = htons(port);
 
     if (bind(daemon.sockfd, (const struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-        perror("Bind failed");
+        ERROR_LOG(&daemon.cfg, "Bind failed\n");
         osd_error("Adaptive-Link:  Check wfb tunnel functionality");
         close(daemon.sockfd);
         exit(EXIT_FAILURE);
     }
 
-    printf("Listening on UDP port %d, IP: %s...\n", port, ip);
-
-    /* Determine power factor and load tables if required */
-    if (!daemon.cfg.use_0_to_4_txpower) {
-        hw_determine_tx_factor(&daemon.hw);
-    } else {
-        daemon.hw.tx_factor = 1;
-        hw_load_tx_power_table(&daemon.hw);
-        hw_print_tx_power_table(&daemon.hw);
-    }
-    printf("TX Power Factor: %d\n", daemon.hw.tx_factor);
+    INFO_LOG(&daemon.cfg, "Listening on UDP port %d, IP: %s...\n", port, ip);
 
     /* Get required values from wfb.yaml */
     if (daemon.cfg.get_card_info_from_yaml) {
         hw_load_vtx_info(&daemon.hw);
     }
-    printf("ldpc_tx: %d\nstbc: %d\n", daemon.hw.ldpc_tx, daemon.hw.stbc);
+    INFO_LOG(&daemon.cfg, "ldpc_tx: %d\nstbc: %d\n", daemon.hw.ldpc_tx, daemon.hw.stbc);
 
     /* Get camera bin */
     if (hw_get_camera_bin(&daemon.hw) != 0) {
-        printf("Didn't retrieve camera bin filename. Continuing...\n");
+        INFO_LOG(&daemon.cfg, "Didn't retrieve camera bin filename. Continuing...\n");
     }
 
     hw_get_resolution(&daemon.hw);
+    hw_setup_roi(&daemon.hw);
     osd_adjust_font_size(&daemon.osd, daemon.hw.x_res, daemon.cfg.multiply_font_size_by);
 
     /* Get FPS value from majestic */
-    int fps = hw_get_video_fps();
+    int fps = hw_get_video_fps(&daemon.hw);
     if (fps >= 0) {
-        printf("Video FPS: %d\n", fps);
+        INFO_LOG(&daemon.cfg, "Video FPS: %d\n", fps);
         daemon.hw.global_fps = fps;
         if (fps == 0) {
             daemon.cfg.limitFPS = 0;
         }
     } else {
-        printf("Failed to retrieve video FPS from majestic.\n");
+        ERROR_LOG(&daemon.cfg, "Failed to retrieve video FPS from majestic.\n");
         daemon.cfg.limitFPS = 0;
-    }
-
-    /* Check if roi_focus_mode is enabled */
-    if (daemon.cfg.roi_focus_mode) {
-        if (hw_setup_roi(&daemon.hw, &daemon.cmd) != 0) {
-            printf("Failed to set up focus mode regions based on majestic resolution\n");
-        } else {
-            printf("Focus mode regions set in majestic.yaml\n");
-        }
     }
 
     /* Start drone antenna monitoring thread */
     pthread_t rssi_thread;
     if (pthread_create(&rssi_thread, NULL, rssi_thread_func, &daemon.rs)) {
-        fprintf(stderr, "Error creating drone RSSI monitoring thread\n");
+        ERROR_LOG(&daemon.cfg, "Error creating drone RSSI monitoring thread\n");
     }
 
     /* Start the fallback counting thread */
@@ -258,7 +249,7 @@ int main(int argc, char *argv[]) {
             int n = recvfrom(daemon.sockfd, buffer, sizeof(buffer) - 1, 0,
                              (struct sockaddr *)&client_addr, &client_addr_len);
             if (n < 0) {
-                perror("recvfrom failed");
+                ERROR_LOG(&daemon.cfg, "recvfrom failed\n");
                 break;
             }
 
@@ -277,8 +268,8 @@ int main(int argc, char *argv[]) {
             memcpy(&msg_length, buffer, sizeof(msg_length));
             msg_length = ntohl(msg_length);
 
-            if (daemon.cfg.verbose_mode) {
-                printf("Received message (%u bytes): %s\n", msg_length, buffer + sizeof(msg_length));
+            if (daemon.cfg.log_level >= LOG_LEVEL_DEBUG) {
+                INFO_LOG(&daemon.cfg, "Received message (%u bytes): %s\n", msg_length, buffer + sizeof(msg_length));
             }
 
             /* Strip length off the start of the message */
@@ -293,7 +284,7 @@ int main(int argc, char *argv[]) {
                 msg_process(&daemon.ms, message);
             }
         } else if (activity < 0) {
-            perror("select failed");
+            ERROR_LOG(&daemon.cfg, "select failed\n");
             break;
         }
         /* Timeout or data processed — periodic tick runs here */

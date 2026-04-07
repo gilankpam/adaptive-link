@@ -71,6 +71,13 @@
 /* ─── Utility macros ─── */
 #define min(a, b) ((a) < (b) ? (a) : (b))
 
+/* ─── Log Level Enum ─── */
+typedef enum {
+    LOG_LEVEL_ERROR = 0,
+    LOG_LEVEL_INFO,
+    LOG_LEVEL_DEBUG
+} log_level_t;
+
 /* ─── Profile struct ─── */
 typedef struct {
     int rangeMin;
@@ -82,9 +89,7 @@ typedef struct {
     int setBitrate;
     float setGop;
     int wfbPower;
-    char ROIqp[20];
     int bandwidth;
-    int setQpDelta;
 } Profile;
 
 /* ─── OSD UDP output config ─── */

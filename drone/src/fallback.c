@@ -6,6 +6,7 @@
  * fallback profile defined in alink.conf.
  */
 #include "fallback.h"
+#include "util.h"
 
 void *fallback_thread_func(void *arg) {
     fallback_thread_arg_t *ta = (fallback_thread_arg_t *)arg;
@@ -21,12 +22,17 @@ void *fallback_thread_func(void *arg) {
 
         pthread_mutex_lock(ta->pause_mutex);
         if (*(ta->initialized) && local_count == 0 && !*(ta->paused)) {
-            printf("No messages received in %dms, applying fallback profile\n", ta->cfg->fallback_ms);
-            profile_apply_direct(ta->ps, &ta->cfg->fallback_profile, 0, ta->osd);
+            INFO_LOG(ta->cfg, "No messages received in %dms, applying fallback profile\n", ta->cfg->fallback_ms);
+            /* Bypass profile_apply_direct's duplicate check — fallback must
+             * always dispatch so that commands which failed on a previous
+             * attempt (e.g. API batch timeout) get retried. Delta detection
+             * in profile_apply_exec still skips already-applied params. */
+            ta->ps->previousProfile = ta->ps->currentProfile;
+            ta->ps->currentProfile = -1;
+            ta->ps->prevTimeStamp = util_now_ms();
+            profile_apply(ta->ps, &ta->cfg->fallback_profile, ta->osd);
         } else {
-            if (ta->cfg->verbose_mode) {
-                printf("Messages per %dms: %d\n", ta->cfg->fallback_ms, local_count);
-            }
+            INFO_LOG(ta->cfg, "Messages per %dms: %d\n", ta->cfg->fallback_ms, local_count);
         }
         pthread_mutex_unlock(ta->pause_mutex);
     }

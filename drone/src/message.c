@@ -34,10 +34,10 @@ static void msg_handle_time_sync(msg_state_t *ms, int transmitted_time) {
         tv.tv_sec = transmitted_time;
         tv.tv_usec = 0;
         if (settimeofday(&tv, NULL) == 0) {
-            printf("System time synchronized with transmitted time: %ld\n", (long)transmitted_time);
+            INFO_LOG(ms->cfg, "System time synchronized with transmitted time: %ld\n", (long)transmitted_time);
             ms->time_synced = true;
         } else {
-            perror("Failed to set system time");
+            ERROR_LOG(ms->cfg, "Failed to set system time\n");
         }
     }
 }
@@ -58,7 +58,7 @@ static void msg_handle_idr(msg_state_t *ms, const char *idr_code) {
 }
 
 /**
- * Process a profile message: P:<index>:<GI>:<MCS>:<FecK>:<FecN>:<Bitrate>:<GOP>:<Power>:<ROIqp>:<Bandwidth>:<QpDelta>:<timestamp>[:<idr_code>]
+ * Process a profile message: P:<index>:<GI>:<MCS>:<FecK>:<FecN>:<Bitrate>:<GOP>:<Power>:<Bandwidth>:<timestamp>[:<idr_code>]
  */
 static void msg_process_profile(msg_state_t *ms, const char *msg) {
     Profile profile;
@@ -70,7 +70,7 @@ static void msg_process_profile(msg_state_t *ms, const char *msg) {
 
     char *msgCopy = strdup(msg);
     if (msgCopy == NULL) {
-        perror("Failed to allocate memory");
+        ERROR_LOG(ms->cfg, "Failed to allocate memory\n");
         return;
     }
 
@@ -105,19 +105,12 @@ static void msg_process_profile(msg_state_t *ms, const char *msg) {
                 profile.wfbPower = atoi(token);
                 break;
             case 8:
-                strncpy(profile.ROIqp, token, sizeof(profile.ROIqp) - 1);
-                profile.ROIqp[sizeof(profile.ROIqp) - 1] = '\0';
-                break;
-            case 9:
                 profile.bandwidth = atoi(token);
                 break;
-            case 10:
-                profile.setQpDelta = atoi(token);
-                break;
-            case 11:
+            case 9:
                 transmitted_time = atoi(token);
                 break;
-            case 12:
+            case 10:
                 strncpy(idr_code, token, sizeof(idr_code) - 1);
                 idr_code[sizeof(idr_code) - 1] = '\0';
                 break;
@@ -133,12 +126,19 @@ static void msg_process_profile(msg_state_t *ms, const char *msg) {
     msg_handle_idr(ms, idr_code);
     msg_handle_time_sync(ms, transmitted_time);
 
+    /* Clear init placeholder text on first profile message */
+    if (!ms->gs_connected) {
+        ms->gs_connected = true;
+        ms->osd->gs_stats[0] = '\0';
+        ms->osd->score_related[0] = '\0';
+    }
+
     /* Apply profile if not paused */
     pthread_mutex_lock(ms->pause_mutex);
     if (!*(ms->paused)) {
         profile_apply_direct(ms->ps, &profile, profile_index, ms->osd);
     } else {
-        printf("Adaptive mode paused, waiting for resume command...\n");
+        INFO_LOG(ms->cfg, "Adaptive mode paused, waiting for resume command...\n");
     }
     pthread_mutex_unlock(ms->pause_mutex);
 }
@@ -147,6 +147,6 @@ void msg_process(msg_state_t *ms, const char *msg) {
     if (msg[0] == 'P' && msg[1] == ':') {
         msg_process_profile(ms, msg + 2);
     } else {
-        printf("Unknown message format: %.20s...\n", msg);
+        ERROR_LOG(ms->cfg, "Unknown message format: %.20s...\n", msg);
     }
 }

@@ -63,24 +63,31 @@ No external C libraries beyond libc and pthreads. No Python packages beyond the 
 adaptive-link/
 ├── drone/
 │   ├── Makefile                         # Drone build configuration
-│   └── src/                             # C daemon source files
-│       ├── main.c                       # Entry point, socket setup, thread orchestration
-│       ├── alink_types.h                # Shared types, constants, macros (header-only)
-│       ├── util.c / util.h              # String helpers, time calculations, URL parsing
-│       ├── config.c / config.h          # alink.conf + txprofiles.conf parsing
-│       ├── hardware.c / hardware.h      # WiFi adapter, power tables, camera/video
-│       ├── command.c / command.h        # Template substitution, timeout execution via fork/exec
-│       ├── profile.c / profile.h        # Profile application only (selection moved to GS)
-│       ├── osd.c / osd.h                # OSD string assembly, display thread
-│       ├── keyframe.c / keyframe.h      # Keyframe request deduplication
-│       ├── rssi_monitor.c / rssi_monitor.h  # Drone antenna RSSI queue + thread
-│       ├── tx_monitor.c / tx_monitor.h      # TX drop monitoring thread
-│       ├── message.c / message.h        # UDP heartbeat message parsing
-│       ├── fallback.c / fallback.h      # Message count / fallback thread
-│       └── http_client.c / http_client.h  # Native HTTP GET requests (no curl)
+│   ├── src/                             # C daemon source files
+│   │   ├── main.c                       # Entry point, socket setup, thread orchestration
+│   │   ├── alink_types.h                # Shared types, constants, macros (header-only)
+│   │   ├── util.c / util.h              # String helpers, time calculations, URL parsing
+│   │   ├── config.c / config.h          # alink.conf + txprofiles.conf parsing
+│   │   ├── hardware.c / hardware.h      # WiFi adapter, power tables, camera/video
+│   │   ├── command.c / command.h        # Template substitution, timeout execution via fork/exec
+│   │   ├── profile.c / profile.h        # Profile application only (selection moved to GS)
+│   │   ├── osd.c / osd.h               # OSD string assembly, display thread
+│   │   ├── keyframe.c / keyframe.h      # Keyframe request deduplication
+│   │   ├── rssi_monitor.c / rssi_monitor.h  # Drone antenna RSSI queue + thread
+│   │   ├── tx_monitor.c / tx_monitor.h      # TX drop monitoring thread
+│   │   ├── message.c / message.h        # UDP heartbeat message parsing
+│   │   ├── fallback.c / fallback.h      # Message count / fallback thread
+│   │   └── http_client.c / http_client.h  # Native HTTP GET requests (no curl)
+│   └── test/
+│       ├── test_util.c                  # Unity tests for C utilities
+│       └── unity/                       # Unity test framework
 │
 ├── ground-station/
-│   └── alink_gs                         # Ground station script (Python 3, ~600 lines)
+│   ├── alink_gs                         # Ground station script (Python 3, ~600 lines)
+│   └── test/
+│       ├── test_dynamic_profile.py      # Python tests for GS dynamic mode
+│       ├── test_feature_engineering.py  # Python tests for ML feature engineering
+│       └── test_telemetry_logger.py     # Python tests for telemetry logging
 │
 ├── config/
 │   ├── alink.conf                       # Drone daemon configuration (simplified)
@@ -97,12 +104,6 @@ adaptive-link/
 │
 ├── scripts/
 │   └── install.sh                       # Installation script for both drone and GS
-│
-├── test/
-│   ├── c/
-│   │   └── test_util.c                  # Unity tests for C utilities
-│   └── python/
-│       └── test_dynamic_profile.py      # Python tests for GS dynamic mode
 │
 ├── docs/
 │   ├── ARCHITECTURE.md                  # This file
@@ -571,11 +572,11 @@ make test         # Run all Unity tests
 make clean        # Clean test artifacts
 ```
 
-Tests are in `test/c/test_util.c` covering URL parsing, command formatting, and utility functions.
+Tests are in `drone/test/test_util.c` covering URL parsing, command formatting, and utility functions.
 
 **Python Tests:**
 ```bash
-python3 -m pytest test/python/test_dynamic_profile.py -v
+python3 -m pytest ground-station/test/test_dynamic_profile.py -v
 ```
 
 Tests cover MCS selection, guard interval logic, FEC parameters, bitrate computation, power scaling, and integration tests.
@@ -650,7 +651,7 @@ sudo ./scripts/install.sh drone remove
 
 ### Code Quality
 
-6. **Automated tests added:** Unity framework for C tests (`test/c/`) and pytest for Python (`test/python/`). Test coverage is improving but not yet comprehensive.
+6. **Automated tests added:** Unity framework for C tests (`drone/test/`) and pytest for Python (`ground-station/test/`). Test coverage is improving but not yet comprehensive.
 
 7. **Duplicate config parameters:** Some parameters exist in both `alink.conf` and `alink_gs.conf` (e.g., fallback settings). The GS version is authoritative for selection; the drone version is for local fallback application.
 

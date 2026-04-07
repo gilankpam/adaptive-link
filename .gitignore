@@ -30,3 +30,9 @@ tmp/
 # Drone build artifacts
 drone/src/*.o
 drone/alink_drone
+
+.claude
+.cline
+.clinerules
+.opencode
+ml-dev/

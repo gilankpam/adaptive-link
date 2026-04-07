@@ -41,7 +41,7 @@ static void add_code(keyframe_state_t *ks, const char *code, struct timespec *cu
         ks->codes[ks->num_requests].timestamp = *current_time;
         ks->num_requests++;
     } else {
-        printf("Max keyframe request codes reached. Consider increasing MAX_CODES.\n");
+        ERROR_LOG_LEVEL(ks->log_level, "Max keyframe request codes reached. Consider increasing MAX_CODES.\n");
     }
     pthread_mutex_unlock(&ks->mutex);
 }
@@ -70,7 +70,7 @@ static void cleanup_expired_codes(keyframe_state_t *ks, struct timespec *current
             continue;
         }
         long elapsed_time_ms = util_elapsed_ms_timespec(current_time, &ks->codes[i].timestamp);
-        printf("Keyframe request code: %s, Elapsed time: %ld ms\n", ks->codes[i].code, elapsed_time_ms);
+        INFO_LOG_LEVEL(ks->log_level, "Keyframe request code: %s, Elapsed time: %ld ms\n", ks->codes[i].code, elapsed_time_ms);
         if (elapsed_time_ms >= EXPIRY_TIME_MS) {
             memmove(&ks->codes[i], &ks->codes[i + 1],
                     (ks->num_requests - i - 1) * sizeof(KeyframeRequest));
@@ -125,39 +125,35 @@ void keyframe_handle_special(keyframe_state_t *ks, const char *msg,
                 char url_path[BUFFER_SIZE];
                 
                 if (util_parse_url(idrApiCommand, host, sizeof(host), &port, url_path, sizeof(url_path)) != 0) {
-                    printf("Failed to parse IDR API URL: %s\n", idrApiCommand);
+                    ERROR_LOG(cfg, "Failed to parse IDR API URL: %s\n", idrApiCommand);
                 } else {
                     if (cmd_http_get(host, port, url_path, NULL, 0, cmd) != 0) {
-                        printf("IDR API request failed: %s:%d%s\n", host, port, url_path);
+                        ERROR_LOG(cfg, "IDR API request failed: %s:%d%s\n", host, port, url_path);
                     }
                 }
                 ks->last_request_time = current_time;
                 ks->total_requests++;
             } else {
-                if (cfg->verbose_mode) {
-                    printf("Already requested keyframe for code: %s\n", code);
-                }
+                INFO_LOG(cfg, "Already requested keyframe for code: %s\n", code);
             }
         } else {
-            if (cfg->verbose_mode) {
-                printf("Keyframe request ignored. Interval  %ld not met for code: %s\n", elapsed_ms, code);
-            }
+            INFO_LOG(cfg, "Keyframe request ignored. Interval  %ld not met for code: %s\n", elapsed_ms, code);
         }
 
     } else if (strcmp(msg_buf, "pause_adaptive") == 0) {
         pthread_mutex_lock(pause_mutex);
         *paused = true;
         pthread_mutex_unlock(pause_mutex);
-        printf("Paused adaptive mode\n");
+        INFO_LOG(cfg, "Paused adaptive mode\n");
 
     } else if (strcmp(msg_buf, "resume_adaptive") == 0) {
         pthread_mutex_lock(pause_mutex);
         *paused = false;
         pthread_mutex_unlock(pause_mutex);
-        printf("Resumed adaptive mode\n");
+        INFO_LOG(cfg, "Resumed adaptive mode\n");
 
     } else {
-        printf("Unknown or disabled special command: %s\n", msg_buf);
+        ERROR_LOG(cfg, "Unknown or disabled special command: %s\n", msg_buf);
     }
 }
 

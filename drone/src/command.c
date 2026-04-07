@@ -3,6 +3,7 @@
  * @brief Command template substitution and execution with timeout support.
  */
 #include "command.h"
+#include "config.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +12,7 @@
 #include <sys/select.h>
 #include <errno.h>
 #include <signal.h>
+#include <fcntl.h>
 
 #define DEFAULT_EXEC_TIMEOUT_MS 500
 
@@ -28,10 +30,10 @@ static void replace_placeholder(char *str, const char *placeholder, const char *
     str[MAX_COMMAND_SIZE-1] = '\0';
 }
 
-void cmd_init(cmd_ctx_t *ctx, long pace_exec_us, bool verbose) {
+void cmd_init(cmd_ctx_t *ctx, long pace_exec_us, log_level_t log_level) {
     ctx->pace_exec_us = pace_exec_us;
     ctx->exec_timeout_ms = DEFAULT_EXEC_TIMEOUT_MS;
-    ctx->verbose = verbose;
+    ctx->log_level = log_level;
 }
 
 /**
@@ -39,12 +41,12 @@ void cmd_init(cmd_ctx_t *ctx, long pace_exec_us, bool verbose) {
  * Uses pipe + select() for millisecond-precision timeout (unlike alarm() which is seconds-only).
  * Returns 0 on success, non-zero exit code on failure, -1 on timeout.
  */
-static int exec_with_timeout(const char *command, int timeout_ms, bool verbose) {
+static int exec_with_timeout(const char *command, int timeout_ms, log_level_t log_level) {
     int pipefd[2];
     pid_t pid;
     int status;
     
-    // Create pipe for child-to-parent communication
+    // Create pipe for child lifetime tracking (death signal)
     if (pipe(pipefd) < 0) {
         perror("pipe");
         return -1;
@@ -63,12 +65,18 @@ static int exec_with_timeout(const char *command, int timeout_ms, bool verbose) 
         // Child process
         close(pipefd[0]);  // Close read end
         
-        // Redirect stdout and stderr to pipe
-        if (dup2(pipefd[1], STDOUT_FILENO) < 0 || dup2(pipefd[1], STDERR_FILENO) < 0) {
-            _exit(127);
+        // Redirect stdout safely to /dev/null to prevent log spam
+        // We do NOT redirect to the pipe, so select() only triggers on process exit.
+        int nullfd = open("/dev/null", O_WRONLY);
+        if (nullfd >= 0) {
+            dup2(nullfd, STDOUT_FILENO);
+            if (log_level < LOG_LEVEL_DEBUG) {
+                dup2(nullfd, STDERR_FILENO);
+            }
+            close(nullfd);
         }
-        close(pipefd[1]);
         
+        // pipefd[1] remains open. The OS will close it when exactly this process tree dies.
         execl("/bin/sh", "sh", "-c", command, NULL);
         _exit(127);  // execl failed
     }
@@ -76,7 +84,7 @@ static int exec_with_timeout(const char *command, int timeout_ms, bool verbose) 
     // Parent process
     close(pipefd[1]);  // Close write end
     
-    // Set up select with timeout
+    // Set up select with timeout waiting for EOF on the pipe
     fd_set readfds;
     struct timeval tv;
     int select_result;
@@ -87,26 +95,23 @@ static int exec_with_timeout(const char *command, int timeout_ms, bool verbose) 
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
     
+    // Block until the child closes the pipe (i.e. exits) or we timeout
     select_result = select(pipefd[0] + 1, &readfds, NULL, NULL, &tv);
     close(pipefd[0]);
     
-    if (select_result < 0) {
-        // select was interrupted
-        perror("select");
-        kill(pid, SIGKILL);
-        waitpid(pid, &status, 0);
-        return -1;
-    } else if (select_result == 0) {
-        // Timeout occurred
-        kill(pid, SIGKILL);
-        waitpid(pid, &status, 0);
-        if (verbose) {
-            fprintf(stderr, "Command timed out after %d ms: %s\n", timeout_ms, command);
+    if (select_result <= 0) {
+        // select_result == 0 is Timeout, < 0 is error/interrupted
+        if (select_result == 0) {
+            ERROR_LOG_LEVEL(log_level, "Command timed out after %d ms: %s\n", timeout_ms, command);
+        } else if (select_result < 0) {
+            ERROR_LOG_LEVEL(log_level, "select interrupted: %s\n", strerror(errno));
         }
+        kill(pid, SIGKILL);
+        waitpid(pid, &status, 0);
         return -1;
     }
     
-    // Command completed (or failed) - wait for child to reap
+    // Command completed - wait for child to reap
     pid_t waited = waitpid(pid, &status, 0);
     
     if (waited < 0) {
@@ -116,16 +121,14 @@ static int exec_with_timeout(const char *command, int timeout_ms, bool verbose) 
     
     if (WIFEXITED(status)) {
         int exit_code = WEXITSTATUS(status);
-        if (verbose && exit_code != 0) {
-            fprintf(stderr, "Command failed with status %d: %s\n", exit_code, command);
+        if (exit_code != 0) {
+            ERROR_LOG_LEVEL(log_level, "Command failed with status %d: %s\n", exit_code, command);
         }
         return exit_code;
     }
     
     if (WIFSIGNALED(status)) {
-        if (verbose) {
-            fprintf(stderr, "Command killed by signal %d: %s\n", WTERMSIG(status), command);
-        }
+        ERROR_LOG_LEVEL(log_level, "Command killed by signal %d: %s\n", WTERMSIG(status), command);
         return -1;
     }
     
@@ -147,7 +150,7 @@ void cmd_format(char *dest, size_t dest_size, const char *tmpl,
 }
 
 int cmd_exec_with_timeout(const cmd_ctx_t *ctx, const char *command) {
-    int result = exec_with_timeout(command, ctx->exec_timeout_ms, ctx->verbose);
+    int result = exec_with_timeout(command, ctx->exec_timeout_ms, ctx->log_level);
     if (ctx->pace_exec_us > 0) {
         usleep(ctx->pace_exec_us);
     }
@@ -156,9 +159,7 @@ int cmd_exec_with_timeout(const cmd_ctx_t *ctx, const char *command) {
 
 int cmd_http_get(const char *host, int port, const char *path,
                  char *response, size_t resp_size, const cmd_ctx_t *ctx) {
-    if (ctx->verbose) {
-        printf("HTTP GET %s:%d%s\n", host, port, path);
-    }
+    INFO_LOG_LEVEL(ctx->log_level, "HTTP GET %s:%d%s\n", host, port, path);
     
     int result = http_get(host, port, path, response, resp_size, ctx->exec_timeout_ms);
     

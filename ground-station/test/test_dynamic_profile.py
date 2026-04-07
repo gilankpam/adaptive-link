@@ -264,40 +264,37 @@ class TestFEC(unittest.TestCase):
         self.assertEqual(profile['fec_k'], 36)
 
     def test_fec_downgrade_on_high_loss(self):
-        """Loss > threshold reduces fec_k by 2, keeping fec_n constant (increases redundancy).
+        """Loss > threshold reduces fec_k by 1, keeping fec_n constant (increases redundancy).
         SNR=21 with loss=0.06 → margin=3+0.06*20=4.2 → MCS3 (14+4.2=18.2<21).
         MCS3 LGI: PHY=26 Mbps, raw=11700 kbps, target=8775 kbps.
         Packets per frame: 8775000/(60*8*1446)=12.6 → K=13, N=ceil(13/0.75)=18.
-        Loss>0.05 → K=max(2,13-2)=11, N stays 18 (redundancy increases from 27.8% to 38.9%).
-        max_fec_redundancy check: 38.9% < 50%, OK."""
+        Loss>0.05 → K=max(2,13-1)=12, N stays 18 (redundancy increases from 27.8% to 33.3%).
+        max_fec_redundancy check: 33.3% < 50%, OK."""
         ps = _make_selector()
         _feed_score(ps, best_snr=21)
         ps._current_loss_rate = 0.06  # > 0.05 threshold
         profile = ps._compute_profile()
         self.assertEqual(profile['mcs'], 3)  # Margin pushed MCS down
-        self.assertEqual(profile['fec_k'], 11)
+        self.assertEqual(profile['fec_k'], 12)
         self.assertEqual(profile['fec_n'], 18)  # N stays constant after loss downgrade
 
     def test_fec_downgrade_floor(self):
         """fec_k has minimum of 2, but max_fec_redundancy may raise it.
-        MCS0: K=4, N=6. After loss downgrade: K=4-2=2, N stays 6.
-        Redundancy becomes (6-2)/6 = 66.7% > 50% max_fec_redundancy.
-        Adjust: K=ceil(6*0.5)=3. Final: K=3, N=6 (41.7% redundancy)."""
+        MCS0: K=4, N=6. After loss downgrade: K=4-1=3, N stays 6.
+        Redundancy becomes (6-3)/6 = 50% = max_fec_redundancy, OK."""
         ps = _make_selector()
         _feed_score(ps, best_snr=7)  # MCS0, K=4, N=6
         ps._current_loss_rate = 0.06  # Triggers downgrade
         profile = ps._compute_profile()
-        self.assertEqual(profile['fec_k'], 3)  # Raised from 2 to respect max_fec_redundancy
+        self.assertEqual(profile['fec_k'], 3)  # 4-1=3, at max_fec_redundancy boundary (50%)
         self.assertEqual(profile['fec_n'], 6)  # N stays constant
 
     def test_max_fec_redundancy_enforced(self):
         """max_fec_redundancy should prevent excessive redundancy after loss.
-        
-        User's example: When link is under stress with FEC 4/6 and loss threshold kicks in:
-        - Loss downgrade: K = 4 - 2 = 2, N stays at 6 → would become 2/6 (too much redundancy)
-        - max_fec_redundancy=0.5 enforces minimum K: min_fec_k = ceil(6 * 0.5) = 3
-        - Result: K=3, N=6 → 3/6 (redundancy = 50%, acceptable)
-        
+
+        MCS0: K=4, N=6. Loss downgrade: K=4-1=3, N stays 6.
+        Redundancy = (6-3)/6 = 50% = max_fec_redundancy, so it just passes.
+
         The purpose is to prevent FEC from becoming too aggressive (too much redundancy)
         on weak links, which would make the link even more fragile.
         """
@@ -368,12 +365,12 @@ class TestBitrate(unittest.TestCase):
     """Test bitrate computation."""
 
     def test_bitrate_mcs0_long_gi(self):
-        """MCS0 LGI: PHY=6.5 Mbps, raw=2925 kbps, target=2925×0.75=2194 kbps."""
+        """MCS0 LGI: PHY=6.5 Mbps, link_bw=2925 kbps, K=4, N=6.
+        bitrate = 2925000 * 4/6 / 1000 = 1950 → clamped to min_bitrate=2000."""
         ps = _make_selector()
         _feed_score(ps, best_snr=7)
         profile = ps._compute_profile()
-        # Target bitrate = raw × (1 - 0.25) = 2925 × 0.75 = 2193 kbps
-        self.assertEqual(profile['bitrate'], 2193)
+        self.assertEqual(profile['bitrate'], 2000)
 
     def test_bitrate_mcs7_short_gi(self):
         """SNR=32 → MCS7, snr_above=32-26=6 >= 5 → short GI.
@@ -400,9 +397,9 @@ class TestBitrate(unittest.TestCase):
         ps = _make_selector({'dynamic': {'bandwidth': '40'}})
         _feed_score(ps, best_snr=7)
         profile = ps._compute_profile()
-        # PHY 13.5 Mbps (40MHz MCS0 long GI), raw=6075 kbps
-        # Packets=8.75 → K=9, N=12, util 0.45 → 13500 * 9/12 * 0.45 = 4556
-        self.assertEqual(profile['bitrate'], 4556)
+        # PHY 13.5 Mbps (40MHz MCS0 long GI), link_bw=6075 kbps
+        # K=7, N=10 → bitrate = 6075000 * 7/10 / 1000 = 4252
+        self.assertEqual(profile['bitrate'], 4252)
 
 
 class TestPower(unittest.TestCase):

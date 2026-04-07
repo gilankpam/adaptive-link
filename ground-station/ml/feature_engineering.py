@@ -54,7 +54,10 @@ def load_telemetry(directory):
                 line = line.strip()
                 if not line:
                     continue
-                record = json.loads(line)
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
                 if record.get('type') == 'outcome':
                     outcomes.append(record)
                 else:

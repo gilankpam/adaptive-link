@@ -23,7 +23,12 @@ _ns = {}
 exec(_code, _ns)
 _ProfileSelector = _ns['ProfileSelector']
 MCS_SNR_THRESHOLDS = _ns['MCS_SNR_THRESHOLDS']
-DEFAULT_CONFIG = _ns['DEFAULT_CONFIG']
+
+
+def load_config_from_file(config_path):
+    """Read an INI config file and return its contents as a string."""
+    with open(config_path) as f:
+        return f.read()
 
 
 class LinkModel:
@@ -123,9 +128,9 @@ class ReplaySimulator:
     """
 
     # Fitness weights
-    W_THROUGHPUT = 0.3
+    W_THROUGHPUT = 0.5
     W_RELIABILITY = 0.4
-    W_STABILITY = 0.1
+    W_STABILITY = 0.2
     W_CRASH = 5.0
     CRASH_LOSS_THRESHOLD = 0.5
 

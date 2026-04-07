@@ -17,7 +17,7 @@ import pandas as pd
 import yaml
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from ml.replay_simulator import DEFAULT_CONFIG, ReplaySimulator
+from ml.replay_simulator import load_config_from_file, ReplaySimulator
 from ml.feature_engineering import load_telemetry
 
 
@@ -46,13 +46,15 @@ def _load_adapter_constraints(adapters_yaml_path):
 class ParameterSpace:
     """Defines the 37 tunable parameters with types, bounds, and constraints."""
 
-    def __init__(self, adapter_constraints=None):
+    def __init__(self, base_config_str, adapter_constraints=None):
         """Initialize parameter space.
 
         Args:
+            base_config_str: INI config string used as the baseline for trials.
             adapter_constraints: Optional dict with 'max_mcs' and 'bandwidths'
                                  for the target adapter.
         """
+        self.base_config_str = base_config_str
         self.constraints = adapter_constraints or {
             'max_mcs': 7,
             'bandwidths': [20, 40],
@@ -70,7 +72,7 @@ class ParameterSpace:
             configparser.ConfigParser with candidate parameters.
         """
         config = configparser.ConfigParser()
-        config.read_string(DEFAULT_CONFIG)
+        config.read_string(self.base_config_str)
         config.set('profile selection', 'dynamic_mode', 'True')
 
         # --- [scoring] weights: sum to 1.0 ---
@@ -188,21 +190,23 @@ class ParameterSpace:
 class AdapterOptimizer:
     """Runs Bayesian optimization for a single adapter type."""
 
-    def __init__(self, adapter_id, ticks_df, adapter_constraints=None,
-                 n_trials=200, seed=42):
+    def __init__(self, adapter_id, ticks_df, base_config_str,
+                 adapter_constraints=None, n_trials=200, seed=42):
         """Initialize optimizer.
 
         Args:
             adapter_id: Adapter identifier for filtering telemetry.
             ticks_df: DataFrame of telemetry ticks (may contain multiple adapters).
+            base_config_str: INI config string used as the baseline.
             adapter_constraints: Optional constraints from wlan_adapters.yaml.
             n_trials: Number of optimization trials.
             seed: Random seed for reproducibility.
         """
         self.adapter_id = adapter_id
+        self.base_config_str = base_config_str
         self.n_trials = n_trials
         self.seed = seed
-        self.param_space = ParameterSpace(adapter_constraints)
+        self.param_space = ParameterSpace(base_config_str, adapter_constraints)
 
         # Filter ticks to this adapter
         if 'adapter' in ticks_df.columns and adapter_id != 'all':
@@ -241,7 +245,7 @@ class AdapterOptimizer:
     def get_default_fitness(self):
         """Run replay with default parameters for comparison."""
         config = configparser.ConfigParser()
-        config.read_string(DEFAULT_CONFIG)
+        config.read_string(self.base_config_str)
         config.set('profile selection', 'dynamic_mode', 'True')
         sim = ReplaySimulator(self.ticks_df, config)
         result = sim.run()
@@ -359,11 +363,16 @@ def main():
                         help='Number of optimization trials (default: 200)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed for reproducibility (default: 42)')
+    parser.add_argument('--config', required=True,
+                        help='Path to alink_gs.conf baseline config file')
     parser.add_argument('--adapters-yaml',
                         default=os.path.join(os.path.dirname(__file__),
                                              '..', '..', 'config', 'wlan_adapters.yaml'),
                         help='Path to wlan_adapters.yaml')
     args = parser.parse_args()
+
+    # Load baseline config
+    base_config_str = load_config_from_file(args.config)
 
     # Load telemetry
     print(f"Loading telemetry from {args.telemetry_dir}...")
@@ -393,7 +402,7 @@ def main():
 
         try:
             optimizer = AdapterOptimizer(
-                adapter_id, ticks_df,
+                adapter_id, ticks_df, base_config_str,
                 adapter_constraints=constraints,
                 n_trials=args.n_trials,
                 seed=args.seed

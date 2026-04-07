@@ -279,10 +279,10 @@ class ProfileSelector:
         # RF normalization ranges
         self.snr_weight = config.getfloat('weights', 'snr_weight')
         self.rssi_weight = config.getfloat('weights', 'rssi_weight')
-        self.snr_min = config.getint('ranges', 'SNR_MIN')
-        self.snr_max = config.getint('ranges', 'SNR_MAX')
-        self.rssi_min = config.getint('ranges', 'RSSI_MIN')
-        self.rssi_max = config.getint('ranges', 'RSSI_MAX')
+        self.snr_min = config.getint('ranges', 'snr_min')
+        self.snr_max = config.getint('ranges', 'snr_max')
+        self.rssi_min = config.getint('ranges', 'rssi_min')
+        self.rssi_max = config.getint('ranges', 'rssi_max')
 
         # Selection tuning
         ps = 'profile selection'
@@ -442,7 +442,6 @@ class ProfileSelector:
         # Increase redundancy under loss (reduce K, keep N constant)
         if loss_rate > self.loss_threshold_for_fec_downgrade:
             fec_k = max(2, fec_k - 1)
-            # fec_n stays constant - redundancy increases!
 
         # Enforce max_fec_redundancy
         # Calculate actual redundancy ratio
@@ -452,8 +451,8 @@ class ProfileSelector:
             fec_k = math.ceil(fec_n * (1 - self.max_fec_redundancy))
             fec_k = max(2, fec_k)
 
-        # Final bitrate in kbps (target video bitrate)
-        bitrate = int(target_bitrate_bps / 1000)
+        # Final bitrate accounts for actual FEC overhead (K/N ratio)
+        bitrate = int(link_bandwidth_bps * (fec_k / fec_n) / 1000)
         bitrate = max(self.dyn_min_bitrate, min(self.dyn_max_bitrate, bitrate))
 
         return {
@@ -906,7 +905,7 @@ def connect_to_wfb_stats():
     while True:
         sock = None
         try:
-            sock = connect_to_server(HOST, PORT)
+            sock = connect_to_server(host, port)
             listen_for_data(sock)
         except (socket.error, ConnectionRefusedError) as e:
             print(f"\n! Check VRX adapter(s)...\nNo connection to wfb-ng stats\n{e}\nRetrying in 3 seconds...")
@@ -933,8 +932,8 @@ if __name__ == "__main__":
     udp_port = config.getint('outgoing', 'udp_port')
 
     # JSON data settings
-    HOST = config.get('json', 'HOST')
-    PORT = config.getint('json', 'PORT')
+    host = config.get('json', 'host')
+    port = config.getint('json', 'port')
 
     # Keyframe settings
     allow_idr = config.getboolean('keyframe', 'allow_idr')

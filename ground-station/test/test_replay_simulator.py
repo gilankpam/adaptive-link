@@ -10,19 +10,16 @@ import pandas as pd
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from ml.replay_simulator import LinkModel, ReplayResult, ReplaySimulator, MCS_SNR_THRESHOLDS
+from ml.replay_simulator import LinkModel, ReplayResult, ReplaySimulator, MCS_SNR_THRESHOLDS, load_config_from_file
 
-# Import DEFAULT_CONFIG from alink_gs
-_gs_path = os.path.join(os.path.dirname(__file__), '..', 'alink_gs')
-with open(_gs_path) as _f:
-    _code = _f.read().split("if __name__")[0]
-exec(_code)
+_CONFIG_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'config', 'alink_gs.conf')
+_BASE_CONFIG_STR = load_config_from_file(_CONFIG_PATH)
 
 
 def _make_config(overrides=None):
     """Create a configparser with DEFAULT_CONFIG and dynamic_mode=True."""
     config = configparser.ConfigParser()
-    config.read_string(DEFAULT_CONFIG)
+    config.read_string(_BASE_CONFIG_STR)
     config.set('profile selection', 'dynamic_mode', 'True')
     if overrides:
         for section, kvs in overrides.items():

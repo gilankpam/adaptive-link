@@ -26,6 +26,283 @@ from ml.feature_engineering import (
 )
 
 
+def plot_rssi_snr_relationship(ticks_df, output_dir):
+    """Generate RSSI vs SNR relationship visualizations."""
+    if 'rssi' not in ticks_df.columns or 'snr' not in ticks_df.columns:
+        print("  Skipping RSSI-SNR relationship — missing columns")
+        return
+
+    data = ticks_df[['rssi', 'snr']].dropna()
+    if data.empty:
+        print("  Skipping RSSI-SNR relationship — no valid data")
+        return
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+    # Plot 1: Scatter plot with color by SNR
+    ax = axes[0]
+    scatter = ax.scatter(data['rssi'], data['snr'], c=data['snr'],
+                         cmap='viridis', alpha=0.5, s=10)
+    ax.set_xlabel('RSSI (dBm)')
+    ax.set_ylabel('SNR (dB)')
+    ax.set_title('RSSI vs SNR Scatter')
+    fig.colorbar(scatter, ax=ax, label='SNR (dB)')
+
+    # Plot 2: 2D histogram (density heatmap)
+    ax = axes[1]
+    h = ax.hist2d(data['rssi'], data['snr'], bins=30, cmap='YlOrRd')
+    ax.set_xlabel('RSSI (dBm)')
+    ax.set_ylabel('SNR (dB)')
+    ax.set_title('RSSI-SNR Density')
+    fig.colorbar(h[3], ax=ax, label='Count')
+
+    # Plot 3: Time series with dual y-axis
+    ax1 = axes[2]
+    ax2 = ax1.twinx()
+    ax1.plot(data.index, data['rssi'], 'b-', alpha=0.7, label='RSSI')
+    ax2.plot(data.index, data['snr'], 'r-', alpha=0.7, label='SNR')
+    ax1.set_xlabel('Tick')
+    ax1.set_ylabel('RSSI (dBm)', color='b')
+    ax2.set_ylabel('SNR (dB)', color='r')
+    ax1.set_title('RSSI and SNR Over Time')
+    ax1.tick_params(axis='y', labelcolor='b')
+    ax2.tick_params(axis='y', labelcolor='r')
+
+    plt.tight_layout()
+    path = os.path.join(output_dir, 'rssi_snr_relationship.png')
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"  Saved {path}")
+
+
+def plot_loss_rate_fec_relationship(ticks_df, output_dir):
+    """Generate loss rate vs FEC pressure relationship visualizations."""
+    if 'loss_rate' not in ticks_df.columns or 'fec_pressure' not in ticks_df.columns:
+        print("  Skipping loss rate-FEC relationship — missing columns")
+        return
+
+    data = ticks_df[['loss_rate', 'fec_pressure']].dropna()
+    if data.empty:
+        print("  Skipping loss rate-FEC relationship — no valid data")
+        return
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+    # Plot 1: Scatter plot with color by FEC pressure
+    ax = axes[0]
+    scatter = ax.scatter(data['loss_rate'], data['fec_pressure'],
+                         c=data['fec_pressure'], cmap='YlOrRd', alpha=0.5, s=10)
+    ax.set_xlabel('Loss Rate')
+    ax.set_ylabel('FEC Pressure')
+    ax.set_title('Loss Rate vs FEC Pressure Scatter')
+    fig.colorbar(scatter, ax=ax, label='FEC Pressure')
+
+    # Plot 2: 2D histogram (density heatmap)
+    ax = axes[1]
+    h = ax.hist2d(data['loss_rate'], data['fec_pressure'], bins=30, cmap='YlOrRd')
+    ax.set_xlabel('Loss Rate')
+    ax.set_ylabel('FEC Pressure')
+    ax.set_title('Loss Rate - FEC Density')
+    fig.colorbar(h[3], ax=ax, label='Count')
+
+    # Plot 3: Time series with dual y-axis
+    ax1 = axes[2]
+    ax2 = ax1.twinx()
+    ax1.plot(data.index, data['loss_rate'], 'r-', alpha=0.7, label='Loss Rate')
+    ax2.plot(data.index, data['fec_pressure'], 'b-', alpha=0.7, label='FEC Pressure')
+    ax1.set_xlabel('Tick')
+    ax1.set_ylabel('Loss Rate', color='r')
+    ax2.set_ylabel('FEC Pressure', color='b')
+    ax1.set_title('Loss Rate and FEC Pressure Over Time')
+    ax1.tick_params(axis='y', labelcolor='r')
+    ax2.tick_params(axis='y', labelcolor='b')
+
+    plt.tight_layout()
+    path = os.path.join(output_dir, 'loss_rate_fec_relationship.png')
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"  Saved {path}")
+
+
+def plot_mcs_snr_analysis(ticks_df, output_dir):
+    """Generate MCS vs SNR analysis visualizations."""
+    if 'mcs' not in ticks_df.columns or 'snr' not in ticks_df.columns:
+        print("  Skipping MCS-SNR analysis — missing columns")
+        return
+
+    data = ticks_df[['mcs', 'snr']].dropna()
+    if data.empty:
+        print("  Skipping MCS-SNR analysis — no valid data")
+        return
+
+    data = data.copy()
+    data['mcs'] = data['mcs'].astype(int)
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+    # Plot 1: MCS vs SNR scatter with color by MCS
+    ax = axes[0]
+    scatter = ax.scatter(data['snr'], data['mcs'], c=data['mcs'],
+                         cmap='viridis', alpha=0.5, s=10)
+    ax.set_xlabel('SNR (dB)')
+    ax.set_ylabel('MCS Level')
+    ax.set_title('MCS vs SNR Scatter')
+    ax.set_yticks(range(8))
+    fig.colorbar(scatter, ax=ax, label='MCS Level')
+
+    # Plot 2: SNR distribution per MCS level (box plot)
+    ax = axes[1]
+    mcs_boxes = []
+    mcs_labels = []
+    for mcs in range(8):
+        subset = data[data['mcs'] == mcs]['snr']
+        if not subset.empty:
+            mcs_boxes.append(subset)
+            mcs_labels.append(f'MCS {mcs}')
+    if mcs_boxes:
+        bp = ax.boxplot(mcs_boxes, tick_labels=mcs_labels, patch_artist=True)
+        for patch, mcs in zip(bp['boxes'], range(len(mcs_labels))):
+            patch.set_facecolor(plt.cm.viridis(mcs / 7))
+        ax.set_xlabel('MCS Level')
+        ax.set_ylabel('SNR (dB)')
+        ax.set_title('SNR Distribution per MCS')
+    else:
+        ax.text(0.5, 0.5, 'No MCS data available', ha='center', va='center')
+
+    # Plot 3: MCS over time with SNR as background
+    ax = axes[2]
+    ax2 = ax.twinx()
+    ax.fill_between(data.index, data['snr'], alpha=0.3, color='gray', label='SNR')
+    ax.plot(range(len(data)), data['mcs'], 'b-', linewidth=0.5, alpha=0.8, label='MCS')
+    ax.set_xlabel('Tick')
+    ax.set_ylabel('MCS Level', color='b')
+    ax2.set_ylabel('SNR (dB)', color='gray')
+    ax.set_title('MCS and SNR Over Time')
+    ax.set_yticks(range(8))
+    ax.tick_params(axis='y', labelcolor='b')
+    ax2.tick_params(axis='y', labelcolor='gray')
+
+    plt.tight_layout()
+    path = os.path.join(output_dir, 'mcs_snr_analysis.png')
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"  Saved {path}")
+
+
+def plot_antenna_diversity_analysis(ticks_df, output_dir):
+    """Generate antenna diversity analysis visualizations."""
+    required_cols = ['ant', 'rssi', 'rssi_min', 'div_score']
+    if not all(col in ticks_df.columns for col in required_cols):
+        print("  Skipping antenna diversity analysis — missing columns")
+        return
+
+    data = ticks_df[required_cols].dropna()
+    if data.empty:
+        print("  Skipping antenna diversity analysis — no valid data")
+        return
+
+    data = data.copy()
+    data['rssi_spread'] = data['rssi'] - data['rssi_min']
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+    # Plot 1: Antenna count distribution
+    ax = axes[0]
+    ant_counts = data['ant'].value_counts().sort_index()
+    ax.bar(ant_counts.index.astype(str), ant_counts.values, color='steelblue')
+    ax.set_xlabel('Number of Antennas')
+    ax.set_ylabel('Count')
+    ax.set_title('Antenna Count Distribution')
+
+    # Plot 2: RSSI spread vs diversity score
+    ax = axes[1]
+    scatter = ax.scatter(data['rssi_spread'], data['div_score'],
+                         c=data['rssi_spread'], cmap='YlOrRd', alpha=0.5, s=10)
+    ax.set_xlabel('RSSI Spread (dB)')
+    ax.set_ylabel('Diversity Score')
+    ax.set_title('RSSI Spread vs Diversity Score')
+    fig.colorbar(scatter, ax=ax, label='RSSI Spread (dB)')
+
+    # Plot 3: Antenna count and diversity score over time
+    ax = axes[2]
+    ax2 = ax.twinx()
+    ax.plot(data.index, data['ant'], 'b-', alpha=0.7, label='Antenna Count')
+    ax2.plot(data.index, data['div_score'], 'r-', alpha=0.7, label='Diversity Score')
+    ax.set_xlabel('Tick')
+    ax.set_ylabel('Antenna Count', color='b')
+    ax2.set_ylabel('Diversity Score', color='r')
+    ax.set_title('Antenna Count and Diversity Score Over Time')
+    ax.tick_params(axis='y', labelcolor='b')
+    ax2.tick_params(axis='y', labelcolor='r')
+
+    plt.tight_layout()
+    path = os.path.join(output_dir, 'antenna_diversity_analysis.png')
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"  Saved {path}")
+
+
+def plot_score_components_analysis(ticks_df, output_dir):
+    """Generate individual score components analysis visualizations."""
+    required_cols = ['rf_score', 'loss_score', 'fec_score', 'div_score', 'score']
+    if not all(col in ticks_df.columns for col in required_cols):
+        print("  Skipping score components analysis — missing columns")
+        return
+
+    data = ticks_df[required_cols].dropna()
+    if data.empty:
+        print("  Skipping score components analysis — no valid data")
+        return
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+
+    # Plot 1: Score components time series (stacked)
+    ax = axes[0, 0]
+    colors = {'rf_score': 'blue', 'loss_score': 'green', 'fec_score': 'orange', 'div_score': 'red'}
+    for col in ['rf_score', 'loss_score', 'fec_score', 'div_score']:
+        ax.plot(data.index, data[col], label=col, color=colors[col], alpha=0.7)
+    ax.set_xlabel('Tick')
+    ax.set_ylabel('Score Component (0-1)')
+    ax.set_title('Individual Score Components Over Time')
+    ax.legend(loc='lower right')
+    ax.set_ylim(0, 1.1)
+
+    # Plot 2: Score vs components scatter matrix (simplified)
+    ax = axes[0, 1]
+    scatter = ax.scatter(data['rf_score'], data['div_score'],
+                         c=data['score'], cmap='viridis', alpha=0.5, s=10)
+    ax.set_xlabel('RF Score')
+    ax.set_ylabel('Diversity Score')
+    ax.set_title('RF Score vs Diversity Score')
+    fig.colorbar(scatter, ax=ax, label='Total Score')
+
+    # Plot 3: Loss and FEC scores time series
+    ax = axes[1, 0]
+    ax.plot(data.index, data['loss_score'], 'green', alpha=0.7, label='Loss Score')
+    ax.plot(data.index, data['fec_score'], 'orange', alpha=0.7, label='FEC Score')
+    ax.set_xlabel('Tick')
+    ax.set_ylabel('Score Component (0-1)')
+    ax.set_title('Loss and FEC Score Components')
+    ax.legend()
+    ax.set_ylim(0, 1.1)
+
+    # Plot 4: Total score distribution
+    ax = axes[1, 1]
+    ax.hist(data['score'], bins=50, edgecolor='black', alpha=0.7, color='steelblue')
+    ax.set_xlabel('Total Score')
+    ax.set_ylabel('Count')
+    ax.set_title('Total Score Distribution')
+    ax.axvline(data['score'].mean(), color='red', linestyle='--',
+               label=f'Mean: {data["score"].mean():.0f}')
+    ax.legend()
+
+    plt.tight_layout()
+    path = os.path.join(output_dir, 'score_components_analysis.png')
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"  Saved {path}")
+
+
 def plot_score_distributions(ticks_df, output_dir):
     """Generate score distribution histograms per adapter."""
     adapters = ticks_df['adapter'].unique()
@@ -273,6 +550,11 @@ def main():
     ticks_df = join_outcomes(ticks_df, outcomes_df)
 
     print("Generating analyses...")
+    plot_rssi_snr_relationship(ticks_df, args.output)
+    plot_loss_rate_fec_relationship(ticks_df, args.output)
+    plot_mcs_snr_analysis(ticks_df, args.output)
+    plot_antenna_diversity_analysis(ticks_df, args.output)
+    plot_score_components_analysis(ticks_df, args.output)
     plot_score_distributions(ticks_df, args.output)
     plot_mcs_transitions(ticks_df, args.output)
     plot_feature_outcome_correlation(ticks_df, args.output)

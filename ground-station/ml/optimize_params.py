@@ -73,7 +73,6 @@ class ParameterSpace:
         """
         config = configparser.ConfigParser()
         config.read_string(self.base_config_str)
-        config.set('profile selection', 'dynamic_mode', 'True')
 
         # --- [scoring] weights: sum to 1.0 ---
         rf_weight = trial.suggest_float('rf_weight', 0.1, 0.8)
@@ -246,7 +245,6 @@ class AdapterOptimizer:
         """Run replay with default parameters for comparison."""
         config = configparser.ConfigParser()
         config.read_string(self.base_config_str)
-        config.set('profile selection', 'dynamic_mode', 'True')
         sim = ReplaySimulator(self.ticks_df, config)
         result = sim.run()
         return result.total_fitness, result

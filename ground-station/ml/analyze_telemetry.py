@@ -478,7 +478,7 @@ def generate_summary_report(ticks_df, outcomes_df, output_dir):
     lines = [
         '# Telemetry Analysis Summary Report\n',
         f'Total ticks: {total_ticks}',
-        f'Total profile changes: {total_changes}',
+        f'Total config changes: {total_changes}',
         f'Adapters: {", ".join(str(a) for a in adapters)}',
         '',
     ]

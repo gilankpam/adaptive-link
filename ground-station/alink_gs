@@ -69,38 +69,6 @@ def load_configuration(config_file):
     return config
 
 
-# ─── Profile loading ─────────────────────────────────────────────────────────
-
-def load_profiles(filename):
-    """Load TX profiles from txprofiles.conf format.
-
-    Each line: rangeMin - rangeMax GI MCS FecK FecN Bitrate GOP Power ROIqp Bandwidth QpDelta
-    """
-    profiles = []
-    try:
-        with open(filename) as f:
-            for line in f:
-                line = line.split('#')[0].strip()
-                if not line:
-                    continue
-                parts = line.split()
-                if len(parts) < 12 or parts[1] != '-':
-                    continue
-                profiles.append({
-                    'range_min': int(parts[0]),
-                    'range_max': int(parts[2]),
-                    'gi': parts[3],
-                    'mcs': int(parts[4]),
-                    'fec_k': int(parts[5]),
-                    'fec_n': int(parts[6]),
-                    'bitrate': int(parts[7]),
-                    'gop': float(parts[8]),
-                    'power': int(parts[9]),
-                    'bandwidth': int(parts[11]),
-                })
-    except FileNotFoundError:
-        print(f"Error: Profiles file not found: {filename}")
-    return profiles
 
 
 # ─── Kalman filter ────────────────────────────────────────────────────────────
@@ -265,8 +233,7 @@ class ProfileSelector:
     with additional scoring factors available on the GS.
     """
 
-    def __init__(self, profiles, config):
-        self.profiles = profiles
+    def __init__(self, config):
 
         # Scoring weights
         self.rf_weight = config.getfloat('scoring', 'rf_weight')
@@ -311,29 +278,27 @@ class ProfileSelector:
         self.up_confidence_count = 0
         self.up_target_profile = -1
 
-        # Dynamic mode
-        self.dynamic_mode = config.getboolean(ps, 'dynamic_mode', fallback=False)
-        if self.dynamic_mode:
-            d = 'dynamic'
-            self.snr_safety_margin = config.getfloat(d, 'snr_safety_margin')
-            self.snr_ema_alpha = config.getfloat(d, 'snr_ema_alpha')
-            self.loss_margin_weight = config.getfloat(d, 'loss_margin_weight')
-            self.fec_margin_weight = config.getfloat(d, 'fec_margin_weight')
-            self.dyn_max_mcs = config.getint(d, 'max_mcs')
-            self.short_gi_snr_margin = config.getfloat(d, 'short_gi_snr_margin')
-            self.loss_threshold_for_fec_downgrade = config.getfloat(d, 'loss_threshold_for_fec_downgrade')
-            self.fec_redundancy_ratio = config.getfloat(d, 'fec_redundancy_ratio')
-            self.max_fec_redundancy = config.getfloat(d, 'max_fec_redundancy', fallback=0.5)
-            self.utilization_factor = config.getfloat(d, 'utilization_factor')
-            self.dyn_max_bitrate = config.getint(d, 'max_bitrate')
-            self.dyn_min_bitrate = config.getint(d, 'min_bitrate')
-            self.dyn_max_power = config.getint(d, 'max_power')
-            self.dyn_min_power = config.getint(d, 'min_power')
-            self.dyn_bandwidth = config.getint(d, 'bandwidth')
-            self.dyn_gop = config.getfloat(d, 'gop')
-            self.max_mcs_step_up = config.getint(d, 'max_mcs_step_up', fallback=1)
+        # Dynamic parameters
+        d = 'dynamic'
+        self.snr_safety_margin = config.getfloat(d, 'snr_safety_margin')
+        self.snr_ema_alpha = config.getfloat(d, 'snr_ema_alpha')
+        self.loss_margin_weight = config.getfloat(d, 'loss_margin_weight')
+        self.fec_margin_weight = config.getfloat(d, 'fec_margin_weight')
+        self.dyn_max_mcs = config.getint(d, 'max_mcs')
+        self.short_gi_snr_margin = config.getfloat(d, 'short_gi_snr_margin')
+        self.loss_threshold_for_fec_downgrade = config.getfloat(d, 'loss_threshold_for_fec_downgrade')
+        self.fec_redundancy_ratio = config.getfloat(d, 'fec_redundancy_ratio')
+        self.max_fec_redundancy = config.getfloat(d, 'max_fec_redundancy', fallback=0.5)
+        self.utilization_factor = config.getfloat(d, 'utilization_factor')
+        self.dyn_max_bitrate = config.getint(d, 'max_bitrate')
+        self.dyn_min_bitrate = config.getint(d, 'min_bitrate')
+        self.dyn_max_power = config.getint(d, 'max_power')
+        self.dyn_min_power = config.getint(d, 'min_power')
+        self.dyn_bandwidth = config.getint(d, 'bandwidth')
+        self.dyn_gop = config.getfloat(d, 'gop')
+        self.max_mcs_step_up = config.getint(d, 'max_mcs_step_up', fallback=1)
 
-        # SNR EMA state (used in dynamic mode)
+        # SNR EMA state
         self.snr_ema = 0.0
         self.snr_ema_initialized = False
         self._current_loss_rate = 0.0
@@ -355,13 +320,6 @@ class ProfileSelector:
 
     def _now_ms(self):
         return int(time.monotonic() * 1000)
-
-    def _lookup_profile(self, score):
-        """Find profile matching score range. Returns (index, profile) or (None, None)."""
-        for i, p in enumerate(self.profiles):
-            if p['range_min'] <= score <= p['range_max']:
-                return i, p
-        return None, None
 
     def _compute_power(self, mcs):
         """Scale TX power inversely with MCS level (linear)."""
@@ -517,13 +475,12 @@ class ProfileSelector:
         self._current_loss_rate = loss_rate
         self._current_fec_pressure = self._clamp(fec_pressure, 0, 1)
 
-        if self.dynamic_mode:
-            if not self.snr_ema_initialized:
-                self.snr_ema = best_snr
-                self.snr_ema_initialized = True
-            else:
-                self.snr_ema = (self.snr_ema_alpha * best_snr +
-                                (1.0 - self.snr_ema_alpha) * self.snr_ema)
+        if not self.snr_ema_initialized:
+            self.snr_ema = best_snr
+            self.snr_ema_initialized = True
+        else:
+            self.snr_ema = (self.snr_ema_alpha * best_snr +
+                            (1.0 - self.snr_ema_alpha) * self.snr_ema)
 
         return 1000 + combined * 1000
 
@@ -583,28 +540,21 @@ class ProfileSelector:
             return False, self.current_profile_idx, self.current_profile
 
         # Profile determination
-        if self.dynamic_mode:
-            new_profile = self._compute_profile()
-            new_idx = new_profile['mcs']
-            # Limit upward MCS step size to prevent power-coupling oscillation
-            if (self.current_profile_idx >= 0 and
-                    new_idx > self.current_profile_idx and
-                    self.max_mcs_step_up > 0):
-                capped_mcs = self.current_profile_idx + self.max_mcs_step_up
-                if new_idx > capped_mcs:
-                    new_idx = capped_mcs
-                    new_profile = self._compute_profile(mcs_override=capped_mcs)
-        else:
-            new_idx, new_profile = self._lookup_profile(combined_value)
-            if new_idx is None:
-                return False, self.current_profile_idx, self.current_profile
+        new_profile = self._compute_profile()
+        new_idx = new_profile['mcs']
+        # Limit upward MCS step size to prevent power-coupling oscillation
+        if (self.current_profile_idx >= 0 and
+                new_idx > self.current_profile_idx and
+                self.max_mcs_step_up > 0):
+            capped_mcs = self.current_profile_idx + self.max_mcs_step_up
+            if new_idx > capped_mcs:
+                new_idx = capped_mcs
+                new_profile = self._compute_profile(mcs_override=capped_mcs)
 
         if new_idx == self.current_profile_idx:
             self.up_confidence_count = 0
             self.up_target_profile = -1
-            # In dynamic mode, update profile params even if MCS unchanged
-            if self.dynamic_mode:
-                self.current_profile = new_profile
+            self.current_profile = new_profile
             return False, self.current_profile_idx, self.current_profile
 
         # Direction
@@ -647,17 +597,14 @@ class ProfileSelector:
 
     def _try_confidence_feed(self, combined_value):
         """Feed the confidence counter even when hysteresis isn't met."""
-        if self.dynamic_mode:
-            new_profile = self._compute_profile()
-            new_idx = new_profile['mcs']
-            # Apply step limit so confidence targets the reachable MCS
-            if (self.current_profile_idx >= 0 and
-                    new_idx > self.current_profile_idx and
-                    self.max_mcs_step_up > 0):
-                new_idx = min(new_idx, self.current_profile_idx + self.max_mcs_step_up)
-        else:
-            new_idx, _ = self._lookup_profile(combined_value)
-        if new_idx is not None and new_idx != self.current_profile_idx and new_idx > self.current_profile_idx:
+        new_profile = self._compute_profile()
+        new_idx = new_profile['mcs']
+        # Apply step limit so confidence targets the reachable MCS
+        if (self.current_profile_idx >= 0 and
+                new_idx > self.current_profile_idx and
+                self.max_mcs_step_up > 0):
+            new_idx = min(new_idx, self.current_profile_idx + self.max_mcs_step_up)
+        if new_idx != self.current_profile_idx and new_idx > self.current_profile_idx:
             if new_idx != self.up_target_profile:
                 self.up_target_profile = new_idx
                 self.up_confidence_count = 1
@@ -758,11 +705,10 @@ def calculate_link():
 
     if verbose_mode:
         msg = (f"Score: {final_score:.0f} | RSSI: {best_rssi} | SNR: {best_snr} | "
-               f"Lost: {lost_packets} | FEC rec: {fec_rec_packets}")
-        if profile_selector.dynamic_mode:
-            msg += (f" | SNR_EMA: {profile_selector.snr_ema:.1f} | "
-                    f"loss: {profile_selector._current_loss_rate:.3f} | "
-                    f"fec_p: {profile_selector._current_fec_pressure:.2f}")
+               f"Lost: {lost_packets} | FEC rec: {fec_rec_packets} | "
+               f"SNR_EMA: {profile_selector.snr_ema:.1f} | "
+               f"loss: {profile_selector._current_loss_rate:.3f} | "
+               f"fec_p: {profile_selector._current_fec_pressure:.2f}")
         print(msg)
 
     # Run profile selection
@@ -947,19 +893,8 @@ if __name__ == "__main__":
     max_noise = config.getfloat('noise', 'max_noise')
     deduction_exponent = config.getfloat('noise', 'deduction_exponent')
 
-    # Load profiles (optional in dynamic mode)
-    dynamic_mode = config.getboolean('profile selection', 'dynamic_mode', fallback=False)
-    profiles = []
-    if not dynamic_mode:
-        txprofiles_file = config.get('profile selection', 'txprofiles_file')
-        profiles = load_profiles(txprofiles_file)
-        if not profiles:
-            print(f"Warning: No profiles loaded from {txprofiles_file}")
-    else:
-        print("Dynamic profile calculation enabled — txprofiles.conf not required")
-
     # Initialize profile selector
-    profile_selector = ProfileSelector(profiles, config)
+    profile_selector = ProfileSelector(config)
 
     # Initialize Kalman filter
     kalman = KalmanFilter(

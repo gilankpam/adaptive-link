@@ -61,7 +61,6 @@ max_loss_rate = 0.1
 max_rssi_spread = 20
 
 [profile selection]
-txprofiles_file = /etc/txprofiles.conf
 hold_fallback_mode_ms = 1000
 hold_modes_down_ms = 3000
 min_between_changes_ms = 200
@@ -73,7 +72,6 @@ predict_multi = 1.0
 fast_downgrade = True
 upward_confidence_loops = 3
 limit_max_score_to = 2000
-dynamic_mode = False
 
 [dynamic]
 snr_safety_margin = 3
@@ -105,7 +103,6 @@ def _make_config(overrides=None):
     """Create a configparser with TEST_CONFIG_STRING and optional overrides."""
     config = configparser.ConfigParser()
     config.read_string(TEST_CONFIG_STRING)
-    config.set('profile selection', 'dynamic_mode', 'True')
     if overrides:
         for section, kvs in overrides.items():
             for k, v in kvs.items():
@@ -114,8 +111,8 @@ def _make_config(overrides=None):
 
 
 def _make_selector(overrides=None):
-    """Create a ProfileSelector in dynamic mode."""
-    return ProfileSelector([], _make_config(overrides))
+    """Create a ProfileSelector."""
+    return ProfileSelector(_make_config(overrides))
 
 
 def _feed_score(ps, best_snr, loss_rate=0.0, fec_pressure=0.0,
@@ -591,32 +588,6 @@ class TestOscillationRegression(unittest.TestCase):
             unique = set(last_5)
             self.assertLessEqual(len(unique), 1,
                 f"MCS oscillating in last 5 ticks: {last_5}")
-
-
-class TestBackwardCompat(unittest.TestCase):
-    """Test that table mode still works when dynamic_mode=False."""
-
-    def test_table_mode_default(self):
-        config = configparser.ConfigParser()
-        config.read_string(TEST_CONFIG_STRING)
-        ps = ProfileSelector([], config)
-        self.assertFalse(ps.dynamic_mode)
-
-    def test_table_mode_uses_lookup(self):
-        config = configparser.ConfigParser()
-        config.read_string(TEST_CONFIG_STRING)
-        profiles = [
-            {'range_min': 1000, 'range_max': 1500, 'gi': 'long', 'mcs': 1,
-             'fec_k': 8, 'fec_n': 12, 'bitrate': 4000, 'gop': 10.0,
-             'power': 45, 'bandwidth': 20},
-            {'range_min': 1501, 'range_max': 2000, 'gi': 'short', 'mcs': 5,
-             'fec_k': 10, 'fec_n': 12, 'bitrate': 20000, 'gop': 10.0,
-             'power': 30, 'bandwidth': 20},
-        ]
-        ps = ProfileSelector(profiles, config)
-        idx, profile = ps._lookup_profile(1200)
-        self.assertEqual(idx, 0)
-        self.assertEqual(profile['mcs'], 1)
 
 
 if __name__ == '__main__':

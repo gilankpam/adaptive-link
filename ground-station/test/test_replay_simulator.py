@@ -17,10 +17,9 @@ _BASE_CONFIG_STR = load_config_from_file(_CONFIG_PATH)
 
 
 def _make_config(overrides=None):
-    """Create a configparser with DEFAULT_CONFIG and dynamic_mode=True."""
+    """Create a configparser with DEFAULT_CONFIG."""
     config = configparser.ConfigParser()
     config.read_string(_BASE_CONFIG_STR)
-    config.set('profile selection', 'dynamic_mode', 'True')
     if overrides:
         for section, kvs in overrides.items():
             for k, v in kvs.items():

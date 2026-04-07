@@ -145,8 +145,8 @@ class ReplaySimulator:
         self.ticks = ticks_df
         self.link_model = link_model or LinkModel()
 
-        # Create ProfileSelector with empty profiles (dynamic mode doesn't use them)
-        self.selector = _ProfileSelector([], config)
+        # Create ProfileSelector
+        self.selector = _ProfileSelector(config)
 
         # Time injection state
         self._current_tick_ts = 0

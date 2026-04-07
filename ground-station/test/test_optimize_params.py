@@ -104,8 +104,7 @@ class TestParameterSpace:
         study.tell(trial, 0.0)
 
         # Should not raise
-        ps = ProfileSelector([], config)
-        assert ps.dynamic_mode is True
+        ps = ProfileSelector(config)
 
     def test_adapter_max_mcs_constraint(self):
         """max_mcs should be bounded by adapter capability."""

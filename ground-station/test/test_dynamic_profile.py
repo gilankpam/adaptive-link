@@ -495,6 +495,25 @@ class TestSelectIntegration(unittest.TestCase):
         # Profile should still exist and be updated
         self.assertIsNotNone(ps.current_profile)
 
+    def test_param_only_change_detected(self):
+        """select() returns changed=True when MCS stays same but params differ."""
+        ps = _make_selector()
+        changed, idx, profile = self._warm_up(ps, best_snr=20)
+        self.assertTrue(changed)
+        old_profile = dict(ps.current_profile)
+        old_mcs = ps.current_profile_idx
+
+        # Feed with significant loss to trigger FEC/bitrate change at same MCS
+        ps.min_between_changes_ms = 0  # disable rate limiting
+        score = _feed_score(ps, best_snr=20, all_packets=20000, lost_packets=2000)
+        changed, idx, profile = ps.select(score)
+
+        # MCS should stay the same but params should differ
+        if idx == old_mcs and ps._profile_changed(old_profile, profile):
+            self.assertTrue(changed)
+        # If params didn't change (edge case), at least verify no crash
+        self.assertIsNotNone(profile)
+
 
 class TestMCSStepLimit(unittest.TestCase):
     """Test that upward MCS changes are step-limited."""

@@ -219,10 +219,13 @@ class ReplaySimulator:
                 cum_all_packets, cum_lost_packets, cum_fec_rec,
                 fec_k, fec_n, num_antennas)
 
+            prev_mcs_before_select = self.selector.current_profile_idx
             changed, new_idx, new_profile = self.selector.select(raw_score)
 
-            # Track transitions
-            if changed:
+            # Stability tracks MCS transitions only — parameter-only changes
+            # (FEC, bitrate, GI, power at same MCS) are cheap fine-tuning and
+            # should not count against stability.
+            if new_idx != prev_mcs_before_select and prev_mcs_before_select >= 0:
                 result.transition_count += 1
 
             # Get current MCS for next tick's loss estimation

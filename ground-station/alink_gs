@@ -99,7 +99,7 @@ class TelemetryLogger:
     labeling that tracks link quality in the ticks following a profile change.
     """
 
-    def __init__(self, log_dir, rotate_mb=50, outcome_window=10):
+    def __init__(self, log_dir, rotate_mb=50, outcome_window=10, confirm_timeout=10):
         self.log_dir = log_dir
         self.rotate_bytes = rotate_mb * 1024 * 1024
         self.outcome_window = outcome_window
@@ -112,6 +112,11 @@ class TelemetryLogger:
         self._outcome_losses = []
         self._outcome_change_record = None
         self._pending_outcomes = []  # completed outcome labels to flush
+
+        # FEC confirmation state
+        self._pending_confirm = None
+        self._confirm_timeout_ticks = confirm_timeout
+        self._confirm_ticks_waited = 0
 
         os.makedirs(log_dir, exist_ok=True)
         self._open_file()
@@ -179,13 +184,33 @@ class TelemetryLogger:
 
         self._write_record(record)
 
-        # Outcome tracking
+        # Outcome tracking with FEC confirmation
         if profile_changed:
-            # Finalize any pending outcome window
+            # Finalize any pending outcome or confirmation
             self._finalize_outcome()
-            self._outcome_ticks_remaining = self.outcome_window
-            self._outcome_losses = []
-            self._outcome_change_record = {'ts': timestamp_ms}
+            self._pending_confirm = None
+            # Start waiting for FEC confirmation
+            if profile is not None:
+                self._pending_confirm = {
+                    'ts': timestamp_ms,
+                    'fec_k': profile['fec_k'],
+                    'fec_n': profile['fec_n'],
+                }
+                self._confirm_ticks_waited = 0
+
+        # Check for FEC confirmation
+        if self._pending_confirm is not None:
+            self._confirm_ticks_waited += 1
+            if (fec_k == self._pending_confirm['fec_k'] and
+                    fec_n == self._pending_confirm['fec_n']):
+                # Confirmed — start outcome window
+                self._outcome_ticks_remaining = self.outcome_window
+                self._outcome_losses = []
+                self._outcome_change_record = {'ts': self._pending_confirm['ts']}
+                self._pending_confirm = None
+            elif self._confirm_ticks_waited >= self._confirm_timeout_ticks:
+                # Timeout — discard, profile wasn't applied
+                self._pending_confirm = None
 
         if self._outcome_ticks_remaining > 0:
             self._outcome_losses.append(loss_rate)
@@ -218,6 +243,7 @@ class TelemetryLogger:
 
     def close(self):
         self._finalize_outcome()
+        self._pending_confirm = None
         if self._file:
             self._file.close()
             self._file = None
@@ -355,6 +381,17 @@ class ProfileSelector:
         fec_n = math.ceil(fec_k / (1 - redundancy_ratio))
         
         return fec_k, fec_n
+
+    def _profile_changed(self, old, new):
+        """Compare two profile dicts, return True if any parameter differs.
+
+        Compares: gi, mcs, fec_k, fec_n, bitrate, power.
+        Excludes gop and bandwidth as they are static config values.
+        """
+        for key in ('gi', 'mcs', 'fec_k', 'fec_n', 'bitrate', 'power'):
+            if old.get(key) != new.get(key):
+                return True
+        return False
 
     def _compute_profile(self, mcs_override=None):
         """Dynamically compute profile parameters from link metrics."""
@@ -554,7 +591,13 @@ class ProfileSelector:
         if new_idx == self.current_profile_idx:
             self.up_confidence_count = 0
             self.up_target_profile = -1
+            # Check if any profile parameter changed (not just MCS)
+            params_changed = (self.current_profile is None or
+                              self._profile_changed(self.current_profile, new_profile))
             self.current_profile = new_profile
+            if params_changed:
+                self.last_change_time_ms = now_ms
+                return True, self.current_profile_idx, self.current_profile
             return False, self.current_profile_idx, self.current_profile
 
         # Direction

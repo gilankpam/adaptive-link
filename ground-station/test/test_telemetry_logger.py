@@ -156,7 +156,7 @@ class TestTelemetryLoggerOutcome(unittest.TestCase):
         profile = {'mcs': 3, 'gi': 'long', 'fec_k': 6, 'fec_n': 9,
                    'bitrate': 8000, 'power': 40}
 
-        # Profile change tick
+        # Profile change tick — reported FEC still old (not yet confirmed)
         logger.log(
             timestamp_ms=1000, best_rssi=-50, best_snr=20, min_rssi=-55,
             num_antennas=2, all_packets=1000, lost_packets=0,
@@ -168,12 +168,12 @@ class TestTelemetryLoggerOutcome(unittest.TestCase):
             profile=profile, profile_changed=True,
         )
 
-        # 5 follow-up ticks with low loss
+        # 5 follow-up ticks with low loss — FEC now matches profile (confirmed)
         for i in range(5):
             logger.log(
                 timestamp_ms=1100 + i * 100, best_rssi=-50, best_snr=20,
                 min_rssi=-55, num_antennas=2, all_packets=1000,
-                lost_packets=0, fec_rec_packets=0, fec_k=8, fec_n=12,
+                lost_packets=0, fec_rec_packets=0, fec_k=6, fec_n=9,
                 loss_rate=0.005, fec_pressure=0.0,
                 rf_score=0.8, loss_score=1.0, fec_score=1.0,
                 diversity_score=0.95, combined_score=1800.0,
@@ -266,7 +266,7 @@ class TestTelemetryLoggerOutcome(unittest.TestCase):
         profile = {'mcs': 3, 'gi': 'long', 'fec_k': 6, 'fec_n': 9,
                    'bitrate': 8000, 'power': 40}
 
-        # First change
+        # First change — reported FEC still old
         logger.log(
             timestamp_ms=1000, best_rssi=-50, best_snr=20, min_rssi=-55,
             num_antennas=2, all_packets=1000, lost_packets=0,
@@ -278,12 +278,12 @@ class TestTelemetryLoggerOutcome(unittest.TestCase):
             profile=profile, profile_changed=True,
         )
 
-        # Only 2 follow-up ticks (window is 10)
+        # 2 follow-up ticks with confirmed FEC (window is 10)
         for i in range(2):
             logger.log(
                 timestamp_ms=1100 + i * 100, best_rssi=-50, best_snr=20,
                 min_rssi=-55, num_antennas=2, all_packets=1000,
-                lost_packets=0, fec_rec_packets=0, fec_k=8, fec_n=12,
+                lost_packets=0, fec_rec_packets=0, fec_k=6, fec_n=9,
                 loss_rate=0.005, fec_pressure=0.0,
                 rf_score=0.8, loss_score=1.0, fec_score=1.0,
                 diversity_score=0.95, combined_score=1800.0,
@@ -292,6 +292,7 @@ class TestTelemetryLoggerOutcome(unittest.TestCase):
             )
 
         # Second profile change — should finalize first outcome early
+        # profile2 FEC matches reported, so confirms immediately
         profile2 = {'mcs': 5, 'gi': 'short', 'fec_k': 8, 'fec_n': 12,
                      'bitrate': 15000, 'power': 35}
         logger.log(
@@ -308,10 +309,111 @@ class TestTelemetryLoggerOutcome(unittest.TestCase):
 
         records = self._read_records()
         outcomes = [r for r in records if r.get('type') == 'outcome']
-        # First outcome finalized early (3 ticks: change + 2 follow-up)
-        # Second outcome finalized on close (1 tick: just the change)
+        # First outcome finalized early (2 confirmed ticks)
+        # Second outcome: FEC matches immediately, finalized on close (1 tick)
         self.assertEqual(len(outcomes), 2)
         self.assertEqual(outcomes[0]['change_ts'], 1000)
+        self.assertEqual(outcomes[0]['ticks'], 2)
+
+
+class TestTelemetryLoggerFecConfirmation(unittest.TestCase):
+    """Test FEC-confirmed outcome tracking."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def _read_records(self):
+        path = os.path.join(self.tmpdir, 'telemetry_0.jsonl')
+        with open(path) as f:
+            return [json.loads(line) for line in f]
+
+    def _log_tick(self, logger, ts, fec_k=8, fec_n=12, loss_rate=0.001,
+                  profile=None, changed=False):
+        if profile is None:
+            profile = {'mcs': 3, 'gi': 'long', 'fec_k': 6, 'fec_n': 9,
+                       'bitrate': 8000, 'power': 40}
+        logger.log(
+            timestamp_ms=ts, best_rssi=-50, best_snr=20, min_rssi=-55,
+            num_antennas=2, all_packets=1000, lost_packets=0,
+            fec_rec_packets=0, fec_k=fec_k, fec_n=fec_n,
+            loss_rate=loss_rate, fec_pressure=0.0,
+            rf_score=0.8, loss_score=1.0, fec_score=1.0,
+            diversity_score=0.95, combined_score=1800.0,
+            ema_fast=1800.0, ema_slow=1790.0, snr_ema=20.0,
+            profile=profile, profile_changed=changed,
+        )
+
+    def test_outcome_waits_for_fec_confirmation(self):
+        """Outcome window starts only after FEC confirmation, not immediately."""
+        logger = TelemetryLogger(self.tmpdir, outcome_window=3, confirm_timeout=5)
+        profile = {'mcs': 3, 'gi': 'long', 'fec_k': 6, 'fec_n': 9,
+                   'bitrate': 8000, 'power': 40}
+
+        # Profile change tick — reported FEC still old
+        self._log_tick(logger, ts=1000, fec_k=8, fec_n=12,
+                       profile=profile, changed=True)
+
+        # 2 ticks still showing old FEC (not confirmed yet)
+        for i in range(2):
+            self._log_tick(logger, ts=1100 + i * 100, fec_k=8, fec_n=12,
+                           profile=profile)
+
+        # FEC confirmed — 3 ticks to fill outcome window
+        for i in range(3):
+            self._log_tick(logger, ts=1300 + i * 100, fec_k=6, fec_n=9,
+                           loss_rate=0.001, profile=profile)
+        logger.close()
+
+        records = self._read_records()
+        outcomes = [r for r in records if r.get('type') == 'outcome']
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(outcomes[0]['label'], 'good')
+        self.assertEqual(outcomes[0]['ticks'], 3)  # only confirmed ticks
+        self.assertEqual(outcomes[0]['change_ts'], 1000)
+
+    def test_outcome_discarded_on_confirm_timeout(self):
+        """If FEC never matches within timeout, no outcome is recorded."""
+        logger = TelemetryLogger(self.tmpdir, outcome_window=3, confirm_timeout=3)
+        profile = {'mcs': 3, 'gi': 'long', 'fec_k': 6, 'fec_n': 9,
+                   'bitrate': 8000, 'power': 40}
+
+        # Profile change
+        self._log_tick(logger, ts=1000, fec_k=8, fec_n=12,
+                       profile=profile, changed=True)
+
+        # 5 ticks, FEC never confirms
+        for i in range(5):
+            self._log_tick(logger, ts=1100 + i * 100, fec_k=8, fec_n=12,
+                           profile=profile)
+        logger.close()
+
+        records = self._read_records()
+        outcomes = [r for r in records if r.get('type') == 'outcome']
+        self.assertEqual(len(outcomes), 0)
+
+    def test_immediate_confirmation_when_fec_matches(self):
+        """When reported FEC matches profile on change tick, confirm immediately."""
+        logger = TelemetryLogger(self.tmpdir, outcome_window=3)
+        profile = {'mcs': 5, 'gi': 'long', 'fec_k': 8, 'fec_n': 12,
+                   'bitrate': 15000, 'power': 35}
+
+        # Profile FEC matches reported FEC — confirms on same tick
+        self._log_tick(logger, ts=1000, fec_k=8, fec_n=12,
+                       loss_rate=0.001, profile=profile, changed=True)
+
+        # 2 more ticks to fill window
+        for i in range(2):
+            self._log_tick(logger, ts=1100 + i * 100, fec_k=8, fec_n=12,
+                           loss_rate=0.001, profile=profile)
+        logger.close()
+
+        records = self._read_records()
+        outcomes = [r for r in records if r.get('type') == 'outcome']
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(outcomes[0]['label'], 'good')
         self.assertEqual(outcomes[0]['ticks'], 3)
 
 

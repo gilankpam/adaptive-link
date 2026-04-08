@@ -141,9 +141,6 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
     char mcsCommand[MAX_COMMAND_SIZE];
     const char *idrApiCommand = cfg->idrApiCommandTemplate;
 
-    uint64_t now = util_now_ms();
-    long timeElapsed = (long)((now - ps->prevTimeStamp) / 1000);
-
     int currentWfbPower = profile->wfbPower;
     float currentSetGop = profile->setGop;
     char currentSetGI[10];
@@ -328,8 +325,7 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
     const char *gi_string = short_gi ? "short" : "long";
     int pwr = cfg->allow_set_power ? finalPower : 0;
 
-    sprintf(os->profile, "%lds %d %d%s%d Pw%d g%.1f",
-            timeElapsed,
+    sprintf(os->profile, "%d %d%s%d Pw%d g%.1f",
             profile->setBitrate,
             actual_bandwidth,
             gi_string,

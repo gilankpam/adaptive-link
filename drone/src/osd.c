@@ -8,6 +8,13 @@
 #include "profile.h"
 #include "keyframe.h"
 #include "rssi_monitor.h"
+#include "util.h"
+
+/* Channel cache refresh interval (milliseconds) */
+#define CHANNEL_CACHE_INTERVAL_MS 5000
+
+/* OSD refresh interval (microseconds) - 10 Hz = 100ms */
+#define OSD_REFRESH_INTERVAL_US 200000
 
 void osd_init(osd_state_t *os) {
     strncpy(os->profile, "initializing...", sizeof(os->profile));
@@ -16,8 +23,15 @@ void osd_init(osd_state_t *os) {
     strncpy(os->gs_stats, "waiting for gs.", sizeof(os->gs_stats));
     strncpy(os->extra_stats, "initializing...", sizeof(os->extra_stats));
     strncpy(os->score_related, "initializing...", sizeof(os->score_related));
+    strncpy(os->latency, "Jit: 0ms", sizeof(os->latency));
     os->set_osd_font_size = 20;
     os->set_osd_colour = 7;
+
+    /* Initialize optimization fields */
+    os->cached_channel = -1;
+    os->channel_cache_time = 0;
+    os->last_osd_string[0] = '\0';
+    os->last_string_valid = false;
 }
 
 void osd_error(const char *message) {
@@ -47,6 +61,19 @@ void osd_adjust_font_size(osd_state_t *os, int x_res, float multiply_by) {
                                     ((int)(50 * multiply_by));
 }
 
+/* Helper function to get WiFi channel with caching */
+static int get_cached_channel(osd_state_t *os) {
+    uint64_t now = util_now_ms();
+    
+    /* Refresh cache if expired or not initialized */
+    if (os->cached_channel == -1 || (now - os->channel_cache_time) > CHANNEL_CACHE_INTERVAL_MS) {
+        os->cached_channel = hw_get_wlan0_channel();
+        os->channel_cache_time = now;
+    }
+    
+    return os->cached_channel;
+}
+
 void *osd_thread_func(void *arg) {
     osd_thread_arg_t *ta = (osd_thread_arg_t *)arg;
     osd_state_t *os = ta->osd;
@@ -69,9 +96,10 @@ void *osd_thread_func(void *arg) {
     }
 
     while (true) {
-        sleep(1);
+        usleep(OSD_REFRESH_INTERVAL_US);
 
-        int wfb_ch = hw_get_wlan0_channel();
+        /* Get cached WiFi channel (refreshes every 5 seconds) */
+        int wfb_ch = get_cached_channel(os);
 
         snprintf(os->extra_stats, sizeof(os->extra_stats),
              "xtx%ld(%d)%s gs_idr%d [ch%d]",
@@ -104,8 +132,8 @@ void *osd_thread_func(void *arg) {
             if (os->gs_stats[0] != '\0')
                 osd_off += snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off, "\n%s", os->gs_stats);
             osd_off += snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off, "\n%s", os->extra_stats);
-            if (cfg->osd_level >= 6)
-                snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off, "\n%s", hw->camera_bin);
+            if (os->latency[0] != '\0')
+                osd_off += snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off, "\n%s", os->latency);
         } else if (cfg->osd_level == 4) {
             snprintf(full_osd_string, sizeof(full_osd_string), "%s %s | %s | %s | %s | %s",
                     os->profile, os->profile_fec, local_regular_osd, os->score_related, os->gs_stats, os->extra_stats);
@@ -120,7 +148,11 @@ void *osd_thread_func(void *arg) {
                     local_regular_osd);
         }
 
-        if (cfg->osd_level != 0) {
+        /* Conditional update: only write if content changed */
+        bool content_changed = !os->last_string_valid ||
+                               strcmp(full_osd_string, os->last_osd_string) != 0;
+
+        if (cfg->osd_level != 0 && content_changed) {
             if (osd_config->udp_out_sock != -1) {
                 ssize_t sent_bytes = sendto(osd_config->udp_out_sock, full_osd_string, strlen(full_osd_string), 0,
                                         (struct sockaddr *)&udp_out_addr, sizeof(udp_out_addr));
@@ -140,10 +172,15 @@ void *osd_thread_func(void *arg) {
 
                 fclose(file);
             }
+
+            /* Cache the written string for next-cycle change detection */
+            strncpy(os->last_osd_string, full_osd_string, sizeof(os->last_osd_string) - 1);
+            os->last_osd_string[sizeof(os->last_osd_string) - 1] = '\0';
+            os->last_string_valid = true;
         }
 
         while (!*(ta->initialized)) {
-            sleep(1);
+            usleep(OSD_REFRESH_INTERVAL_US);
         }
     }
     return NULL;

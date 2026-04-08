@@ -24,8 +24,15 @@ typedef struct {
     char gs_stats[64];
     char extra_stats[256];
     char score_related[64];
+    char latency[32];             /* Latency display (e.g., "Lat: 5ms") */
     int set_osd_font_size;
     int set_osd_colour;
+    
+    /* Optimization fields */
+    int cached_channel;           /* Cached WiFi channel number */
+    uint64_t channel_cache_time;  /* Cache timestamp in milliseconds */
+    char last_osd_string[600];    /* Last written OSD string for change detection */
+    bool last_string_valid;       /* Track if last_osd_string has valid content */
 } osd_state_t;
 
 typedef struct {

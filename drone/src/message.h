@@ -10,6 +10,7 @@
 #ifndef ALINK_MESSAGE_H
 #define ALINK_MESSAGE_H
 
+#include <stdint.h>
 #include "alink_types.h"
 #include "config.h"
 #include "profile.h"
@@ -27,6 +28,13 @@ typedef struct {
 
     bool time_synced;
     bool gs_connected;
+
+    /* Inter-arrival jitter measurement (no clock sync required) */
+    bool jitter_first_sample;     /* true until first delta pair established */
+    uint64_t prev_gs_ts_ms;       /* Last message's GS send timestamp */
+    uint64_t prev_drone_ts_ms;    /* Last message's drone receive timestamp */
+    uint32_t last_jitter_ms;      /* Last measured jitter */
+    uint32_t avg_jitter_ms;       /* Rolling average (EMA) */
 } msg_state_t;
 
 void msg_init(msg_state_t *ms, profile_state_t *ps, keyframe_state_t *ks,

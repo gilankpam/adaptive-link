@@ -674,7 +674,7 @@ def send_udp(message):
 def generate_profile_message(profile_idx, profile):
     """Generate a P: profile change message."""
     global keyframe_request_code, keyframe_request_remaining
-    timestamp = int(time.time())
+    timestamp = int(time.time() * 1000)  # Milliseconds for latency measurement
 
     parts = [
         "P",

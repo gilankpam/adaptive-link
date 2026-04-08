@@ -9,6 +9,7 @@
 #include "message.h"
 #include "util.h"
 #include "command.h"
+#include <time.h>
 
 void msg_init(msg_state_t *ms, profile_state_t *ps, keyframe_state_t *ks,
               osd_state_t *osd, alink_config_t *cfg,
@@ -23,23 +24,55 @@ void msg_init(msg_state_t *ms, profile_state_t *ps, keyframe_state_t *ks,
     ms->paused = paused;
     ms->cmd = cmd;
     ms->time_synced = false;
+    ms->jitter_first_sample = true;
+    ms->prev_gs_ts_ms = 0;
+    ms->prev_drone_ts_ms = 0;
+    ms->last_jitter_ms = 0;
+    ms->avg_jitter_ms = 0;
 }
 
 /**
- * Handle time synchronization from a GS timestamp.
+ * Measure inter-arrival jitter between drone and GS without requiring
+ * clock synchronization.
+ *
+ * jitter = |(drone_now - prev_drone) - (gs_ts - prev_gs_ts)|
+ *
+ * This captures link variability (stalls, bursts) using only the delta
+ * between consecutive timestamps, so absolute clock offset cancels out.
  */
-static void msg_handle_time_sync(msg_state_t *ms, int transmitted_time) {
-    if (!ms->time_synced && transmitted_time > 0) {
-        struct timeval tv;
-        tv.tv_sec = transmitted_time;
-        tv.tv_usec = 0;
-        if (settimeofday(&tv, NULL) == 0) {
-            INFO_LOG(ms->cfg, "System time synchronized with transmitted time: %ld\n", (long)transmitted_time);
-            ms->time_synced = true;
-        } else {
-            ERROR_LOG(ms->cfg, "Failed to set system time\n");
-        }
+static void msg_update_jitter(msg_state_t *ms, uint64_t gs_send_time_ms) {
+    if (gs_send_time_ms == 0) {
+        return;
     }
+
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    uint64_t drone_time_ms = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+
+    if (ms->jitter_first_sample) {
+        /* Seed the delta pair; no jitter measurement possible yet. */
+        ms->prev_gs_ts_ms = gs_send_time_ms;
+        ms->prev_drone_ts_ms = drone_time_ms;
+        ms->jitter_first_sample = false;
+        snprintf(ms->osd->latency, sizeof(ms->osd->latency), "Jit: 0ms");
+        return;
+    }
+
+    int64_t drone_delta = (int64_t)(drone_time_ms - ms->prev_drone_ts_ms);
+    int64_t gs_delta = (int64_t)(gs_send_time_ms - ms->prev_gs_ts_ms);
+    int64_t diff = drone_delta - gs_delta;
+    if (diff < 0) {
+        diff = -diff;
+    }
+
+    ms->prev_gs_ts_ms = gs_send_time_ms;
+    ms->prev_drone_ts_ms = drone_time_ms;
+    ms->last_jitter_ms = (uint32_t)diff;
+
+    /* EMA with alpha = 0.1, seeded by the first measurable sample. */
+    ms->avg_jitter_ms = (uint32_t)((ms->last_jitter_ms + 9ULL * ms->avg_jitter_ms) / 10);
+
+    snprintf(ms->osd->latency, sizeof(ms->osd->latency), "Jit: %ums", ms->avg_jitter_ms);
 }
 
 /**
@@ -65,7 +98,7 @@ static void msg_process_profile(msg_state_t *ms, const char *msg) {
     memset(&profile, 0, sizeof(profile));
 
     int profile_index = 0;
-    int transmitted_time = 0;
+    uint64_t gs_timestamp_ms = 0;
     char idr_code[16] = "";
 
     char *msgCopy = strdup(msg);
@@ -108,7 +141,7 @@ static void msg_process_profile(msg_state_t *ms, const char *msg) {
                 profile.bandwidth = atoi(token);
                 break;
             case 9:
-                transmitted_time = atoi(token);
+                gs_timestamp_ms = strtoull(token, NULL, 10);
                 break;
             case 10:
                 strncpy(idr_code, token, sizeof(idr_code) - 1);
@@ -124,7 +157,9 @@ static void msg_process_profile(msg_state_t *ms, const char *msg) {
     free(msgCopy);
 
     msg_handle_idr(ms, idr_code);
-    msg_handle_time_sync(ms, transmitted_time);
+
+    /* Update inter-arrival jitter display from GS/drone timestamps */
+    msg_update_jitter(ms, gs_timestamp_ms);
 
     /* Clear init placeholder text on first profile message */
     if (!ms->gs_connected) {

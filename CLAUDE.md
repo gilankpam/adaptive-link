@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to AI Agents when working with code in this repository.
 
 ## Project Overview
 
@@ -22,7 +22,8 @@ The build compiles 12 C source files into a single binary (in `drone/src/`). No 
 
 The project includes:
 - **Unity test framework** for C unit tests (`make test`)
-- **Python test suite** for ground station (`ground-station/test/test_dynamic_profile.py`)
+- **Python test suite** for ground station (`ground-station/test/`)
+- **ML offline analysis tools** (`ground-station/ml/`)
 
 ## Architecture
 
@@ -38,28 +39,35 @@ The project includes:
 
 The drone daemon is split into 12 modules (in `drone/src/`). Key threads:
 
-| Thread | Module | Entry Point | Purpose |
-|--------|--------|-------------|---------|
-| Main | `main.c` | `main()` | Non-blocking UDP recv loop (select), parse profile messages |
-| Profile Worker | `profile.c` | `profile_worker_func()` | Async command execution for profile changes |
-| RSSI Monitor | `rssi_monitor.c` | `rssi_thread_func()` | Drone antenna RSSI parsing |
-| Fallback | `fallback.c` | `fallback_thread_func()` | GS heartbeat timeout detection |
-| TX Monitor | `tx_monitor.c` | `txmon_thread_func()` | TX drop bitrate reduction |
-| OSD | `osd.c` | `osd_thread_func()` | On-screen display updates |
+| Thread | Module | Entry Point | Frequency | Purpose |
+|--------|--------|-------------|-----------|---------|
+| Main | `main.c` | `main()` | 50ms select timeout | Non-blocking UDP recv loop, parse profile messages |
+| Profile Worker | `profile.c` | `profile_worker_func()` | Per job signal | Async command execution for profile changes |
+| RSSI Monitor | `rssi_monitor.c` | `rssi_thread_func()` | Per queue item | Drone antenna RSSI parsing, weak antenna detection |
+| Fallback | `fallback.c` | `fallback_thread_func()` | Every `fallback_ms` | GS heartbeat timeout detection, fallback profile |
+| TX Monitor | `tx_monitor.c` | `txmon_thread_func()` | Every 200ms | TX drop detection, bitrate reduction, keyframe requests |
+| OSD | `osd.c` | `osd_thread_func()` | Every 200ms | On-screen display updates (conditional write) |
 
 Module structure:
-- `alink_types.h` — shared types and constants
+- `alink_types.h` — shared types and constants (header-only)
 - `util.c` — string/time helpers, URL parsing (`util_now_ms()`, `util_parse_url()`)
-- `config.c` — alink.conf and txprofiles.conf parsing (`alink_config_t`)
-- `hardware.c` — WiFi adapter, power tables, camera/video (`hw_state_t`)
-- `command.c` — template substitution, timeout command execution via fork/exec (`cmd_ctx_t`)
-- `profile.c` — async profile application only (`profile_state_t`)
-- `osd.c` — OSD string assembly and output (`osd_state_t`)
-- `keyframe.c` — keyframe request deduplication (`keyframe_state_t`)
+- `config.c` — alink.conf parsing (`alink_config_t`)
+- `hardware.c` — WiFi adapter info, camera/video queries (`hw_state_t`)
+- `command.c` — template substitution, timeout execution via fork/exec (`cmd_ctx_t`)
+- `profile.c` — async profile application, ROI QP computation (`profile_state_t`)
+- `osd.c` — OSD string assembly, channel caching, UDP output (`osd_state_t`)
+- `keyframe.c` — keyframe request deduplication, pause/resume (`keyframe_state_t`)
 - `rssi_monitor.c` — RSSI queue and antenna thread (`rssi_state_t`)
-- `message.c` — UDP message parsing (`msg_state_t`)
+- `message.c` — UDP message parsing, jitter measurement (`msg_state_t`)
 - `tx_monitor.c`, `fallback.c` — thread modules
-- `http_client.c` — native HTTP GET requests (no curl dependency)
+- `http_client.c` — native socket-based HTTP GET (no curl dependency)
+
+**Performance optimizations:**
+- **Conditional OSD writes**: Only write when content changes (avoids disk I/O)
+- **Channel caching**: WiFi channel cached for 5 seconds (reduces `iw` calls)
+- **Latest-job-wins**: Profile worker picks up new job immediately if one arrives during execution
+- **Native HTTP client**: Socket-based HTTP replaces curl subprocess for camera API
+- **Jitter measurement**: Inter-arrival jitter computed without clock sync requirement
 
 ### Profile System
 
@@ -78,9 +86,10 @@ When `dynamic_mode = True` in `alink_gs.conf`, the GS computes profile parameter
 
 - **MCS selection:** Uses 802.11n SNR thresholds with configurable safety margin that widens under link stress
 - **Guard interval:** Short GI selected when SNR margin is comfortable (>5dB default) and loss/FEC pressure are low
-- **FEC adjustment:** Base values from MCS table, increased redundancy when loss rate exceeds threshold
-- **Bitrate computation:** Derived from PHY rate × FEC efficiency × utilization factor
-- **Power scaling:** TX power inversely scaled with MCS level for link stability
+- **FEC adjustment:** Frame-aligned algorithm (`_compute_fec_from_bitrate()`) that sizes FEC blocks to match video frame packet count
+- **Bitrate computation:** Derived from PHY rate × utilization factor × FEC efficiency (K/N ratio)
+- **Power scaling:** Linear inverse scaling with MCS level for link stability
+- **MCS step limiting:** Configurable `max_mcs_step_up` prevents rapid upward transitions that cause power-coupling oscillation
 
 This mode makes `profiles/default.conf` optional and provides finer-grained adaptive control.
 
@@ -104,6 +113,17 @@ The GS implements the full adaptive link algorithm:
 - **Rate limiting:** Minimum interval between profile changes
 - **Kalman filtering:** Noise estimation for optional score penalty
 - **Dynamic mode:** MCS-based adaptive tuning with 802.11n reference tables
+- **Telemetry logging:** Append-only JSONL logging with outcome tracking for ML training data
+
+### Telemetry Logging
+
+The `TelemetryLogger` class provides ML-ready data collection:
+
+- **JSONL format:** One record per tick (~10Hz) with all link metrics and scoring sub-components
+- **Outcome tracking:** Tracks link quality in ticks following profile changes (good/marginal/bad labels)
+- **FEC confirmation:** Waits for FEC parameters to be confirmed before starting outcome window
+- **Auto-rotation:** Rotates log files at configurable size (default 50MB)
+- **Adapter tagging:** Supports multiple adapters with per-adapter log files
 
 ### Hardware Abstraction
 
@@ -132,6 +152,7 @@ The GS implements the full adaptive link algorithm:
 - Compiled with `-Wall -Wextra -Werror`
 - Unity test framework for C unit tests in `drone/test/`
 - Python test suite for GS in `ground-station/test/`
+- ML offline analysis tools in `ground-station/ml/` (requires numpy, pandas, matplotlib)
 
 ## Testing
 
@@ -145,7 +166,12 @@ Tests are in `drone/test/test_util.c` covering URL parsing, command formatting, 
 
 ### Python Tests
 ```bash
-python3 -m pytest ground-station/test/test_dynamic_profile.py -v
+python3 -m pytest ground-station/test/ -v
 ```
 
-Tests cover MCS selection, guard interval logic, FEC parameters, bitrate computation, and power scaling.
+Tests cover:
+- `test_dynamic_profile.py`: MCS selection, guard interval logic, FEC parameters, bitrate computation, power scaling
+- `test_feature_engineering.py`: ML feature computation (SNR ROC, loss acceleration, FEC saturation, etc.)
+- `test_telemetry_logger.py`: Telemetry logging, rotation, outcome tracking
+- `test_replay_simulator.py`: Offline profile selection simulation
+- `test_optimize_params.py`: Bayesian parameter optimization

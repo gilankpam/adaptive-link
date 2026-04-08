@@ -17,8 +17,10 @@
   - [Multi-Factor Scoring (Ground Station)](#multi-factor-scoring-ground-station)
   - [Profile Selection Algorithm (Ground Station)](#profile-selection-algorithm-ground-station)
   - [Profile Application (Drone)](#profile-application-drone)
+  - [Jitter Measurement](#jitter-measurement)
 - [Communication Protocols](#communication-protocols)
 - [Threading Model](#threading-model)
+  - [Performance Optimizations](#performance-optimizations)
 - [Concurrency & Shared State](#concurrency--shared-state)
 - [Configuration Reference](#configuration-reference)
 - [Build, Test & Run](#build-test--run)
@@ -83,11 +85,19 @@ adaptive-link/
 │       └── unity/                       # Unity test framework
 │
 ├── ground-station/
-│   ├── alink_gs                         # Ground station script (Python 3, ~600 lines)
+│   ├── alink_gs                         # Ground station script (Python 3, ~990 lines)
+│   ├── ml/                              # ML offline analysis tools
+│   │   ├── analyze_telemetry.py         # Telemetry analysis and visualization
+│   │   ├── feature_engineering.py       # Feature computation for ML
+│   │   ├── optimize_params.py           # Bayesian parameter optimization
+│   │   ├── replay_simulator.py          # Offline profile selection simulation
+│   │   └── __init__.py
 │   └── test/
 │       ├── test_dynamic_profile.py      # Python tests for GS dynamic mode
 │       ├── test_feature_engineering.py  # Python tests for ML feature engineering
-│       └── test_telemetry_logger.py     # Python tests for telemetry logging
+│       ├── test_telemetry_logger.py     # Python tests for telemetry logging
+│       ├── test_replay_simulator.py     # Python tests for replay simulator
+│       └── test_optimize_params.py      # Python tests for parameter optimization
 │
 ├── config/
 │   ├── alink.conf                       # Drone daemon configuration (simplified)
@@ -167,6 +177,7 @@ A Python 3 script that:
 6. Selects the appropriate profile from `profiles/*.conf` OR computes dynamically (dynamic mode)
 7. Sends UDP messages with finalized profile parameters to the drone (~10 Hz)
 8. Generates keyframe request codes on packet loss events
+9. Logs telemetry data for ML training (optional, JSONL format)
 
 ### Profile System
 
@@ -213,11 +224,12 @@ PHY_RATES_40MHZ = [
     (13.5, 15.0), (27.0, 30.0), (40.5, 45.0), (54.0, 60.0),
     (81.0, 90.0), (108.0, 120.0), (121.5, 135.0), (135.0, 150.0)
 ]
+```
 
-# Default FEC (fec_k, fec_n) per MCS level
-FEC_TABLE = [
-    (2, 3), (2, 3), (4, 6), (6, 9), (8, 12), (8, 12), (10, 12), (10, 12)
-]
+**Constants:**
+```python
+VIDEO_FPS = 60              # Fixed video frame rate
+MTU_PAYLOAD_BYTES = 1446    # WFB-NG MTU payload byte size
 ```
 
 **MCS Selection:**
@@ -244,14 +256,32 @@ FEC_TABLE = [
                    loss_rate < 0.02 and fec_pressure < 0.3)
 ```
 
-**FEC Adjustment:**
+**FEC Calculation (Frame-Aligned Algorithm):**
 ```
-1. Base FEC from MCS table:
-   fec_k, fec_n = FEC_TABLE[mcs]
+1. Packets per frame:
+   packets_per_frame = bitrate_bps / (VIDEO_FPS * 8 * MTU_PAYLOAD_BYTES)
 
-2. Increase redundancy under loss:
+2. K = ceil(packets_per_frame) for minimal latency:
+   fec_k = max(2, ceil(packets_per_frame))
+
+3. Apply configurable redundancy ratio:
+   fec_n = ceil(fec_k / (1 - fec_redundancy_ratio))
+   # For 33% redundancy: N = K / 0.67 ≈ K * 1.5
+
+4. Increase redundancy under loss:
    if loss_rate > loss_threshold_for_fec_downgrade:
-       fec_k = max(2, fec_k - 2)
+       fec_k = max(2, fec_k - 1)
+
+5. Enforce max_fec_redundancy:
+   actual_redundancy = (fec_n - fec_k) / fec_n
+   if actual_redundancy > max_fec_redundancy:
+       fec_k = ceil(fec_n * (1 - max_fec_redundancy))
+
+6. Enforce max_fec_n cap:
+   if fec_n > max_fec_n:
+       original_ratio = 1 - (fec_k / fec_n)
+       fec_n = max_fec_n
+       fec_k = ceil(fec_n * original_ratio)
 ```
 
 **Bitrate Computation:**
@@ -260,20 +290,34 @@ FEC_TABLE = [
    phy_rates = PHY_RATES_40MHZ if bandwidth == 40 else PHY_RATES_20MHZ
    phy_rate = phy_rates[mcs][1 if short_gi else 0]
 
-2. Apply FEC efficiency and utilization factor:
-   bitrate = phy_rate * 1000 * (fec_k / fec_n) * utilization_factor
+2. Raw air capacity (PHY rate × utilization factor):
+   link_bandwidth_bps = phy_rate * 1000 * 1000 * utilization_factor
 
-3. Clamp to configured range:
+3. Target video bitrate (reserve redundancy_ratio for FEC overhead):
+   target_bitrate_bps = link_bandwidth_bps * (1 - fec_redundancy_ratio)
+
+4. Compute FEC from target bitrate (frame-aligned):
+   fec_k, fec_n = _compute_fec_from_bitrate(target_bitrate_bps)
+
+5. Final bitrate accounts for actual FEC overhead:
+   bitrate = link_bandwidth_bps * (fec_k / fec_n) / 1000
+
+6. Clamp to configured range:
    bitrate = max(min_bitrate, min(max_bitrate, bitrate))
 ```
 
-**Power Scaling:**
+**Power Scaling (Linear):**
 ```
-TX power inversely scaled with MCS level for link stability:
-- MCS 0-1:   max_power (highest for stability)
-- MCS 2-3:   max_power - range/3
-- MCS 4-5:   min_power + range/3
-- MCS 6-7:   min_power (lowest for efficiency)
+TX power linearly scaled inversely with MCS level:
+   t = clamp(mcs / max_mcs, 0.0, 1.0)
+   power = max_power - t * (max_power - min_power)
+```
+
+**MCS Step Limiting:**
+```
+Prevent rapid upward transitions that cause power-coupling oscillation:
+   if (new_idx > current_idx and max_mcs_step_up > 0):
+       new_idx = min(new_idx, current_idx + max_mcs_step_up)
 ```
 
 ### Command Template System
@@ -383,7 +427,7 @@ The `ProfileSelector` class implements the full selection pipeline:
 The drone receives `P:` messages and applies profiles via `profile_apply_direct()`:
 
 ```
-1. Parse P: message (profile_idx, gi, mcs, fec_k, fec_n, bitrate, gop, power, roi_qp, bandwidth, qp_delta, timestamp)
+1. Parse P: message (profile_idx, gi, mcs, fec_k, fec_n, bitrate, gop, power, roi_qp, bandwidth, qp_delta, timestamp, keyframe_code)
 
 2. Store as lastAppliedProfile (for re-application via command)
 
@@ -394,11 +438,38 @@ The drone receives `P:` messages and applies profiles via `profile_apply_direct(
    currentProfile = profile_index
    prevTimeStamp = now_ms()
 
-5. Dispatch to async worker thread (non-blocking)
+5. Compute ROI QP on drone side (if not provided by GS):
+   - calc_roiQp_from_bitrate() computes ROI QP based on bitrate and resolution
+   - Higher bitrate = lower ROI QP (better quality in center region)
+
+6. Dispatch to async worker thread (non-blocking)
    - Apply commands in order: QpDelta → FPS → Power → GOP → MCS → FEC/Bitrate → ROI → IDR
    - Execute via cmd_exec_with_timeout() (500ms default timeout)
    - Pace execution with configurable delays
    - Use native HTTP client for camera API requests
+   - Latest-job-wins: If new job arrives during execution, pick it up immediately
+```
+
+### Jitter Measurement
+
+The drone measures inter-arrival jitter between GS messages without requiring clock synchronization:
+
+```
+1. On each message arrival, record arrival timestamp (drone's CLOCK_MONOTONIC)
+
+2. For consecutive messages:
+   inter_arrival[i] = arrival_time[i] - arrival_time[i-1]
+
+3. Compute jitter as average deviation:
+   expected_interval = average(inter_arrival[])
+   jitter = average(|inter_arrival[i] - expected_interval|)
+
+4. Display jitter in OSD: "Jit: Xms"
+
+Benefits:
+- No clock sync required between GS and drone
+- Detects network congestion or GS CPU spikes
+- Helps diagnose timing issues in profile delivery
 ```
 
 ---
@@ -434,14 +505,30 @@ Written to `/tmp/MSPOSD.msg` every 1 second (or via UDP). Verbosity controlled b
 
 | Thread | Module | Entry Point | Frequency | Responsibility |
 |--------|--------|-------------|-----------|----------------|
-| Main | `drone/src/main.c` | `main()` | 50ms select timeout / per UDP packet | Non-blocking receive, parse profile messages |
-| Profile Worker | `drone/src/profile.c` | `profile_worker_func()` | Per job signal | Execute profile commands asynchronously (system() calls) |
-| RSSI Monitor | `drone/src/rssi_monitor.c` | `rssi_thread_func()` | Per queue item | Parse drone antenna RSSI, detect weak antennas (>20dB spread) |
-| Fallback | `drone/src/fallback.c` | `fallback_thread_func()` | Every `fallback_ms` | Count heartbeats; trigger fallback on GS silence |
-| TX Drop Monitor | `drone/src/tx_monitor.c` | `txmon_thread_func()` | Every `check_xtx_period_ms` | Read `/sys/class/net/wlan0/statistics/tx_dropped`, reduce bitrate on drops |
-| OSD Updater | `drone/src/osd.c` | `osd_thread_func()` | Every 1s | Generate and write OSD string |
+| Main | `drone/src/main.c` | `main()` | 50ms select timeout | Non-blocking UDP recv loop, parse profile messages |
+| Profile Worker | `drone/src/profile.c` | `profile_worker_func()` | Per job signal | Async command execution for profile changes |
+| RSSI Monitor | `drone/src/rssi_monitor.c` | `rssi_thread_func()` | Per queue item | Drone antenna RSSI parsing, weak antenna detection |
+| Fallback | `drone/src/fallback.c` | `fallback_thread_func()` | Every `fallback_ms` (default 1000ms) | GS heartbeat timeout detection, fallback profile |
+| TX Monitor | `drone/src/tx_monitor.c` | `txmon_thread_func()` | Every 200ms | TX drop detection, bitrate reduction, keyframe requests |
+| OSD | `drone/src/osd.c` | `osd_thread_func()` | Every 200ms | On-screen display updates (conditional write) |
 
 **Removed:** Cmd Server thread (`cmd_server.c`) - Unix socket IPC removed in commit e2e81e6.
+
+### Performance Optimizations
+
+The drone daemon includes several performance optimizations to reduce CPU and I/O overhead:
+
+1. **Conditional OSD writes**: The OSD thread only writes to `/tmp/MSPOSD.msg` when content changes. This avoids unnecessary disk I/O during stable operation when profile parameters haven't changed.
+
+2. **Channel caching**: WiFi channel information is cached for 5 seconds before re-querying via `iw dev wlan0 info`. This reduces system call overhead since channel changes are rare during normal operation.
+
+3. **Latest-job-wins**: The profile worker thread checks for new jobs before and during command execution. If a new profile arrives while executing commands, the worker immediately switches to the new profile, preventing stale parameter application.
+
+4. **Native HTTP client**: Socket-based HTTP requests (`http_client.c`) replace curl subprocess calls, eliminating process spawn overhead and reducing latency for camera API requests.
+
+5. **API batching**: Multiple camera parameters (qpDelta, bitrate, gop, roiQp) are batched into a single HTTP request via `profile_apply_api_batch()`, reducing the number of network round-trips.
+
+6. **Jitter measurement**: Inter-arrival jitter is computed from message timestamps without requiring clock synchronization between GS and drone, enabling network quality monitoring with minimal overhead.
 
 ---
 
@@ -542,6 +629,47 @@ The first three mutexes are allocated in `alink_daemon_t` (main.c) and passed by
 | **dynamic** | `gop` | 10 | Group of pictures |
 | **dynamic** | `qp_delta` | -12 | Quantization parameter delta |
 | **dynamic** | `roi_qp` | 0,0,0,0 | Region of interest QP values |
+| **dynamic** | `fec_redundancy_ratio` | 0.33 | FEC redundancy ratio (N-K)/N |
+| **dynamic** | `max_fec_redundancy` | 0.5 | Maximum allowed FEC redundancy |
+| **dynamic** | `max_fec_n` | 50 | Maximum FEC block size |
+| **dynamic** | `max_mcs_step_up` | 1 | Maximum MCS steps per upgrade |
+| **telemetry** | `log_enabled` | True | Enable telemetry logging |
+| **telemetry** | `log_dir` | /var/log/alink | Log directory path |
+| **telemetry** | `log_rotate_mb` | 50 | Rotate logs at size (MB) |
+| **telemetry** | `outcome_window_ticks` | 10 | Ticks to observe after profile change |
+| **telemetry** | `adapter_id` | default | Adapter identifier for multi-adapter support |
+
+---
+
+## ML Offline Analysis Tools
+
+The `ground-station/ml/` directory contains offline analysis tools for ML-driven optimization:
+
+### analyze_telemetry.py
+Loads telemetry JSONL files and generates diagnostic plots:
+- RSSI vs SNR relationship (scatter, density, time series)
+- Loss rate vs FEC pressure relationship
+- MCS vs SNR analysis with box plots
+- Antenna diversity analysis
+- Score components time series
+- MCS transition matrix heatmap
+- Feature-outcome correlation matrix
+- Failure mode analysis
+
+### feature_engineering.py
+Computes derived features from telemetry data:
+- `snr_roc`: SNR rate of change (first derivative)
+- `loss_accel`: Loss rate acceleration (second derivative)
+- `fec_saturation`: FEC pressure proximity to saturation
+- `score_volatility`: Rolling standard deviation of score
+- `link_budget_margin`: SNR above MCS threshold
+- `time_since_change`: Elapsed time since last profile change
+
+### optimize_params.py
+Bayesian parameter optimization for GS configuration parameters.
+
+### replay_simulator.py
+Offline profile selection simulation using historical telemetry data.
 
 ---
 
@@ -576,10 +704,21 @@ Tests are in `drone/test/test_util.c` covering URL parsing, command formatting, 
 
 **Python Tests:**
 ```bash
-python3 -m pytest ground-station/test/test_dynamic_profile.py -v
+python3 -m pytest ground-station/test/ -v
 ```
 
-Tests cover MCS selection, guard interval logic, FEC parameters, bitrate computation, power scaling, and integration tests.
+Tests cover:
+- `test_dynamic_profile.py`: MCS selection, guard interval logic, FEC parameters, bitrate computation, power scaling
+- `test_feature_engineering.py`: ML feature computation (SNR ROC, loss acceleration, FEC saturation, etc.)
+- `test_telemetry_logger.py`: Telemetry logging, rotation, outcome tracking
+- `test_replay_simulator.py`: Offline profile selection simulation
+- `test_optimize_params.py`: Bayesian parameter optimization
+
+**ML Tools (requires numpy, pandas, matplotlib):**
+```bash
+# Analyze telemetry data
+python3 ground-station/ml/analyze_telemetry.py --input /var/log/alink --output ./analysis-output
+```
 
 ### Running Locally (Development)
 

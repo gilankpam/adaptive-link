@@ -19,7 +19,7 @@
 void osd_init(osd_state_t *os) {
     strncpy(os->profile, "initializing...", sizeof(os->profile));
     strncpy(os->profile_fec, "0/0", sizeof(os->profile_fec));
-    strncpy(os->regular, "&L%d0&F%d&B &C tx&Wc", sizeof(os->regular));
+    strncpy(os->regular, "&F%d&B &C tx&Wc", sizeof(os->regular));
     strncpy(os->gs_stats, "waiting for gs.", sizeof(os->gs_stats));
     strncpy(os->extra_stats, "initializing...", sizeof(os->extra_stats));
     strncpy(os->score_related, "initializing...", sizeof(os->score_related));
@@ -124,28 +124,44 @@ void *osd_thread_func(void *arg) {
         char full_osd_string[600];
         int osd_off = 0;
 
+        /* Position prefix for top-center: &Lx1 where x=color, 1=top-center position */
+        char pos_prefix[8];
+        snprintf(pos_prefix, sizeof(pos_prefix), "&L%d1 ", os->set_osd_colour);
+        
         if (cfg->osd_level >= 5) {
-            osd_off = snprintf(full_osd_string, sizeof(full_osd_string), "%s %s\n%s",
-                    os->profile, os->profile_fec, local_regular_osd);
+            /* Line 1: profile info */
+            osd_off = snprintf(full_osd_string, sizeof(full_osd_string), "%s%s %s",
+                    pos_prefix, os->profile, os->profile_fec);
+            /* Line 2: regular OSD */
+            osd_off += snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off, "\n%s%s",
+                    pos_prefix, local_regular_osd);
+            /* Line 3: score related (conditional) */
             if (os->score_related[0] != '\0')
-                osd_off += snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off, "\n%s", os->score_related);
+                osd_off += snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off, "\n%s%s",
+                        pos_prefix, os->score_related);
+            /* Line 4: GS stats (conditional) */
             if (os->gs_stats[0] != '\0')
-                osd_off += snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off, "\n%s", os->gs_stats);
-            osd_off += snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off, "\n%s", os->extra_stats);
+                osd_off += snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off, "\n%s%s",
+                        pos_prefix, os->gs_stats);
+            /* Line 5: extra stats */
+            osd_off += snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off, "\n%s%s",
+                    pos_prefix, os->extra_stats);
+            /* Line 6: latency (conditional) */
             if (os->latency[0] != '\0')
-                osd_off += snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off, "\n%s", os->latency);
+                osd_off += snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off, "\n%s%s",
+                        pos_prefix, os->latency);
         } else if (cfg->osd_level == 4) {
-            snprintf(full_osd_string, sizeof(full_osd_string), "%s %s | %s | %s | %s | %s",
-                    os->profile, os->profile_fec, local_regular_osd, os->score_related, os->gs_stats, os->extra_stats);
+            snprintf(full_osd_string, sizeof(full_osd_string), "%s%s %s | %s | %s | %s | %s",
+                    pos_prefix, os->profile, os->profile_fec, local_regular_osd, os->score_related, os->gs_stats, os->extra_stats);
         } else if (cfg->osd_level == 3) {
-            snprintf(full_osd_string, sizeof(full_osd_string), "%s %s %s\n%s",
-                    os->profile, os->profile_fec, local_regular_osd, os->gs_stats);
+            snprintf(full_osd_string, sizeof(full_osd_string), "%s%s %s %s\n%s%s",
+                    pos_prefix, os->profile, os->profile_fec, local_regular_osd, pos_prefix, os->gs_stats);
         } else if (cfg->osd_level == 2) {
-            snprintf(full_osd_string, sizeof(full_osd_string), "%s %s %s",
-                    os->profile, os->profile_fec, local_regular_osd);
+            snprintf(full_osd_string, sizeof(full_osd_string), "%s%s %s %s",
+                    pos_prefix, os->profile, os->profile_fec, local_regular_osd);
         } else if (cfg->osd_level == 1) {
-            snprintf(full_osd_string, sizeof(full_osd_string), "%s",
-                    local_regular_osd);
+            snprintf(full_osd_string, sizeof(full_osd_string), "%s%s",
+                    pos_prefix, local_regular_osd);
         }
 
         /* Conditional update: only write if content changed */

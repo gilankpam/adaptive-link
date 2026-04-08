@@ -315,6 +315,7 @@ class ProfileSelector:
         self.loss_threshold_for_fec_downgrade = config.getfloat(d, 'loss_threshold_for_fec_downgrade')
         self.fec_redundancy_ratio = config.getfloat(d, 'fec_redundancy_ratio')
         self.max_fec_redundancy = config.getfloat(d, 'max_fec_redundancy', fallback=0.5)
+        self.max_fec_n = config.getint(d, 'max_fec_n', fallback=50)
         self.utilization_factor = config.getfloat(d, 'utilization_factor')
         self.dyn_max_bitrate = config.getint(d, 'max_bitrate')
         self.dyn_min_bitrate = config.getint(d, 'min_bitrate')
@@ -440,10 +441,19 @@ class ProfileSelector:
 
         # Enforce max_fec_redundancy
         # Calculate actual redundancy ratio
-        actual_redundancy = (fec_n - fec_k) / fec_n if fec_n > 0 else 0
+        actual_redundancy = (fec_n - fec_k) / fec_n
         if actual_redundancy > self.max_fec_redundancy:
             # Recalculate fec_k to match max_fec_redundancy
             fec_k = math.ceil(fec_n * (1 - self.max_fec_redundancy))
+            fec_k = max(2, fec_k)
+
+        # Enforce max_fec_n cap
+        # When fec_n exceeds max, clamp it and adjust fec_k proportionally
+        if fec_n > self.max_fec_n:
+            # Preserve the redundancy ratio when clamping
+            original_redundancy_ratio = 1 - (fec_k / fec_n)
+            fec_n = self.max_fec_n
+            fec_k = math.ceil(fec_n * (1 - original_redundancy_ratio))
             fec_k = max(2, fec_k)
 
         # Final bitrate accounts for actual FEC overhead (K/N ratio)

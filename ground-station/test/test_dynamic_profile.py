@@ -583,6 +583,78 @@ class TestMCSStepLimit(unittest.TestCase):
         self.assertGreater(changes[0], 3)
 
 
+class TestMaxFECN(unittest.TestCase):
+    """Test max_fec_n configuration parameter enforcement."""
+
+    def test_max_fec_n_not_exceeded_at_high_bitrate(self):
+        """When computed fec_n exceeds max_fec_n, it should be capped.
+        
+        MCS7 SGI: PHY=72.2 Mbps, raw=32490 kbps, target=24368 kbps.
+        Packets per frame: 24368000/(60*8*1446)=35.1 → K=36, N=ceil(36/0.75)=48.
+        With max_fec_n=30, N should be capped to 30.
+        """
+        ps = _make_selector({'dynamic': {'max_fec_n': '30'}})
+        _feed_score(ps, best_snr=32)
+        profile = ps._compute_profile()
+        self.assertLessEqual(profile['fec_n'], 30)
+
+    def test_max_fec_n_preserves_redundancy_ratio(self):
+        """When fec_n is capped, fec_k should be adjusted to preserve redundancy ratio.
+        
+        Original: K=36, N=48 → redundancy = (48-36)/48 = 25%
+        After cap to N=30: K should be ceil(30 * 0.75) = 23
+        New redundancy = (30-23)/30 = 23.3% (close to original 25%)
+        """
+        ps = _make_selector({'dynamic': {'max_fec_n': '30'}})
+        _feed_score(ps, best_snr=32)
+        profile = ps._compute_profile()
+        # Verify redundancy ratio is preserved (within 5% tolerance)
+        original_ratio = 0.25  # fec_redundancy_ratio from config
+        actual_ratio = (profile['fec_n'] - profile['fec_k']) / profile['fec_n']
+        self.assertLessEqual(abs(actual_ratio - original_ratio), 0.05)
+
+    def test_max_fec_n_does_not_affect_low_bitrate(self):
+        """At low bitrates where fec_n is already below max, no capping occurs.
+        
+        MCS0 LGI: K=4, N=6. With max_fec_n=30, no change.
+        """
+        ps = _make_selector({'dynamic': {'max_fec_n': '30'}})
+        _feed_score(ps, best_snr=7)
+        profile = ps._compute_profile()
+        self.assertEqual(profile['fec_n'], 6)
+        self.assertEqual(profile['fec_k'], 4)
+
+    def test_max_fec_n_aggressive_cap(self):
+        """Test with a very aggressive max_fec_n cap.
+        
+        MCS7 SGI with max_fec_n=10:
+        Original K=36, N=48 → capped to N=10
+        K = ceil(10 * 0.75) = 8
+        """
+        ps = _make_selector({'dynamic': {'max_fec_n': '10'}})
+        _feed_score(ps, best_snr=32)
+        profile = ps._compute_profile()
+        self.assertEqual(profile['fec_n'], 10)
+        self.assertEqual(profile['fec_k'], 8)
+
+    def test_max_fec_n_default_value(self):
+        """Default max_fec_n should be 50."""
+        ps = _make_selector()
+        self.assertEqual(ps.max_fec_n, 50)
+
+    def test_max_fec_n_with_intermediate_mcs(self):
+        """Test max_fec_n enforcement at intermediate MCS levels.
+        
+        MCS4 SGI: PHY=43.3 Mbps, raw=19485 kbps, target=14614 kbps.
+        Packets per frame: 14614000/(60*8*1446)=21.1 → K=22, N=ceil(22/0.75)=30.
+        With max_fec_n=25, N should be capped to 25.
+        """
+        ps = _make_selector({'dynamic': {'max_fec_n': '25'}})
+        _feed_score(ps, best_snr=21)  # MCS4: 17+3=20 < 21
+        profile = ps._compute_profile()
+        self.assertLessEqual(profile['fec_n'], 25)
+
+
 class TestOscillationRegression(unittest.TestCase):
     """Regression test: MCS/power should not oscillate under stable SNR."""
 

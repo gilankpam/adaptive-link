@@ -298,11 +298,6 @@ class ProfileSelector:
         self._current_loss_rate = 0.0
         self._current_fec_pressure = 0.0
 
-        # Packet delta tracking
-        self.prev_all_packets = 0
-        self.prev_lost_packets = 0
-        self.prev_fec_rec = 0
-
     def _clamp(self, val, lo, hi):
         return max(lo, min(hi, val))
 
@@ -437,22 +432,18 @@ class ProfileSelector:
 
         Maintains: snr_ema, _snr_slope, _current_loss_rate, _current_fec_pressure.
         These are consumed by _compute_profile() and select().
+
+        Note: wfb-ng provides per-interval delta values directly, so we use them
+        without calculating deltas from previous values.
         """
-        # Packet loss rate (over interval since last tick)
-        delta_all = max(0, all_packets - self.prev_all_packets)
-        delta_lost = max(0, lost_packets - self.prev_lost_packets)
-        loss_rate = delta_lost / max(delta_all, 1)
+        # Packet loss rate (all_packets and lost_packets are already per-interval)
+        loss_rate = lost_packets / max(all_packets, 1)
 
         # FEC pressure (recovered packets vs FEC block capacity)
-        delta_fec = max(0, fec_rec - self.prev_fec_rec)
+        # fec_rec is already the per-interval count of FEC-recovered packets
         fec_redundancy = (fec_n - fec_k) if (fec_k and fec_n and fec_n > fec_k) else 1
-        fec_capacity = fec_redundancy * (delta_all / max(fec_n, 1)) if fec_n else 1
-        fec_pressure = delta_fec / max(fec_capacity, 1)
-
-        # Update delta tracking
-        self.prev_all_packets = all_packets
-        self.prev_lost_packets = lost_packets
-        self.prev_fec_rec = fec_rec
+        fec_capacity = fec_redundancy * (all_packets / max(fec_n, 1)) if fec_n else 1
+        fec_pressure = fec_rec / max(fec_capacity, 1)
 
         self._current_loss_rate = loss_rate
         self._current_fec_pressure = self._clamp(fec_pressure, 0, 1)

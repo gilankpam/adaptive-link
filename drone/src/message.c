@@ -10,6 +10,12 @@
 #include "util.h"
 #include "command.h"
 #include <time.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <stdio.h>
 
 void msg_init(msg_state_t *ms, profile_state_t *ps, keyframe_state_t *ks,
               osd_state_t *osd, alink_config_t *cfg,
@@ -29,6 +35,54 @@ void msg_init(msg_state_t *ms, profile_state_t *ps, keyframe_state_t *ks,
     ms->prev_drone_ts_ms = 0;
     ms->last_jitter_ms = 0;
     ms->avg_jitter_ms = 0;
+}
+
+int msg_handle_hello(msg_state_t *ms, const char *payload, size_t payload_len,
+                     const hw_state_t *hw, int sockfd,
+                     const struct sockaddr_in *client_addr) {
+    /* Copy to a NUL-terminated local buffer so strtoll works cleanly. */
+    char buf[64];
+    if (payload_len == 0 || payload_len >= sizeof(buf)) {
+        return -1;
+    }
+    memcpy(buf, payload, payload_len);
+    buf[payload_len] = '\0';
+
+    /* Parse T1 from the start of the payload. Reject if no digits or zero/neg. */
+    char *endptr = NULL;
+    long long t1 = strtoll(buf, &endptr, 10);
+    if (endptr == buf || t1 <= 0) {
+        return -1;
+    }
+
+    long t2 = util_now_ms();
+
+    /* Build the reply. T3 is stamped just before sendto. */
+    char reply_payload[128];
+    long t3 = util_now_ms();
+    int n = snprintf(reply_payload, sizeof(reply_payload),
+                     "I:%lld:%ld:%ld:%d:%d:%d",
+                     t1, t2, t3,
+                     hw->global_fps, hw->x_res, hw->y_res);
+    if (n <= 0 || (size_t)n >= sizeof(reply_payload)) {
+        return -1;
+    }
+
+    /* Frame with 4-byte BE length prefix. */
+    uint8_t frame[4 + sizeof(reply_payload)];
+    uint32_t plen_be = htonl((uint32_t)n);
+    memcpy(frame, &plen_be, 4);
+    memcpy(frame + 4, reply_payload, (size_t)n);
+
+    ssize_t sent = sendto(sockfd, frame, 4 + (size_t)n, 0,
+                          (const struct sockaddr *)client_addr,
+                          sizeof(*client_addr));
+    if (sent < 0) {
+        return -1;
+    }
+
+    ms->time_synced = true;
+    return 0;
 }
 
 /**
@@ -73,6 +127,16 @@ static void msg_update_jitter(msg_state_t *ms, uint64_t gs_send_time_ms) {
     ms->avg_jitter_ms = (uint32_t)((ms->last_jitter_ms + 9ULL * ms->avg_jitter_ms) / 10);
 
     snprintf(ms->osd->latency, sizeof(ms->osd->latency), "Jit: %ums", ms->avg_jitter_ms);
+
+    if (ms->time_synced) {
+        long lat = (long)(drone_time_ms - gs_send_time_ms);
+        ms->last_latency_ms = lat;
+        if (ms->avg_latency_ms == 0) {
+            ms->avg_latency_ms = lat;
+        } else {
+            ms->avg_latency_ms = (ms->avg_latency_ms * 7 + lat) / 8;
+        }
+    }
 }
 
 /**
@@ -184,4 +248,8 @@ void msg_process(msg_state_t *ms, const char *msg) {
     } else {
         ERROR_LOG(ms->cfg, "Unknown message format: %.20s...\n", msg);
     }
+}
+
+long msg_get_latency(const msg_state_t *ms) {
+    return ms->time_synced ? ms->avg_latency_ms : -1;
 }

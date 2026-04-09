@@ -9,6 +9,7 @@
 #include "keyframe.h"
 #include "rssi_monitor.h"
 #include "util.h"
+#include "message.h"
 
 /* Channel cache refresh interval (milliseconds) */
 #define CHANNEL_CACHE_INTERVAL_MS 5000
@@ -147,9 +148,19 @@ void *osd_thread_func(void *arg) {
             osd_off += snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off, "\n%s%s",
                     pos_prefix, os->extra_stats);
             /* Line 6: latency (conditional) */
-            if (os->latency[0] != '\0')
+            if (os->latency[0] != '\0') {
                 osd_off += snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off, "\n%s%s",
                         pos_prefix, os->latency);
+                char tmp[32];
+                long lat = msg_get_latency((msg_state_t*)ta->ms);
+                if (lat >= 0) {
+                    snprintf(tmp, sizeof(tmp), " Lat: %ldms", lat);
+                } else {
+                    snprintf(tmp, sizeof(tmp), " Lat: --");
+                }
+                strncat(full_osd_string, tmp, sizeof(full_osd_string) - strlen(full_osd_string) - 1);
+                osd_off = strlen(full_osd_string);
+            }
         } else if (cfg->osd_level == 4) {
             snprintf(full_osd_string, sizeof(full_osd_string), "%s%s %s | %s | %s | %s | %s",
                     pos_prefix, os->profile, os->profile_fec, local_regular_osd, os->score_related, os->gs_stats, os->extra_stats);

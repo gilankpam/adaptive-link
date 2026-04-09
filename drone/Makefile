@@ -45,3 +45,13 @@ test-util: $(TEST_BIN)
 $(TEST_BIN): $(TEST_SRC) $(SRC_DIR)/util.c $(UNITY_SRC)
 	$(CC) -I$(SRC_DIR) -I$(UNITY_INC) $(CFLAGS) $(OPT) $(TEST_SRC) $(SRC_DIR)/util.c $(UNITY_SRC) \
 		$(LDFLAGS) -ldl -o $@
+TEST_MSG_SRC = test/test_message.c
+TEST_MSG_BIN = test/test_message
+
+test-c: $(TEST_BIN) $(TEST_MSG_BIN)
+	./$(TEST_BIN)
+	./$(TEST_MSG_BIN)
+
+$(TEST_MSG_BIN): $(TEST_MSG_SRC)
+	$(CC) -I$(SRC_DIR) -I$(UNITY_INC) $(CFLAGS) $(OPT) $(TEST_MSG_SRC) $(UNITY_SRC) $(LDFLAGS) -ldl -o $@
+

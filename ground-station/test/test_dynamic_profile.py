@@ -82,7 +82,10 @@ def _make_config(overrides=None):
 
 def _make_selector(overrides=None):
     """Create a ProfileSelector."""
-    return ProfileSelector(_make_config(overrides))
+    class MockHandshake:
+        def get_fps(self): return 60
+        def correct_timestamp(self, ts): return ts
+    return ProfileSelector(_make_config(overrides), MockHandshake())
 
 
 def _feed_tick(ps, best_snr, loss_rate=0.0, fec_pressure=0.0,
@@ -287,7 +290,8 @@ class TestFECFromBitrate(unittest.TestCase):
         """Verify packets per frame formula: 4 Mbps at 60 FPS = 5.76 packets."""
         ps = _make_selector()
         bitrate = 4000000  # 4 Mbps
-        packets_per_frame = bitrate / (VIDEO_FPS * 8 * MTU_PAYLOAD_BYTES)
+        fps = ps.handshake.get_fps()
+        packets_per_frame = bitrate / (fps * 8 * MTU_PAYLOAD_BYTES)
         self.assertAlmostEqual(packets_per_frame, 5.76, places=1)
 
     def test_fec_k_equals_ceil_packets_per_frame(self):

@@ -23,6 +23,7 @@ _ns = {}
 exec(_code, _ns)
 _ProfileSelector = _ns['ProfileSelector']
 MCS_SNR_THRESHOLDS = _ns['MCS_SNR_THRESHOLDS']
+_VIDEO_FPS = _ns.get('_VIDEO_FPS', 90)  # Default FPS for handshake fallback
 
 
 def load_config_from_file(config_path):
@@ -145,8 +146,14 @@ class ReplaySimulator:
         self.ticks = ticks_df
         self.link_model = link_model or LinkModel()
 
+        # Mock handshake for replay (no real handshake during offline analysis)
+        class _MockHandshake:
+            def get_fps(self): return _VIDEO_FPS
+            def correct_timestamp(self, ts): return ts
+            def is_synced(self): return False
+
         # Create ProfileSelector
-        self.selector = _ProfileSelector(config)
+        self.selector = _ProfileSelector(config, _MockHandshake())
 
         # Time injection state
         self._current_tick_ts = 0

@@ -43,6 +43,7 @@ typedef struct {
     void *ps;      /* profile_state_t* */
     void *ks;      /* keyframe_state_t* */
     void *rs;      /* rssi_state_t* */
+    void *ms;      /* msg_state_t* */
     volatile bool *initialized;
 } osd_thread_arg_t;
 

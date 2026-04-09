@@ -45,8 +45,8 @@ PHY_RATES_40MHZ = [
     (135.0, 150.0),    # MCS 7
 ]
 
-# Fixed video frame rate (static config for now)
-VIDEO_FPS = 90
+# Default video frame rate (used when handshake not synced, and as fallback)
+_VIDEO_FPS = 90
 
 # WFB-NG MTU payload byte size (standard for OpenIPC)
 MTU_PAYLOAD_BYTES = 1446
@@ -228,6 +228,113 @@ class TelemetryLogger:
 
 # ─── Profile selector ────────────────────────────────────────────────────────
 
+class HandshakeState:
+    INIT = 0
+    PENDING = 1
+    SYNCED = 2
+
+
+class HandshakeClient:
+    def __init__(self, udp_socket, drone_ip, drone_port,
+                 resync_interval_s=30, retry_interval_ms=500,
+                 default_fps=90):
+        self.sock = udp_socket
+        self.drone_ip = drone_ip
+        self.drone_port = drone_port
+        self.state = HandshakeState.INIT
+        self.offset_ms = 0
+        self.rtt_ms = 0
+        self.last_sync_ms = 0
+        self.pending_t1 = 0
+        self._pending_since_ms = 0
+        self.resync_interval_ms = resync_interval_s * 1000
+        self._retry_interval_ms = retry_interval_ms
+        self._default_fps = default_fps
+        self.drone_fps = None
+        self.drone_xres = None
+        self.drone_yres = None
+
+    def tick(self, now_ms):
+        """Call once per main-loop iteration. Drives the state machine."""
+        if self.state == HandshakeState.INIT:
+            self._send_hello(now_ms)
+        elif self.state == HandshakeState.PENDING:
+            if now_ms - self._pending_since_ms > self._retry_interval_ms:
+                self._send_hello(now_ms)
+        elif self.state == HandshakeState.SYNCED:
+            if now_ms - self.last_sync_ms > self.resync_interval_ms:
+                self._send_hello(now_ms)
+                # Stay "effectively synced" for fps/offset until a new
+                # reply lands. Do NOT downgrade to PENDING here — that
+                # would cause a transient loss of offset and fps.
+
+    def _send_hello(self, now_ms):
+        self.pending_t1 = now_ms
+        self._pending_since_ms = now_ms
+        payload = f"H:{now_ms}".encode("ascii")
+        frame = struct.pack("!I", len(payload)) + payload
+        try:
+            self.sock.sendto(frame, (self.drone_ip, self.drone_port))
+            if verbose_mode:
+                print(f"[HANDSHAKE] Sent H:{now_ms} to {self.drone_ip}:{self.drone_port}")
+        except OSError as e:
+            if verbose_mode:
+                print(f"[HANDSHAKE] Failed to send hello: {e}")
+            return
+        if self.state == HandshakeState.INIT:
+            self.state = HandshakeState.PENDING
+            if verbose_mode:
+                print(f"[HANDSHAKE] State: INIT -> PENDING")
+
+    def handle_reply(self, payload_str, t4_ms):
+        """Feed an 'I:' payload plus GS recv time."""
+        if not payload_str.startswith("I:"):
+            if verbose_mode:
+                print(f"[HANDSHAKE] Invalid reply (not I:): {payload_str[:20]}")
+            return
+        parts = payload_str[2:].split(":")
+        if len(parts) < 6:
+            if verbose_mode:
+                print(f"[HANDSHAKE] Invalid reply (too few fields): {payload_str}")
+            return
+        try:
+            t1 = int(parts[0]); t2 = int(parts[1]); t3 = int(parts[2])
+            fps = int(parts[3]); xres = int(parts[4]); yres = int(parts[5])
+        except ValueError:
+            if verbose_mode:
+                print(f"[HANDSHAKE] Invalid reply (parse error): {payload_str}")
+            return
+        if t1 != self.pending_t1:
+            if verbose_mode:
+                print(f"[HANDSHAKE] Stale reply (t1={t1} != pending_t1={self.pending_t1})")
+            return  # stale reply
+        rtt = (t4_ms - t1) - (t3 - t2)
+        if rtt < 0 or rtt > 100 or (t3 - t2) > 10:
+            if verbose_mode:
+                print(f"[HANDSHAKE] Filtered sample: rtt={rtt}ms, t3-t2={t3-t2}ms")
+            return  # filtered sample — tick() will retry
+        self.offset_ms = ((t2 - t1) + (t3 - t4_ms)) // 2
+        self.rtt_ms = rtt
+        self.drone_fps = fps
+        self.drone_xres = xres
+        self.drone_yres = yres
+        self.last_sync_ms = t4_ms
+        old_state = self.state
+        self.state = HandshakeState.SYNCED
+        if verbose_mode:
+            print(f"[HANDSHAKE] State: {['INIT','PENDING','SYNCED'][old_state]} -> SYNCED")
+            print(f"[HANDSHAKE] Synced: fps={fps} res={xres}x{yres} offset={self.offset_ms}ms rtt={self.rtt_ms}ms")
+
+    def is_synced(self):
+        return self.state == HandshakeState.SYNCED
+
+    def get_fps(self):
+        return self.drone_fps if self.drone_fps is not None else self._default_fps
+
+    def correct_timestamp(self, gs_now_ms):
+        return gs_now_ms + self.offset_ms if self.is_synced() else gs_now_ms
+
+
 class ProfileSelector:
     """Two-channel gate profile selector.
 
@@ -240,7 +347,8 @@ class ProfileSelector:
     _compute_profile() from physical link metrics.
     """
 
-    def __init__(self, config):
+    def __init__(self, config, handshake):
+        self.handshake = handshake
         # Selection tuning
         ps = 'profile selection'
         self.hold_fallback_mode_ms = config.getint(ps, 'hold_fallback_mode_ms')
@@ -327,7 +435,8 @@ class ProfileSelector:
             redundancy_ratio = self.fec_redundancy_ratio
         
         # Step 1: Packets per frame = bitrate / (fps * 8 * mtu)
-        packets_per_frame = bitrate_bps / (VIDEO_FPS * 8 * MTU_PAYLOAD_BYTES)
+        video_fps = self.handshake.get_fps()
+        packets_per_frame = bitrate_bps / (video_fps * 8 * MTU_PAYLOAD_BYTES)
         
         # Step 2: K = ceil(packets_per_frame) for minimal latency
         fec_k = max(2, math.ceil(packets_per_frame))
@@ -594,6 +703,25 @@ class ProfileSelector:
 
 # ─── Message generation ──────────────────────────────────────────────────────
 
+def _drain_handshake_replies(sock, handshake):
+    """Drain all pending datagrams and feed 'I:' payloads to handshake."""
+    while True:
+        try:
+            data, _addr = sock.recvfrom(1024)
+        except BlockingIOError:
+            return
+        if len(data) < 4:
+            continue
+        plen = struct.unpack("!I", data[:4])[0]
+        if len(data) < 4 + plen:
+            continue
+        try:
+            payload = data[4:4 + plen].decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        t4 = int(time.time() * 1000)
+        handshake.handle_reply(payload, t4)
+
 def send_udp(message):
     message_bytes = message.encode('utf-8')
     message_size = struct.pack('!I', len(message_bytes))
@@ -611,7 +739,7 @@ def send_udp(message):
 def generate_profile_message(profile_idx, profile):
     """Generate a P: profile change message."""
     global keyframe_request_code, keyframe_request_remaining
-    timestamp = int(time.time() * 1000)  # Milliseconds for latency measurement
+    timestamp = handshake.correct_timestamp(int(time.time() * 1000))  # Milliseconds for latency measurement
 
     parts = [
         "P",
@@ -769,6 +897,9 @@ def handle_video_rx_stats(data):
                 print(f"Generated new keyframe request code on video start: {keyframe_request_code}")
 
         waiting_for_video_printed = False
+        now_ms = int(time.time() * 1000)
+        _drain_handshake_replies(udp_socket, handshake)
+        handshake.tick(now_ms)
         calculate_link()
     else:
         video_rx_initial_message_printed = False
@@ -843,8 +974,18 @@ if __name__ == "__main__":
     allow_idr = config.getboolean('keyframe', 'allow_idr')
     idr_max_messages = config.getint('keyframe', 'idr_max_messages')
 
+    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp_socket.bind(("", 0))
+    udp_socket.setblocking(False)
+
+    handshake = HandshakeClient(
+        udp_socket, udp_ip, udp_port,
+        resync_interval_s=config.getint('handshake', 'resync_interval_s', fallback=30),
+        default_fps=config.getint('dynamic', 'video_fps_default', fallback=90),
+    )
+
     # Initialize profile selector
-    profile_selector = ProfileSelector(config)
+    profile_selector = ProfileSelector(config, handshake)
 
     # Initialize telemetry logger
     telemetry_logger = None
@@ -874,5 +1015,4 @@ if __name__ == "__main__":
     keyframe_request_code = None
     keyframe_request_remaining = 0
 
-    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     connect_to_wfb_stats()

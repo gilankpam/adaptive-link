@@ -215,6 +215,7 @@ int main(int argc, char *argv[]) {
         .ps = &daemon.ps,
         .ks = &daemon.ks,
         .rs = &daemon.rs,
+        .ms = &daemon.ms,
         .initialized = &daemon.initialized
     };
     pthread_t osd_thread;
@@ -274,6 +275,11 @@ int main(int argc, char *argv[]) {
 
             /* Strip length off the start of the message */
             char *message = buffer + sizeof(uint32_t);
+            if (msg_length >= 2 && strncmp(message, "H:", 2) == 0) {
+                msg_handle_hello(&daemon.ms, message + 2, msg_length - 2,
+                                 &daemon.hw, daemon.sockfd, &client_addr);
+                continue;   /* handshake is NOT a heartbeat — do not touch message_count */
+            }
             /* See if it's a special command, otherwise process it */
             if (strncmp(message, "special:", 8) == 0) {
                 keyframe_handle_special(&daemon.ks, message, &daemon.cfg,

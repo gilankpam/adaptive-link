@@ -28,6 +28,12 @@ with open(_gs_path) as _f:
     _code = _f.read().split("if __name__")[0]
 exec(_code)
 
+# Mock handshake for testing
+class _MockHandshake:
+    def get_fps(self): return 60
+    def correct_timestamp(self, ts): return ts
+    def is_synced(self): return False
+
 
 def _make_tick(ts=1000, rssi=-40, snr=25.0, rssi_min=-45, ant=2,
                pkt_all=100, pkt_lost=1, pkt_fec=0, fec_k=8, fec_n=12,
@@ -90,7 +96,7 @@ class TestParameterSpace:
         study.tell(trial, 0.0)
 
         # Should not raise
-        ps = ProfileSelector(config)
+        ps = ProfileSelector(config, _MockHandshake())
 
     def test_adapter_max_mcs_constraint(self):
         """max_mcs should be bounded by adapter capability."""

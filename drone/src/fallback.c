@@ -26,10 +26,16 @@ void *fallback_thread_func(void *arg) {
             /* Bypass profile_apply_direct's duplicate check — fallback must
              * always dispatch so that commands which failed on a previous
              * attempt (e.g. API batch timeout) get retried. Delta detection
-             * in profile_apply_exec still skips already-applied params. */
+             * in profile_apply_exec still skips already-applied params.
+             *
+             * The three ps fields are guarded by worker_mutex; take it
+             * here so we don't race profile_apply's read of the same
+             * fields into pending_job. */
+            pthread_mutex_lock(&ta->ps->worker_mutex);
             ta->ps->previousProfile = ta->ps->currentProfile;
             ta->ps->currentProfile = -1;
             ta->ps->prevTimeStamp = util_now_ms();
+            pthread_mutex_unlock(&ta->ps->worker_mutex);
             profile_apply(ta->ps, &ta->cfg->fallback_profile, ta->osd);
         } else {
             INFO_LOG(ta->cfg, "Messages per %dms: %d\n", ta->cfg->fallback_ms, local_count);

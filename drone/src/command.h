@@ -16,6 +16,10 @@ typedef struct {
     long pace_exec_us;    /* microseconds between commands */
     int exec_timeout_ms;  /* timeout for command execution in milliseconds */
     log_level_t log_level;
+    /* Serializes cmd_exec_with_timeout() and cmd_http_get() across threads
+     * so the profile worker and tx_monitor don't race each other — e.g. two
+     * concurrent HTTP GETs to the camera majestic API. */
+    pthread_mutex_t exec_mutex;
 } cmd_ctx_t;
 
 void cmd_init(cmd_ctx_t *ctx, long pace_exec_us, log_level_t log_level);

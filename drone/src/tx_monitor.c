@@ -34,30 +34,45 @@ void *txmon_thread_func(void *arg) {
 
         long since_xtx_ms = util_elapsed_ms_timespec(&now, &last_xtx_time);
 
+        /* Snapshot ps fields under worker_mutex so we don't race the profile
+         * worker updating prevSetBitrate/prevSetGop/bitrate_reduced. The
+         * snapshot is also written back under the same lock.
+         * The actual HTTP call is released from this lock — it's serialized
+         * separately by cmd->exec_mutex. */
+        pthread_mutex_lock(&ps->worker_mutex);
+        int snap_prev_bitrate = ps->prevSetBitrate;
+        float snap_prev_gop = ps->prevSetGop;
+        bool snap_bitrate_reduced = ps->bitrate_reduced;
+        pthread_mutex_unlock(&ps->worker_mutex);
+
         /* If we see dropped-tx, reduce bitrate (once) and reset timer */
         if (cfg->allow_xtx_reduce_bitrate && latest_tx_dropped > 0) {
-            if (!ps->bitrate_reduced) {
-                int new_bitrate = (int)(ps->prevSetBitrate * cfg->xtx_reduce_bitrate_factor);
+            if (!snap_bitrate_reduced) {
+                int new_bitrate = (int)(snap_prev_bitrate * cfg->xtx_reduce_bitrate_factor);
                 /* Apply bitrate via batched API */
-                profile_apply_api_batch(cfg, new_bitrate, ps->prevSetGop, cmd);
+                profile_apply_api_batch(cfg, new_bitrate, snap_prev_gop, cmd);
+                pthread_mutex_lock(&ps->worker_mutex);
                 ps->bitrate_reduced = true;
+                pthread_mutex_unlock(&ps->worker_mutex);
                 INFO_LOG(cfg, "Reduced bitrate due to tx-drops\n");
             }
             last_xtx_time = now;
         }
 
         /* If we've reduced, but no new tx-drops for >= restore_interval_ms, restore */
-        else if (ps->bitrate_reduced && since_xtx_ms >= restore_interval_ms) {
+        else if (snap_bitrate_reduced && since_xtx_ms >= restore_interval_ms) {
             /* Apply bitrate via batched API */
-            profile_apply_api_batch(cfg, (int)ps->prevSetBitrate, ps->prevSetGop, cmd);
+            profile_apply_api_batch(cfg, snap_prev_bitrate, snap_prev_gop, cmd);
+            pthread_mutex_lock(&ps->worker_mutex);
             ps->bitrate_reduced = false;
+            pthread_mutex_unlock(&ps->worker_mutex);
             INFO_LOG(cfg, "Restored normal bitrate after %ld ms without tx-drops\n",
                    since_xtx_ms);
         }
 
         long elapsed_kf_ms = util_elapsed_ms_timespec(&now, &ks->last_request_time);
 
-        if (latest_tx_dropped > 0 && elapsed_kf_ms >= cfg->request_keyframe_interval_ms && cfg->allow_rq_kf_by_tx_d && ps->prevSetGop > 0.5f) {
+        if (latest_tx_dropped > 0 && elapsed_kf_ms >= cfg->request_keyframe_interval_ms && cfg->allow_rq_kf_by_tx_d && snap_prev_gop > 0.5f) {
             /* Parse the IDR command URL and use native HTTP client */
             char host[64];
             int port = 80;

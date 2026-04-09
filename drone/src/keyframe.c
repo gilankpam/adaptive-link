@@ -37,7 +37,8 @@ static bool code_exists(keyframe_state_t *ks, const char *code, struct timespec 
 static void add_code(keyframe_state_t *ks, const char *code, struct timespec *current_time) {
     pthread_mutex_lock(&ks->mutex);
     if (ks->num_requests < MAX_CODES) {
-        strncpy(ks->codes[ks->num_requests].code, code, CODE_LENGTH);
+        strncpy(ks->codes[ks->num_requests].code, code, CODE_LENGTH - 1);
+        ks->codes[ks->num_requests].code[CODE_LENGTH - 1] = '\0';
         ks->codes[ks->num_requests].timestamp = *current_time;
         ks->num_requests++;
     } else {

@@ -34,6 +34,7 @@ void cmd_init(cmd_ctx_t *ctx, long pace_exec_us, log_level_t log_level) {
     ctx->pace_exec_us = pace_exec_us;
     ctx->exec_timeout_ms = DEFAULT_EXEC_TIMEOUT_MS;
     ctx->log_level = log_level;
+    pthread_mutex_init(&ctx->exec_mutex, NULL);
 }
 
 /**
@@ -150,22 +151,30 @@ void cmd_format(char *dest, size_t dest_size, const char *tmpl,
 }
 
 int cmd_exec_with_timeout(const cmd_ctx_t *ctx, const char *command) {
+    /* exec_mutex is logically mutable even for a "const" ctx — it protects
+     * shared execution resources, not the ctx's configuration fields. */
+    pthread_mutex_t *mu = (pthread_mutex_t *)&ctx->exec_mutex;
+    pthread_mutex_lock(mu);
     int result = exec_with_timeout(command, ctx->exec_timeout_ms, ctx->log_level);
     if (ctx->pace_exec_us > 0) {
         usleep(ctx->pace_exec_us);
     }
+    pthread_mutex_unlock(mu);
     return result;
 }
 
 int cmd_http_get(const char *host, int port, const char *path,
                  char *response, size_t resp_size, const cmd_ctx_t *ctx) {
     INFO_LOG_LEVEL(ctx->log_level, "HTTP GET %s:%d%s\n", host, port, path);
-    
+
+    pthread_mutex_t *mu = (pthread_mutex_t *)&ctx->exec_mutex;
+    pthread_mutex_lock(mu);
     int result = http_get(host, port, path, response, resp_size, ctx->exec_timeout_ms);
-    
+
     if (ctx->pace_exec_us > 0) {
         usleep(ctx->pace_exec_us);
     }
-    
+    pthread_mutex_unlock(mu);
+
     return result;
 }

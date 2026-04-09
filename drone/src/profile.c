@@ -127,8 +127,127 @@ int profile_apply_api_batch(const alink_config_t *cfg,
     return cmd_http_get(host, port, url_path, NULL, 0, cmd);
 }
 
+/* ─── Per-step apply helpers ────────────────────────────────────────────
+ *
+ * Each helper owns its own delta check, command build, exec, and prev*
+ * state update. The outer profile_apply_exec chooses the ordering
+ * (upgrade vs downgrade) by calling them in a different sequence.
+ */
+
+static void apply_fps_step(profile_state_t *ps, int currentFPS) {
+    if (currentFPS == ps->prevFPS) return;
+
+    alink_config_t *cfg = ps->cfg;
+    char fpsCommand[MAX_COMMAND_SIZE];
+    char strFPS[10];
+    snprintf(strFPS, sizeof(strFPS), "%d", currentFPS);
+    const char *keys[] = { "fps" };
+    const char *values[] = { strFPS };
+    cmd_format(fpsCommand, sizeof(fpsCommand), cfg->fpsCommandTemplate, 1, keys, values);
+
+    DEBUG_LOG(cfg, "FPS: %d -> %d\n", ps->prevFPS, currentFPS);
+    if (cmd_exec_with_timeout(ps->cmd, fpsCommand) != 0) {
+        ERROR_LOG(cfg, "FPS command failed: %s\n", fpsCommand);
+    }
+    ps->prevFPS = currentFPS;
+}
+
+static void apply_power_step(profile_state_t *ps, int finalPower) {
+    alink_config_t *cfg = ps->cfg;
+    if (!cfg->allow_set_power || finalPower == ps->prevWfbPower) return;
+
+    char powerCommand[MAX_COMMAND_SIZE];
+    char strPower[10];
+    snprintf(strPower, sizeof(strPower), "%d", finalPower);
+    const char *keys[] = { "power" };
+    const char *values[] = { strPower };
+    cmd_format(powerCommand, sizeof(powerCommand), cfg->powerCommandTemplate, 1, keys, values);
+
+    DEBUG_LOG(cfg, "Power: %d -> %d\n", ps->prevWfbPower, finalPower);
+    if (cmd_exec_with_timeout(ps->cmd, powerCommand) != 0) {
+        ERROR_LOG(cfg, "Power command failed: %s\n", powerCommand);
+    }
+    ps->prevWfbPower = finalPower;
+}
+
+static void apply_mcs_step(profile_state_t *ps, const char *currentSetGI,
+                           int currentSetMCS, int currentBandwidth) {
+    if (strcmp(currentSetGI, ps->prevSetGI) == 0 &&
+        currentSetMCS == ps->prevSetMCS &&
+        currentBandwidth == ps->prevBandwidth) {
+        return;
+    }
+
+    alink_config_t *cfg = ps->cfg;
+    hw_state_t *hw = ps->hw;
+    char mcsCommand[MAX_COMMAND_SIZE];
+    char strBandwidth[10], strGI[10], strStbc[10], strLdpc[10], strMcs[10];
+    snprintf(strBandwidth, sizeof(strBandwidth), "%d", currentBandwidth);
+    snprintf(strGI, sizeof(strGI), "%s", currentSetGI);
+    snprintf(strStbc, sizeof(strStbc), "%d", hw->stbc);
+    snprintf(strLdpc, sizeof(strLdpc), "%d", hw->ldpc_tx);
+    snprintf(strMcs, sizeof(strMcs), "%d", currentSetMCS);
+    const char *keys[] = { "bandwidth", "gi", "stbc", "ldpc", "mcs" };
+    const char *values[] = { strBandwidth, strGI, strStbc, strLdpc, strMcs };
+    cmd_format(mcsCommand, sizeof(mcsCommand), cfg->mcsCommandTemplate, 5, keys, values);
+
+    DEBUG_LOG(cfg, "MCS: %d -> %d, GI: %s -> %s, BW: %d -> %d\n",
+              ps->prevSetMCS, currentSetMCS, ps->prevSetGI, currentSetGI,
+              ps->prevBandwidth, currentBandwidth);
+    if (cmd_exec_with_timeout(ps->cmd, mcsCommand) != 0) {
+        ERROR_LOG(cfg, "MCS command failed: %s\n", mcsCommand);
+    }
+    ps->prevBandwidth = currentBandwidth;
+    strncpy(ps->prevSetGI, currentSetGI, sizeof(ps->prevSetGI) - 1);
+    ps->prevSetGI[sizeof(ps->prevSetGI) - 1] = '\0';
+    ps->prevSetMCS = currentSetMCS;
+}
+
+static void apply_fec_step(profile_state_t *ps, int currentSetFecK, int currentSetFecN) {
+    if (currentSetFecK == ps->prevSetFecK && currentSetFecN == ps->prevSetFecN) return;
+
+    DEBUG_LOG(ps->cfg, "FEC: %d/%d -> %d/%d\n",
+              ps->prevSetFecK, ps->prevSetFecN, currentSetFecK, currentSetFecN);
+    if (profile_apply_fec(ps, currentSetFecK, currentSetFecN) != 0) {
+        ERROR_LOG(ps->cfg, "Failed to apply FEC settings\n");
+    }
+    ps->prevSetFecK = currentSetFecK;
+    ps->prevSetFecN = currentSetFecN;
+}
+
+static void apply_api_step(profile_state_t *ps, int currentSetBitrate, float currentSetGop) {
+    if (currentSetBitrate == ps->prevSetBitrate && currentSetGop == ps->prevSetGop) return;
+
+    DEBUG_LOG(ps->cfg, "Bitrate: %d -> %d, GOP: %.1f -> %.1f\n",
+              ps->prevSetBitrate, currentSetBitrate, ps->prevSetGop, currentSetGop);
+    if (profile_apply_api_batch(ps->cfg, currentSetBitrate, currentSetGop, ps->cmd) == 0) {
+        ps->prevSetBitrate = currentSetBitrate;
+        ps->prevSetGop = currentSetGop;
+    } else {
+        ERROR_LOG(ps->cfg, "API batch command failed\n");
+    }
+}
+
+static void apply_idr_step(profile_state_t *ps) {
+    alink_config_t *cfg = ps->cfg;
+    if (!cfg->idr_every_change) return;
+
+    const char *idrApiCommand = cfg->idrApiCommandTemplate;
+    char host[64];
+    int port = 80;
+    char url_path[MAX_COMMAND_SIZE];
+
+    if (util_parse_url(idrApiCommand, host, sizeof(host), &port, url_path, sizeof(url_path)) == 0) {
+        if (cmd_http_get(host, port, url_path, NULL, 0, ps->cmd) != 0) {
+            ERROR_LOG(cfg, "IDR command failed: %s\n", idrApiCommand);
+        }
+    }
+}
+
 /*
  * Internal: execute profile commands on the worker thread.
+ * Upgrading order:   FPS → power → MCS → FEC → API → IDR
+ * Downgrading order: FPS → FEC → API → MCS → power → IDR
  */
 static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
     const Profile *profile = &job->profile;
@@ -136,15 +255,9 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
     alink_config_t *cfg = ps->cfg;
     hw_state_t *hw = ps->hw;
 
-    char powerCommand[MAX_COMMAND_SIZE];
-    char fpsCommand[MAX_COMMAND_SIZE];
-    char mcsCommand[MAX_COMMAND_SIZE];
-    const char *idrApiCommand = cfg->idrApiCommandTemplate;
-
-    int currentWfbPower = profile->wfbPower;
+    int finalPower = profile->wfbPower;
     float currentSetGop = profile->setGop;
-    char currentSetGI[10];
-    strcpy(currentSetGI, profile->setGI);
+    const char *currentSetGI = profile->setGI;
     int currentSetMCS = profile->setMCS;
     int currentSetFecK = profile->setFecK;
     int currentSetFecN = profile->setFecN;
@@ -152,172 +265,29 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
     int currentBandwidth = profile->bandwidth;
 
     int currentFPS = hw->global_fps;
-    int finalPower;
-
     if (cfg->limitFPS && currentSetBitrate < 4000 && hw->global_fps > 30 && hw->total_pixels > HIGH_RES_PIXEL_THRESHOLD) {
         currentFPS = 30;
     } else if (cfg->limitFPS && currentSetBitrate < 8000 && hw->total_pixels > HIGH_RES_PIXEL_THRESHOLD && hw->global_fps > 60) {
         currentFPS = 60;
     }
 
-    /* --- Build commands --- */
-    {
-        const char *keys[] = { "fps" };
-        char strFPS[10];
-        snprintf(strFPS, sizeof(strFPS), "%d", currentFPS);
-        const char *values[] = { strFPS };
-        cmd_format(fpsCommand, sizeof(fpsCommand), cfg->fpsCommandTemplate, 1, keys, values);
-    }
-    {
-        const char *keys[] = { "power" };
-        char strPower[10];
+    apply_fps_step(ps, currentFPS);
 
-        finalPower = currentWfbPower;
-
-        snprintf(strPower, sizeof(strPower), "%d", finalPower);
-        const char *values[] = { strPower };
-        cmd_format(powerCommand, sizeof(powerCommand), cfg->powerCommandTemplate, 1, keys, values);
-    }
-    {
-        const char *keys[] = { "bandwidth", "gi", "stbc", "ldpc", "mcs" };
-        char strBandwidth[10], strGI[10], strStbc[10], strLdpc[10], strMcs[10];
-        snprintf(strBandwidth, sizeof(strBandwidth), "%d", currentBandwidth);
-        snprintf(strGI, sizeof(strGI), "%s", currentSetGI);
-        snprintf(strStbc, sizeof(strStbc), "%d", hw->stbc);
-        snprintf(strLdpc, sizeof(strLdpc), "%d", hw->ldpc_tx);
-        snprintf(strMcs, sizeof(strMcs), "%d", currentSetMCS);
-        const char *values[] = { strBandwidth, strGI, strStbc, strLdpc, strMcs };
-        cmd_format(mcsCommand, sizeof(mcsCommand), cfg->mcsCommandTemplate, 5, keys, values);
-    }
-
-    /* --- Execute commands (ordering depends on direction) --- */
     if (job->currentProfile > job->previousProfile) {
-        /* Upgrading: power before MCS */
-        if (currentFPS != ps->prevFPS) {
-            DEBUG_LOG(cfg, "FPS: %d -> %d\n", ps->prevFPS, currentFPS);
-            if (cmd_exec_with_timeout(ps->cmd, fpsCommand) != 0) {
-                ERROR_LOG(ps->cfg, "FPS command failed: %s\n", fpsCommand);
-            }
-            ps->prevFPS = currentFPS;
-        }
-        if (cfg->allow_set_power && finalPower != ps->prevWfbPower) {
-            DEBUG_LOG(cfg, "Power: %d -> %d\n", ps->prevWfbPower, finalPower);
-            if (cmd_exec_with_timeout(ps->cmd, powerCommand) != 0) {
-                ERROR_LOG(ps->cfg, "Power command failed: %s\n", powerCommand);
-            }
-            ps->prevWfbPower = finalPower;
-        }
-        if (strcmp(currentSetGI, ps->prevSetGI) != 0 ||
-            currentSetMCS != ps->prevSetMCS ||
-            currentBandwidth != ps->prevBandwidth) {
-            DEBUG_LOG(cfg, "MCS: %d -> %d, GI: %s -> %s, BW: %d -> %d\n",
-                       ps->prevSetMCS, currentSetMCS, ps->prevSetGI, currentSetGI,
-                       ps->prevBandwidth, currentBandwidth);
-            if (cmd_exec_with_timeout(ps->cmd, mcsCommand) != 0) {
-                ERROR_LOG(ps->cfg, "MCS command failed: %s\n", mcsCommand);
-            }
-            ps->prevBandwidth = currentBandwidth;
-            strcpy(ps->prevSetGI, currentSetGI);
-            ps->prevSetMCS = currentSetMCS;
-        }
-        /* Apply FEC changes (uses wfb_tx_cmd) */
-        if (currentSetFecK != ps->prevSetFecK || currentSetFecN != ps->prevSetFecN) {
-            DEBUG_LOG(cfg, "FEC: %d/%d -> %d/%d\n",
-                       ps->prevSetFecK, ps->prevSetFecN, currentSetFecK, currentSetFecN);
-            if (profile_apply_fec(ps, currentSetFecK, currentSetFecN) != 0) {
-                ERROR_LOG(ps->cfg, "Failed to apply FEC settings\n");
-            }
-            ps->prevSetFecK = currentSetFecK;
-            ps->prevSetFecN = currentSetFecN;
-        }
-        /* Batch API call (bitrate, gop, drone-computed roiQp) */
-        if (currentSetBitrate != ps->prevSetBitrate ||
-            currentSetGop != ps->prevSetGop) {
-            DEBUG_LOG(cfg, "Bitrate: %d -> %d, GOP: %.1f -> %.1f\n",
-                       ps->prevSetBitrate, currentSetBitrate, ps->prevSetGop, currentSetGop);
-            if (profile_apply_api_batch(cfg, currentSetBitrate, currentSetGop, ps->cmd) == 0) {
-                ps->prevSetBitrate = currentSetBitrate;
-                ps->prevSetGop = currentSetGop;
-            } else {
-                ERROR_LOG(ps->cfg, "API batch command failed\n");
-            }
-        }
-        if (cfg->idr_every_change) {
-            /* Parse the IDR API URL and use native HTTP client */
-            char host[64];
-            int port = 80;
-            char url_path[MAX_COMMAND_SIZE];
-            
-            if (util_parse_url(idrApiCommand, host, sizeof(host), &port, url_path, sizeof(url_path)) == 0) {
-                if (cmd_http_get(host, port, url_path, NULL, 0, ps->cmd) != 0) {
-                    ERROR_LOG(ps->cfg, "IDR command failed: %s\n", idrApiCommand);
-                }
-            }
-        }
+        /* Upgrading: power before MCS/FEC/API */
+        apply_power_step(ps, finalPower);
+        apply_mcs_step(ps, currentSetGI, currentSetMCS, currentBandwidth);
+        apply_fec_step(ps, currentSetFecK, currentSetFecN);
+        apply_api_step(ps, currentSetBitrate, currentSetGop);
     } else {
-        /* Downgrading: MCS/FEC before power */
-        if (currentFPS != ps->prevFPS) {
-            DEBUG_LOG(cfg, "FPS: %d -> %d\n", ps->prevFPS, currentFPS);
-            if (cmd_exec_with_timeout(ps->cmd, fpsCommand) != 0) {
-                ERROR_LOG(ps->cfg, "FPS command failed: %s\n", fpsCommand);
-            }
-            ps->prevFPS = currentFPS;
-        }
-        /* Apply FEC changes (uses wfb_tx_cmd) */
-        if (currentSetFecK != ps->prevSetFecK || currentSetFecN != ps->prevSetFecN) {
-            DEBUG_LOG(cfg, "FEC: %d/%d -> %d/%d\n",
-                       ps->prevSetFecK, ps->prevSetFecN, currentSetFecK, currentSetFecN);
-            if (profile_apply_fec(ps, currentSetFecK, currentSetFecN) != 0) {
-                ERROR_LOG(ps->cfg, "Failed to apply FEC settings\n");
-            }
-            ps->prevSetFecK = currentSetFecK;
-            ps->prevSetFecN = currentSetFecN;
-        }
-        /* Batch API call (bitrate, gop, drone-computed roiQp) */
-        if (currentSetBitrate != ps->prevSetBitrate ||
-            currentSetGop != ps->prevSetGop) {
-            DEBUG_LOG(cfg, "Bitrate: %d -> %d, GOP: %.1f -> %.1f\n",
-                       ps->prevSetBitrate, currentSetBitrate, ps->prevSetGop, currentSetGop);
-            if (profile_apply_api_batch(cfg, currentSetBitrate, currentSetGop, ps->cmd) == 0) {
-                ps->prevSetBitrate = currentSetBitrate;
-                ps->prevSetGop = currentSetGop;
-            } else {
-                ERROR_LOG(ps->cfg, "API batch command failed\n");
-            }
-        }
-        if (strcmp(currentSetGI, ps->prevSetGI) != 0 ||
-            currentSetMCS != ps->prevSetMCS ||
-            currentBandwidth != ps->prevBandwidth) {
-            DEBUG_LOG(cfg, "MCS: %d -> %d, GI: %s -> %s, BW: %d -> %d\n",
-                       ps->prevSetMCS, currentSetMCS, ps->prevSetGI, currentSetGI,
-                       ps->prevBandwidth, currentBandwidth);
-            if (cmd_exec_with_timeout(ps->cmd, mcsCommand) != 0) {
-                ERROR_LOG(ps->cfg, "MCS command failed: %s\n", mcsCommand);
-            }
-            ps->prevBandwidth = currentBandwidth;
-            strcpy(ps->prevSetGI, currentSetGI);
-            ps->prevSetMCS = currentSetMCS;
-        }
-        if (cfg->allow_set_power && finalPower != ps->prevWfbPower) {
-            DEBUG_LOG(cfg, "Power: %d -> %d\n", ps->prevWfbPower, finalPower);
-            if (cmd_exec_with_timeout(ps->cmd, powerCommand) != 0) {
-                ERROR_LOG(ps->cfg, "Power command failed: %s\n", powerCommand);
-            }
-            ps->prevWfbPower = finalPower;
-        }
-        if (cfg->idr_every_change) {
-            /* Parse the IDR API URL and use native HTTP client */
-            char host[64];
-            int port = 80;
-            char url_path[MAX_COMMAND_SIZE];
-            
-            if (util_parse_url(idrApiCommand, host, sizeof(host), &port, url_path, sizeof(url_path)) == 0) {
-                if (cmd_http_get(host, port, url_path, NULL, 0, ps->cmd) != 0) {
-                    ERROR_LOG(ps->cfg, "IDR command failed: %s\n", idrApiCommand);
-                }
-            }
-        }
+        /* Downgrading: MCS/FEC/API before power */
+        apply_fec_step(ps, currentSetFecK, currentSetFecN);
+        apply_api_step(ps, currentSetBitrate, currentSetGop);
+        apply_mcs_step(ps, currentSetGI, currentSetMCS, currentBandwidth);
+        apply_power_step(ps, finalPower);
     }
+
+    apply_idr_step(ps);
 
     /* Update OSD with actual values from wfb_tx_cmd output */
     int k, n, stbc_val, ldpc_val, short_gi, actual_bandwidth, mcs_index, vht_mode, vht_nss;
@@ -325,13 +295,13 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
     const char *gi_string = short_gi ? "short" : "long";
     int pwr = cfg->allow_set_power ? finalPower : 0;
 
-    sprintf(os->profile, "%d %d%s%d Pw%d g%.1f",
-            profile->setBitrate,
-            actual_bandwidth,
-            gi_string,
-            mcs_index,
-            pwr,
-            profile->setGop);
+    snprintf(os->profile, sizeof(os->profile), "%d %d%s%d Pw%d g%.1f",
+             profile->setBitrate,
+             actual_bandwidth,
+             gi_string,
+             mcs_index,
+             pwr,
+             profile->setGop);
 
     snprintf(os->profile_fec, sizeof(os->profile_fec), "%d/%d", k, n);
 }

@@ -73,41 +73,42 @@ int http_get(const char *host, int port, const char *path,
              char *response, size_t resp_size, int timeout_ms) {
     int sock = -1;
     struct sockaddr_in server_addr;
-    struct hostent *server;
     char request[HTTP_REQUEST_SIZE];
     int bytes_received = 0;
     int total_received = 0;
-    
+
+    /* Resolve host via getaddrinfo() — thread-safe, unlike gethostbyname().
+     * The profile worker and tx_monitor both call into this path. */
+    struct addrinfo hints;
+    struct addrinfo *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+
+    int gai = getaddrinfo(host, NULL, &hints, &res);
+    if (gai != 0 || res == NULL) {
+        fprintf(stderr, "http_get: getaddrinfo failed for %s: %s\n",
+                host, gai_strerror(gai));
+        if (res) freeaddrinfo(res);
+        return -1;
+    }
+
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(port);
+    server_addr.sin_addr = ((struct sockaddr_in *)res->ai_addr)->sin_addr;
+    freeaddrinfo(res);
+
     // Create socket
     sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
         perror("socket");
         return -1;
     }
-    
+
     // Set non-blocking for timeout support
     if (set_nonblocking(sock) < 0) {
         perror("fcntl");
-        close(sock);
-        return -1;
-    }
-    
-    // Resolve host
-    server = gethostbyname(host);
-    if (server == NULL) {
-        fprintf(stderr, "http_get: gethostbyname failed for %s\n", host);
-        close(sock);
-        return -1;
-    }
-    
-    // Fill server address
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(port);
-    // Use h_addr_list[0] instead of deprecated h_addr
-    if (server->h_addr_list[0] != NULL) {
-        memcpy(&server_addr.sin_addr.s_addr, server->h_addr_list[0], server->h_length);
-    } else {
         close(sock);
         return -1;
     }

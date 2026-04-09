@@ -17,8 +17,8 @@ MCS_SNR_THRESHOLDS = [5, 8, 11, 14, 17, 20, 23, 26]
 REQUIRED_TICK_FIELDS = [
     'ts', 'rssi', 'snr', 'rssi_min', 'ant', 'pkt_all', 'pkt_lost',
     'pkt_fec', 'fec_k', 'fec_n', 'loss_rate', 'fec_pressure',
-    'rf_score', 'loss_score', 'fec_score', 'div_score', 'score',
-    'ema_fast', 'ema_slow', 'snr_ema', 'changed', 'adapter',
+    'snr_ema', 'snr_slope', 'margin_cur', 'margin_tgt', 'emergency',
+    'changed', 'adapter',
 ]
 
 
@@ -148,12 +148,18 @@ def compute_fec_saturation(df):
     return df['fec_pressure'].clip(0.0, 1.0)
 
 
-def compute_score_volatility(df, window=20):
-    """Compute rolling standard deviation of score over a trailing window.
+def compute_snr_margin_volatility(df, window=20):
+    """Compute rolling standard deviation of SNR margin over a trailing window.
 
+    Prefers the logged 'margin_cur' column; falls back to recomputing from
+    'snr_ema' and 'mcs' if margin_cur is absent (older telemetry).
     Uses min_periods=1 so early ticks use all available data.
     """
-    return df['score'].rolling(window=window, min_periods=1).std().fillna(0.0)
+    if 'margin_cur' in df.columns:
+        series = df['margin_cur']
+    else:
+        series = compute_link_budget_margin(df)
+    return series.rolling(window=window, min_periods=1).std().fillna(0.0)
 
 
 def compute_link_budget_margin(df):
@@ -191,14 +197,14 @@ def compute_all_features(df):
     """Add all derived feature columns to a ticks DataFrame.
 
     Returns a new DataFrame with columns added:
-        snr_roc, loss_accel, fec_saturation, score_volatility,
+        snr_roc, loss_accel, fec_saturation, snr_margin_volatility,
         link_budget_margin, time_since_change
     """
     out = df.copy()
     out['snr_roc'] = compute_snr_roc(out)
     out['loss_accel'] = compute_loss_accel(out)
     out['fec_saturation'] = compute_fec_saturation(out)
-    out['score_volatility'] = compute_score_volatility(out)
     out['link_budget_margin'] = compute_link_budget_margin(out)
+    out['snr_margin_volatility'] = compute_snr_margin_volatility(out)
     out['time_since_change'] = compute_time_since_change(out)
     return out

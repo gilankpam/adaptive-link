@@ -36,9 +36,8 @@ class TestTelemetryLoggerBasic(unittest.TestCase):
             num_antennas=2, all_packets=1000, lost_packets=0,
             fec_rec_packets=0, fec_k=8, fec_n=12,
             loss_rate=loss_rate, fec_pressure=0.0,
-            rf_score=0.8, loss_score=1.0, fec_score=1.0,
-            diversity_score=0.95, combined_score=1800.0,
-            ema_fast=1800.0, ema_slow=1790.0, snr_ema=20.0,
+            snr_ema=20.0, snr_slope=0.0,
+            margin_current=4.0, margin_target=4.0, emergency=False,
             profile=profile, profile_changed=changed,
             adapter_id='test-adapter',
         )
@@ -76,9 +75,9 @@ class TestTelemetryLoggerBasic(unittest.TestCase):
         expected_fields = [
             'ts', 'rssi', 'snr', 'rssi_min', 'ant',
             'pkt_all', 'pkt_lost', 'pkt_fec', 'fec_k', 'fec_n',
-            'loss_rate', 'fec_pressure', 'rf_score', 'loss_score',
-            'fec_score', 'div_score', 'score', 'ema_fast', 'ema_slow',
-            'snr_ema', 'changed', 'adapter',
+            'loss_rate', 'fec_pressure',
+            'snr_ema', 'snr_slope', 'margin_cur', 'margin_tgt', 'emergency',
+            'changed', 'adapter',
             'mcs', 'gi', 'sel_fec_k', 'sel_fec_n', 'bitrate', 'power',
         ]
         for field in expected_fields:
@@ -91,9 +90,8 @@ class TestTelemetryLoggerBasic(unittest.TestCase):
             num_antennas=2, all_packets=0, lost_packets=0,
             fec_rec_packets=0, fec_k=None, fec_n=None,
             loss_rate=0.0, fec_pressure=0.0,
-            rf_score=0.0, loss_score=1.0, fec_score=1.0,
-            diversity_score=1.0, combined_score=1000.0,
-            ema_fast=1000.0, ema_slow=1000.0, snr_ema=0.0,
+            snr_ema=0.0, snr_slope=0.0,
+            margin_current=0.0, margin_target=0.0, emergency=False,
             profile=None, profile_changed=False,
         )
         logger.close()
@@ -125,9 +123,8 @@ class TestTelemetryLoggerRotation(unittest.TestCase):
                 min_rssi=-55, num_antennas=2, all_packets=1000,
                 lost_packets=0, fec_rec_packets=0, fec_k=8, fec_n=12,
                 loss_rate=0.0, fec_pressure=0.0,
-                rf_score=0.8, loss_score=1.0, fec_score=1.0,
-                diversity_score=0.95, combined_score=1800.0,
-                ema_fast=1800.0, ema_slow=1790.0, snr_ema=20.0,
+                snr_ema=20.0, snr_slope=0.0,
+                margin_current=4.0, margin_target=4.0, emergency=False,
                 profile=profile, profile_changed=False,
             )
         logger.close()
@@ -162,9 +159,8 @@ class TestTelemetryLoggerOutcome(unittest.TestCase):
             num_antennas=2, all_packets=1000, lost_packets=0,
             fec_rec_packets=0, fec_k=8, fec_n=12,
             loss_rate=0.001, fec_pressure=0.0,
-            rf_score=0.8, loss_score=1.0, fec_score=1.0,
-            diversity_score=0.95, combined_score=1800.0,
-            ema_fast=1800.0, ema_slow=1790.0, snr_ema=20.0,
+            snr_ema=20.0, snr_slope=0.0,
+            margin_current=4.0, margin_target=4.0, emergency=False,
             profile=profile, profile_changed=True,
         )
 
@@ -175,9 +171,8 @@ class TestTelemetryLoggerOutcome(unittest.TestCase):
                 min_rssi=-55, num_antennas=2, all_packets=1000,
                 lost_packets=0, fec_rec_packets=0, fec_k=6, fec_n=9,
                 loss_rate=0.005, fec_pressure=0.0,
-                rf_score=0.8, loss_score=1.0, fec_score=1.0,
-                diversity_score=0.95, combined_score=1800.0,
-                ema_fast=1800.0, ema_slow=1790.0, snr_ema=20.0,
+                snr_ema=20.0, snr_slope=0.0,
+                margin_current=4.0, margin_target=4.0, emergency=False,
                 profile=profile, profile_changed=False,
             )
         logger.close()
@@ -199,9 +194,8 @@ class TestTelemetryLoggerOutcome(unittest.TestCase):
             num_antennas=2, all_packets=1000, lost_packets=50,
             fec_rec_packets=10, fec_k=10, fec_n=12,
             loss_rate=0.06, fec_pressure=0.3,
-            rf_score=0.3, loss_score=0.4, fec_score=0.7,
-            diversity_score=0.75, combined_score=1300.0,
-            ema_fast=1300.0, ema_slow=1400.0, snr_ema=15.0,
+            snr_ema=15.0, snr_slope=-0.5,
+            margin_current=-1.0, margin_target=-1.0, emergency=False,
             profile=profile, profile_changed=True,
         )
 
@@ -212,9 +206,8 @@ class TestTelemetryLoggerOutcome(unittest.TestCase):
                 min_rssi=-75, num_antennas=2, all_packets=1000,
                 lost_packets=80, fec_rec_packets=20, fec_k=10, fec_n=12,
                 loss_rate=0.08, fec_pressure=0.5,
-                rf_score=0.3, loss_score=0.2, fec_score=0.5,
-                diversity_score=0.75, combined_score=1200.0,
-                ema_fast=1200.0, ema_slow=1350.0, snr_ema=15.0,
+                snr_ema=15.0, snr_slope=-0.5,
+                margin_current=-2.0, margin_target=-2.0, emergency=True,
                 profile=profile, profile_changed=False,
             )
         logger.close()
@@ -235,9 +228,8 @@ class TestTelemetryLoggerOutcome(unittest.TestCase):
             num_antennas=2, all_packets=1000, lost_packets=20,
             fec_rec_packets=5, fec_k=8, fec_n=12,
             loss_rate=0.03, fec_pressure=0.1,
-            rf_score=0.5, loss_score=0.7, fec_score=0.9,
-            diversity_score=0.85, combined_score=1550.0,
-            ema_fast=1550.0, ema_slow=1600.0, snr_ema=18.0,
+            snr_ema=18.0, snr_slope=0.0,
+            margin_current=1.0, margin_target=1.0, emergency=False,
             profile=profile, profile_changed=True,
         )
 
@@ -248,9 +240,8 @@ class TestTelemetryLoggerOutcome(unittest.TestCase):
                 min_rssi=-65, num_antennas=2, all_packets=1000,
                 lost_packets=25, fec_rec_packets=8, fec_k=8, fec_n=12,
                 loss_rate=0.03, fec_pressure=0.15,
-                rf_score=0.5, loss_score=0.7, fec_score=0.85,
-                diversity_score=0.85, combined_score=1530.0,
-                ema_fast=1530.0, ema_slow=1580.0, snr_ema=18.0,
+                snr_ema=18.0, snr_slope=0.0,
+                margin_current=0.5, margin_target=0.5, emergency=False,
                 profile=profile, profile_changed=False,
             )
         logger.close()
@@ -272,9 +263,8 @@ class TestTelemetryLoggerOutcome(unittest.TestCase):
             num_antennas=2, all_packets=1000, lost_packets=0,
             fec_rec_packets=0, fec_k=8, fec_n=12,
             loss_rate=0.001, fec_pressure=0.0,
-            rf_score=0.8, loss_score=1.0, fec_score=1.0,
-            diversity_score=0.95, combined_score=1800.0,
-            ema_fast=1800.0, ema_slow=1790.0, snr_ema=20.0,
+            snr_ema=20.0, snr_slope=0.0,
+            margin_current=4.0, margin_target=4.0, emergency=False,
             profile=profile, profile_changed=True,
         )
 
@@ -285,9 +275,8 @@ class TestTelemetryLoggerOutcome(unittest.TestCase):
                 min_rssi=-55, num_antennas=2, all_packets=1000,
                 lost_packets=0, fec_rec_packets=0, fec_k=6, fec_n=9,
                 loss_rate=0.005, fec_pressure=0.0,
-                rf_score=0.8, loss_score=1.0, fec_score=1.0,
-                diversity_score=0.95, combined_score=1800.0,
-                ema_fast=1800.0, ema_slow=1790.0, snr_ema=20.0,
+                snr_ema=20.0, snr_slope=0.0,
+                margin_current=4.0, margin_target=4.0, emergency=False,
                 profile=profile, profile_changed=False,
             )
 
@@ -300,9 +289,8 @@ class TestTelemetryLoggerOutcome(unittest.TestCase):
             num_antennas=2, all_packets=1000, lost_packets=0,
             fec_rec_packets=0, fec_k=8, fec_n=12,
             loss_rate=0.001, fec_pressure=0.0,
-            rf_score=0.9, loss_score=1.0, fec_score=1.0,
-            diversity_score=0.95, combined_score=1900.0,
-            ema_fast=1900.0, ema_slow=1850.0, snr_ema=25.0,
+            snr_ema=25.0, snr_slope=0.2,
+            margin_current=5.0, margin_target=5.0, emergency=False,
             profile=profile2, profile_changed=True,
         )
         logger.close()
@@ -340,9 +328,8 @@ class TestTelemetryLoggerFecConfirmation(unittest.TestCase):
             num_antennas=2, all_packets=1000, lost_packets=0,
             fec_rec_packets=0, fec_k=fec_k, fec_n=fec_n,
             loss_rate=loss_rate, fec_pressure=0.0,
-            rf_score=0.8, loss_score=1.0, fec_score=1.0,
-            diversity_score=0.95, combined_score=1800.0,
-            ema_fast=1800.0, ema_slow=1790.0, snr_ema=20.0,
+            snr_ema=20.0, snr_slope=0.0,
+            margin_current=4.0, margin_target=4.0, emergency=False,
             profile=profile, profile_changed=changed,
         )
 
@@ -446,9 +433,8 @@ class TestTelemetryLoggerEdgeCases(unittest.TestCase):
                 min_rssi=-55, num_antennas=2, all_packets=1000,
                 lost_packets=0, fec_rec_packets=0, fec_k=8, fec_n=12,
                 loss_rate=0.0, fec_pressure=0.0,
-                rf_score=0.8, loss_score=1.0, fec_score=1.0,
-                diversity_score=0.95, combined_score=1800.0,
-                ema_fast=1800.0, ema_slow=1790.0, snr_ema=20.0,
+                snr_ema=20.0, snr_slope=0.0,
+                margin_current=4.0, margin_target=4.0, emergency=False,
                 profile=profile, profile_changed=False,
             )
         logger.close()

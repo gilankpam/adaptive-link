@@ -1,8 +1,8 @@
 """Bayesian parameter optimization for alink_gs ProfileSelector.
 
-Uses optuna's TPE sampler to search the 37-parameter space per adapter type.
-Evaluates candidate parameter sets using the replay simulator against
-historical telemetry data.
+Uses optuna's TPE sampler to search the two-channel gate parameter space
+per adapter type. Evaluates candidate parameter sets using the replay
+simulator against historical telemetry data.
 """
 
 import argparse
@@ -44,7 +44,7 @@ def _load_adapter_constraints(adapters_yaml_path):
 
 
 class ParameterSpace:
-    """Defines the 37 tunable parameters with types, bounds, and constraints."""
+    """Defines the tunable parameters for the two-channel gate with bounds."""
 
     def __init__(self, base_config_str, adapter_constraints=None):
         """Initialize parameter space.
@@ -63,8 +63,6 @@ class ParameterSpace:
     def define_trial(self, trial):
         """Map optuna trial suggestions to a ConfigParser.
 
-        Handles sum-to-1 constraints by deriving dependent weights.
-
         Args:
             trial: optuna.Trial instance.
 
@@ -74,50 +72,8 @@ class ParameterSpace:
         config = configparser.ConfigParser()
         config.read_string(self.base_config_str)
 
-        # --- [scoring] weights: sum to 1.0 ---
-        rf_weight = trial.suggest_float('rf_weight', 0.1, 0.8)
-        loss_weight = trial.suggest_float('loss_weight', 0.05, 0.5)
-        fec_weight = trial.suggest_float('fec_weight', 0.01, 0.4)
-        diversity_weight = max(0.0, 1.0 - rf_weight - loss_weight - fec_weight)
-        diversity_weight = min(diversity_weight, 0.5)
-
-        config.set('scoring', 'rf_weight', str(rf_weight))
-        config.set('scoring', 'loss_weight', str(loss_weight))
-        config.set('scoring', 'fec_weight', str(fec_weight))
-        config.set('scoring', 'diversity_weight', str(diversity_weight))
-
-        config.set('scoring', 'max_loss_rate',
-                   str(trial.suggest_float('max_loss_rate', 0.02, 0.3)))
-        config.set('scoring', 'max_rssi_spread',
-                   str(trial.suggest_int('max_rssi_spread', 5, 40)))
-
-        # --- [weights] RF normalization: sum to 1.0 ---
-        snr_weight = trial.suggest_float('snr_weight', 0.1, 0.9)
-        config.set('weights', 'snr_weight', str(snr_weight))
-        config.set('weights', 'rssi_weight', str(1.0 - snr_weight))
-
-        # --- [ranges] ---
-        config.set('ranges', 'SNR_MIN',
-                   str(trial.suggest_int('SNR_MIN', 5, 20)))
-        config.set('ranges', 'SNR_MAX',
-                   str(trial.suggest_int('SNR_MAX', 25, 45)))
-        config.set('ranges', 'RSSI_MIN',
-                   str(trial.suggest_int('RSSI_MIN', -95, -65)))
-        config.set('ranges', 'RSSI_MAX',
-                   str(trial.suggest_int('RSSI_MAX', -50, -20)))
-
-        # --- [profile selection] ---
+        # --- [profile selection] temporal gating ---
         ps = 'profile selection'
-        config.set(ps, 'ema_fast_alpha',
-                   str(trial.suggest_float('ema_fast_alpha', 0.1, 0.9)))
-        config.set(ps, 'ema_slow_alpha',
-                   str(trial.suggest_float('ema_slow_alpha', 0.01, 0.3)))
-        config.set(ps, 'predict_multi',
-                   str(trial.suggest_float('predict_multi', 0.0, 3.0)))
-        config.set(ps, 'hysteresis_percent',
-                   str(trial.suggest_float('hysteresis_percent', 1.0, 15.0)))
-        config.set(ps, 'hysteresis_percent_down',
-                   str(trial.suggest_float('hysteresis_percent_down', 1.0, 15.0)))
         config.set(ps, 'hold_fallback_mode_ms',
                    str(trial.suggest_int('hold_fallback_mode_ms', 200, 5000)))
         config.set(ps, 'hold_modes_down_ms',
@@ -129,7 +85,22 @@ class ParameterSpace:
         config.set(ps, 'fast_downgrade',
                    str(trial.suggest_categorical('fast_downgrade', [True, False])))
 
-        # --- [dynamic] ---
+        # --- [gate] two-channel gate tuning ---
+        g = 'gate'
+        config.set(g, 'hysteresis_up_db',
+                   str(trial.suggest_float('hysteresis_up_db', 0.5, 6.0)))
+        config.set(g, 'hysteresis_down_db',
+                   str(trial.suggest_float('hysteresis_down_db', 0.0, 4.0)))
+        config.set(g, 'snr_slope_alpha',
+                   str(trial.suggest_float('snr_slope_alpha', 0.05, 0.8)))
+        config.set(g, 'snr_predict_horizon_ticks',
+                   str(trial.suggest_float('snr_predict_horizon_ticks', 0.0, 10.0)))
+        config.set(g, 'emergency_loss_rate',
+                   str(trial.suggest_float('emergency_loss_rate', 0.05, 0.35)))
+        config.set(g, 'emergency_fec_pressure',
+                   str(trial.suggest_float('emergency_fec_pressure', 0.4, 0.95)))
+
+        # --- [dynamic] parameter mapper ---
         d = 'dynamic'
         config.set(d, 'snr_safety_margin',
                    str(trial.suggest_float('snr_safety_margin', 1.0, 8.0)))
@@ -164,24 +135,6 @@ class ParameterSpace:
         bw_choices = self.constraints.get('bandwidths', [20, 40])
         config.set(d, 'bandwidth',
                    str(trial.suggest_categorical('bandwidth', bw_choices)))
-
-        # --- [noise] ---
-        config.set('noise', 'min_noise',
-                   str(trial.suggest_float('min_noise', 0.001, 0.05)))
-        config.set('noise', 'max_noise',
-                   str(trial.suggest_float('max_noise', 0.05, 0.5)))
-        config.set('noise', 'deduction_exponent',
-                   str(trial.suggest_float('deduction_exponent', 0.1, 2.0)))
-
-        # --- [error estimation] ---
-        config.set('error estimation', 'kalman_estimate',
-                   str(trial.suggest_float('kalman_estimate', 0.001, 0.05)))
-        config.set('error estimation', 'kalman_error_estimate',
-                   str(trial.suggest_float('kalman_error_estimate', 0.01, 1.0)))
-        config.set('error estimation', 'process_variance',
-                   str(trial.suggest_float('process_variance', 1e-7, 1e-3, log=True)))
-        config.set('error estimation', 'measurement_variance',
-                   str(trial.suggest_float('measurement_variance', 0.001, 0.1)))
 
         return config
 

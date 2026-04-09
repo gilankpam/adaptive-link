@@ -8,7 +8,7 @@ OpenIPC Adaptive-Link is an adaptive wireless link profile selector for OpenIPC 
 
 Two-component system:
 - **Drone side (multi-module C daemon):** Listens for ground station heartbeats containing finalized profile selections, applies transmission parameters via command templates
-- **Ground station (`alink_gs`):** Python 3 script that monitors wfb-ng signal metrics, runs multi-factor scoring algorithm, selects transmission profiles, and sends profile parameters to the drone
+- **Ground station (`alink_gs`):** Python 3 script that monitors wfb-ng signal metrics, runs a two-channel gate on physical link quantities (SNR margin + emergency loss/FEC triggers), selects transmission profiles, and sends profile parameters to the drone
 
 ## Build Commands
 
@@ -30,8 +30,8 @@ The project includes:
 ### Signal Flow
 
 1. Ground station (`alink_gs`) reads RSSI/SNR from wfb-ng JSON stats
-2. GS calculates multi-factor score (RF quality, packet loss, FEC pressure, antenna diversity)
-3. GS runs profile selection algorithm (dual EMA smoothing, hysteresis, confidence gating)
+2. GS updates per-tick link state (SNR EMA, SNR slope, loss rate, FEC pressure) via `ProfileSelector.evaluate_link()`
+3. GS runs the two-channel gate: Channel A (SNR margin in dB with up/down hysteresis + slope prediction) drives normal upgrades/downgrades, Channel B (loss-rate/FEC-pressure emergency triggers) forces immediate downgrades
 4. GS sends finalized profile parameters as UDP message to drone
 5. Drone (`alink_drone`) applies the profile via command templates
 
@@ -103,23 +103,20 @@ Settings are applied via shell commands with placeholder substitution (`{mcs}`, 
 
 ### Ground Station Algorithm
 
-The GS implements the full adaptive link algorithm:
+The GS gates profile changes with a two-channel decision on physical link quantities (no synthetic score):
 
-- **Multi-factor scoring:** Weights RF quality (RSSI/SNR), packet loss, FEC recovery pressure, and antenna diversity spread
-- **Dual EMA smoothing:** Fast EMA (α=0.5) and slow EMA (α=0.15) for trend detection
-- **Predictive scoring:** When fast EMA < slow EMA (degrading signal), predicts further decline
-- **Hysteresis:** Prevents oscillation when scores hover near profile boundaries
-- **Asymmetric stepping:** Fast downgrade (immediate), confidence-gated upgrade (requires 3 consecutive evaluations)
-- **Rate limiting:** Minimum interval between profile changes
-- **Kalman filtering:** Noise estimation for optional score penalty
-- **Dynamic mode:** MCS-based adaptive tuning with 802.11n reference tables
-- **Telemetry logging:** Append-only JSONL logging with outcome tracking for ML training data
+- **`evaluate_link(...)`:** Per-tick state update. Computes `loss_rate` and `fec_pressure` from packet-counter deltas, updates `snr_ema` and an EMA of `Δsnr_ema` (`_snr_slope`) for trend prediction.
+- **Channel A — SNR margin (slow/symmetric):** Margin is `snr_ema - MCS_SNR_THRESHOLDS[mcs] - (snr_safety_margin + loss_rate*loss_margin_weight + fec_pressure*fec_margin_weight)`. Upgrades require `margin(candidate) >= hysteresis_up_db` AND `margin + slope*snr_predict_horizon_ticks >= 0`, confirmed across `upward_confidence_loops` ticks. Downgrades fire when `margin(current) <= -hysteresis_down_db`. Uses the same stress-widened margin formula as `_compute_profile()` — single source of truth.
+- **Channel B — Emergency triggers (fast/asymmetric):** `loss_rate >= emergency_loss_rate` or `fec_pressure >= emergency_fec_pressure` forces an immediate one-step MCS downgrade, bypassing rate limiting and confidence gating.
+- **Temporal gates (preserved):** `hold_fallback_mode_ms`, `hold_modes_down_ms`, `min_between_changes_ms`, `fast_downgrade`, `upward_confidence_loops`, `max_mcs_step_up`. Hold timers key off `last_mcs_change_time_ms` so param-only updates (FEC/bitrate/GI/power at same MCS) don't restart the upgrade clock.
+- **Dynamic mode:** `_compute_profile()` maps current link state to MCS/FEC/bitrate/GI/power using 802.11n reference tables.
+- **Telemetry logging:** Append-only JSONL logging with outcome tracking for ML training data. Records include `snr_ema`, `snr_slope`, `margin_cur`, `margin_tgt`, `emergency`.
 
 ### Telemetry Logging
 
 The `TelemetryLogger` class provides ML-ready data collection:
 
-- **JSONL format:** One record per tick (~10Hz) with all link metrics and scoring sub-components
+- **JSONL format:** One record per tick (~10Hz) with link metrics, SNR margins, and gate state
 - **Outcome tracking:** Tracks link quality in ticks following profile changes (good/marginal/bad labels)
 - **FEC confirmation:** Waits for FEC parameters to be confirmed before starting outcome window
 - **Auto-rotation:** Rotates log files at configurable size (default 50MB)
@@ -134,7 +131,7 @@ The `TelemetryLogger` class provides ML-ready data collection:
 | File | Deployed to | Purpose |
 |------|------------|---------|
 | `config/alink.conf` | `/etc/alink.conf` | Drone daemon settings and command templates |
-| `config/alink_gs.conf` | `/etc/alink_gs.conf` | GS scoring weights, profile selection params, Kalman filter |
+| `config/alink_gs.conf` | `/etc/alink_gs.conf` | GS two-channel gate params, profile selection timers, dynamic profile config |
 | `profiles/default.conf` | `/etc/txprofiles.conf` | Score-to-profile mapping (multiple presets in `profiles/`) |
 | `config/wlan_adapters.yaml` | `/etc/wlan_adapters.yaml` | WiFi adapter power tables and capabilities |
 

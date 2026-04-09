@@ -191,7 +191,7 @@ def plot_mcs_snr_analysis(ticks_df, output_dir):
 
 def plot_antenna_diversity_analysis(ticks_df, output_dir):
     """Generate antenna diversity analysis visualizations."""
-    required_cols = ['ant', 'rssi', 'rssi_min', 'div_score']
+    required_cols = ['ant', 'rssi', 'rssi_min']
     if not all(col in ticks_df.columns for col in required_cols):
         print("  Skipping antenna diversity analysis — missing columns")
         return
@@ -214,24 +214,25 @@ def plot_antenna_diversity_analysis(ticks_df, output_dir):
     ax.set_ylabel('Count')
     ax.set_title('Antenna Count Distribution')
 
-    # Plot 2: RSSI spread vs diversity score
+    # Plot 2: RSSI spread distribution
     ax = axes[1]
-    scatter = ax.scatter(data['rssi_spread'], data['div_score'],
-                         c=data['rssi_spread'], cmap='YlOrRd', alpha=0.5, s=10)
+    ax.hist(data['rssi_spread'], bins=40, edgecolor='black', alpha=0.7, color='steelblue')
     ax.set_xlabel('RSSI Spread (dB)')
-    ax.set_ylabel('Diversity Score')
-    ax.set_title('RSSI Spread vs Diversity Score')
-    fig.colorbar(scatter, ax=ax, label='RSSI Spread (dB)')
+    ax.set_ylabel('Count')
+    ax.set_title('RSSI Spread Distribution (best - worst antenna)')
+    ax.axvline(data['rssi_spread'].mean(), color='red', linestyle='--',
+               label=f'Mean: {data["rssi_spread"].mean():.1f} dB')
+    ax.legend()
 
-    # Plot 3: Antenna count and diversity score over time
+    # Plot 3: Antenna count and RSSI spread over time
     ax = axes[2]
     ax2 = ax.twinx()
     ax.plot(data.index, data['ant'], 'b-', alpha=0.7, label='Antenna Count')
-    ax2.plot(data.index, data['div_score'], 'r-', alpha=0.7, label='Diversity Score')
+    ax2.plot(data.index, data['rssi_spread'], 'r-', alpha=0.7, label='RSSI Spread')
     ax.set_xlabel('Tick')
     ax.set_ylabel('Antenna Count', color='b')
-    ax2.set_ylabel('Diversity Score', color='r')
-    ax.set_title('Antenna Count and Diversity Score Over Time')
+    ax2.set_ylabel('RSSI Spread (dB)', color='r')
+    ax.set_title('Antenna Count and RSSI Spread Over Time')
     ax.tick_params(axis='y', labelcolor='b')
     ax2.tick_params(axis='y', labelcolor='r')
 
@@ -242,84 +243,87 @@ def plot_antenna_diversity_analysis(ticks_df, output_dir):
     print(f"  Saved {path}")
 
 
-def plot_score_components_analysis(ticks_df, output_dir):
-    """Generate individual score components analysis visualizations."""
-    required_cols = ['rf_score', 'loss_score', 'fec_score', 'div_score', 'score']
+def plot_gate_analysis(ticks_df, output_dir):
+    """Generate two-channel gate analysis: SNR margin, slope, emergency flags."""
+    required_cols = ['margin_cur', 'margin_tgt', 'snr_slope', 'emergency']
     if not all(col in ticks_df.columns for col in required_cols):
-        print("  Skipping score components analysis — missing columns")
+        print("  Skipping gate analysis — missing columns")
         return
 
-    data = ticks_df[required_cols].dropna()
+    data = ticks_df[required_cols + ['snr_ema']].dropna()
     if data.empty:
-        print("  Skipping score components analysis — no valid data")
+        print("  Skipping gate analysis — no valid data")
         return
 
     fig, axes = plt.subplots(2, 2, figsize=(16, 10))
 
-    # Plot 1: Score components time series (stacked)
+    # Plot 1: Current vs target margin over time
     ax = axes[0, 0]
-    colors = {'rf_score': 'blue', 'loss_score': 'green', 'fec_score': 'orange', 'div_score': 'red'}
-    for col in ['rf_score', 'loss_score', 'fec_score', 'div_score']:
-        ax.plot(data.index, data[col], label=col, color=colors[col], alpha=0.7)
+    ax.plot(data.index, data['margin_cur'], 'b-', alpha=0.7, label='Current MCS margin')
+    ax.plot(data.index, data['margin_tgt'], 'g-', alpha=0.7, label='Target MCS margin')
+    ax.axhline(0, color='black', linestyle='--', linewidth=0.5)
     ax.set_xlabel('Tick')
-    ax.set_ylabel('Score Component (0-1)')
-    ax.set_title('Individual Score Components Over Time')
+    ax.set_ylabel('SNR Margin (dB)')
+    ax.set_title('SNR Margin Over Time')
     ax.legend(loc='lower right')
-    ax.set_ylim(0, 1.1)
 
-    # Plot 2: Score vs components scatter matrix (simplified)
+    # Plot 2: Current margin distribution
     ax = axes[0, 1]
-    scatter = ax.scatter(data['rf_score'], data['div_score'],
-                         c=data['score'], cmap='viridis', alpha=0.5, s=10)
-    ax.set_xlabel('RF Score')
-    ax.set_ylabel('Diversity Score')
-    ax.set_title('RF Score vs Diversity Score')
-    fig.colorbar(scatter, ax=ax, label='Total Score')
-
-    # Plot 3: Loss and FEC scores time series
-    ax = axes[1, 0]
-    ax.plot(data.index, data['loss_score'], 'green', alpha=0.7, label='Loss Score')
-    ax.plot(data.index, data['fec_score'], 'orange', alpha=0.7, label='FEC Score')
-    ax.set_xlabel('Tick')
-    ax.set_ylabel('Score Component (0-1)')
-    ax.set_title('Loss and FEC Score Components')
-    ax.legend()
-    ax.set_ylim(0, 1.1)
-
-    # Plot 4: Total score distribution
-    ax = axes[1, 1]
-    ax.hist(data['score'], bins=50, edgecolor='black', alpha=0.7, color='steelblue')
-    ax.set_xlabel('Total Score')
+    ax.hist(data['margin_cur'], bins=50, edgecolor='black', alpha=0.7, color='steelblue')
+    ax.axvline(0, color='red', linestyle='--', label='Threshold (0 dB)')
+    ax.axvline(data['margin_cur'].mean(), color='green', linestyle='--',
+               label=f'Mean: {data["margin_cur"].mean():.1f} dB')
+    ax.set_xlabel('SNR Margin (dB)')
     ax.set_ylabel('Count')
-    ax.set_title('Total Score Distribution')
-    ax.axvline(data['score'].mean(), color='red', linestyle='--',
-               label=f'Mean: {data["score"].mean():.0f}')
+    ax.set_title('Current MCS Margin Distribution')
     ax.legend()
+
+    # Plot 3: SNR slope over time
+    ax = axes[1, 0]
+    ax.plot(data.index, data['snr_slope'], 'purple', alpha=0.7)
+    ax.axhline(0, color='black', linestyle='--', linewidth=0.5)
+    ax.set_xlabel('Tick')
+    ax.set_ylabel('SNR slope (dB/tick)')
+    ax.set_title('SNR Trend (EMA of Δsnr_ema)')
+
+    # Plot 4: Emergency flag timeline
+    ax = axes[1, 1]
+    ax.fill_between(data.index, 0, data['emergency'].astype(int),
+                    alpha=0.5, color='red', step='pre')
+    ax.set_ylim(-0.1, 1.1)
+    ax.set_yticks([0, 1])
+    ax.set_yticklabels(['normal', 'EMERGENCY'])
+    ax.set_xlabel('Tick')
+    ax.set_title(f'Emergency Events ({int(data["emergency"].sum())} ticks)')
 
     plt.tight_layout()
-    path = os.path.join(output_dir, 'score_components_analysis.png')
+    path = os.path.join(output_dir, 'gate_analysis.png')
     fig.savefig(path, dpi=150)
     plt.close(fig)
     print(f"  Saved {path}")
 
 
-def plot_score_distributions(ticks_df, output_dir):
-    """Generate score distribution histograms per adapter."""
+def plot_margin_distributions(ticks_df, output_dir):
+    """Generate SNR margin distribution histograms per adapter."""
+    if 'margin_cur' not in ticks_df.columns:
+        print("  Skipping margin distributions — no 'margin_cur' column")
+        return
     adapters = ticks_df['adapter'].unique()
     fig, axes = plt.subplots(1, len(adapters), figsize=(6 * len(adapters), 4),
                              squeeze=False)
     for i, adapter in enumerate(adapters):
         ax = axes[0, i]
-        data = ticks_df[ticks_df['adapter'] == adapter]['score']
+        data = ticks_df[ticks_df['adapter'] == adapter]['margin_cur'].dropna()
         ax.hist(data, bins=50, edgecolor='black', alpha=0.7)
-        ax.set_title(f'Score Distribution: {adapter}')
-        ax.set_xlabel('Score')
+        ax.set_title(f'Margin Distribution: {adapter}')
+        ax.set_xlabel('SNR Margin (dB)')
         ax.set_ylabel('Count')
-        ax.axvline(data.mean(), color='red', linestyle='--', label=f'Mean: {data.mean():.0f}')
+        ax.axvline(0, color='black', linestyle='--', linewidth=0.8)
+        ax.axvline(data.mean(), color='red', linestyle='--', label=f'Mean: {data.mean():.1f} dB')
         ax.legend()
 
     plt.tight_layout()
-    path = os.path.join(output_dir, 'score_distributions.png')
+    path = os.path.join(output_dir, 'margin_distributions.png')
     fig.savefig(path, dpi=150)
     plt.close(fig)
     print(f"  Saved {path}")
@@ -388,13 +392,12 @@ def plot_feature_outcome_correlation(ticks_df, output_dir):
     labeled['outcome_good'] = (labeled['outcome_label'] == 'good').astype(int)
 
     feature_cols = [
-        'rssi', 'snr', 'snr_ema', 'loss_rate', 'fec_pressure',
-        'rf_score', 'loss_score', 'fec_score', 'div_score', 'score',
-        'ema_fast', 'ema_slow',
+        'rssi', 'snr', 'snr_ema', 'snr_slope', 'loss_rate', 'fec_pressure',
+        'margin_cur', 'margin_tgt', 'emergency',
     ]
     derived_cols = [
         'snr_roc', 'loss_accel', 'fec_saturation',
-        'score_volatility', 'link_budget_margin', 'time_since_change',
+        'snr_margin_volatility', 'link_budget_margin', 'time_since_change',
     ]
     all_cols = [c for c in feature_cols + derived_cols if c in labeled.columns]
     all_cols.append('outcome_good')
@@ -428,8 +431,8 @@ def analyze_failure_modes(ticks_df, output_dir):
         return
 
     feature_cols = [
-        'snr_ema', 'loss_rate', 'fec_pressure', 'score',
-        'snr_roc', 'loss_accel', 'score_volatility', 'link_budget_margin',
+        'snr_ema', 'snr_slope', 'loss_rate', 'fec_pressure', 'margin_cur',
+        'snr_roc', 'loss_accel', 'snr_margin_volatility', 'link_budget_margin',
     ]
     available = [c for c in feature_cols if c in ticks_df.columns]
 
@@ -496,17 +499,25 @@ def generate_summary_report(ticks_df, outcomes_df, output_dir):
 
     # Feature statistics
     feature_cols = [
-        'rssi', 'snr', 'snr_ema', 'loss_rate', 'fec_pressure',
-        'score', 'ema_fast', 'ema_slow',
+        'rssi', 'snr', 'snr_ema', 'snr_slope', 'loss_rate', 'fec_pressure',
+        'margin_cur', 'margin_tgt',
     ]
     derived = ['snr_roc', 'loss_accel', 'fec_saturation',
-               'score_volatility', 'link_budget_margin', 'time_since_change']
+               'snr_margin_volatility', 'link_budget_margin', 'time_since_change']
     all_cols = [c for c in feature_cols + derived if c in ticks_df.columns]
 
     lines.append('## Feature Statistics\n')
     stats = ticks_df[all_cols].describe().loc[['mean', 'std', 'min', 'max']]
     lines.append(stats.to_string())
     lines.append('')
+
+    # Emergency event summary
+    if 'emergency' in ticks_df.columns:
+        n_emergency = int(ticks_df['emergency'].sum())
+        pct = 100 * n_emergency / total_ticks if total_ticks > 0 else 0
+        lines.append(f'## Emergency Events\n')
+        lines.append(f'- Emergency ticks: {n_emergency} ({pct:.2f}%)')
+        lines.append('')
 
     # Per-adapter breakdown
     if len(adapters) > 1:
@@ -515,7 +526,10 @@ def generate_summary_report(ticks_df, outcomes_df, output_dir):
             subset = ticks_df[ticks_df['adapter'] == adapter]
             lines.append(f'### {adapter}\n')
             lines.append(f'Ticks: {len(subset)}, Changes: {subset["changed"].sum()}')
-            lines.append(f'Score: mean={subset["score"].mean():.1f}, std={subset["score"].std():.1f}')
+            if 'margin_cur' in subset.columns:
+                m = subset['margin_cur'].dropna()
+                if not m.empty:
+                    lines.append(f'Margin (dB): mean={m.mean():.1f}, std={m.std():.1f}')
             lines.append('')
 
     path = os.path.join(output_dir, 'summary_report.md')
@@ -554,8 +568,8 @@ def main():
     plot_loss_rate_fec_relationship(ticks_df, args.output)
     plot_mcs_snr_analysis(ticks_df, args.output)
     plot_antenna_diversity_analysis(ticks_df, args.output)
-    plot_score_components_analysis(ticks_df, args.output)
-    plot_score_distributions(ticks_df, args.output)
+    plot_gate_analysis(ticks_df, args.output)
+    plot_margin_distributions(ticks_df, args.output)
     plot_mcs_transitions(ticks_df, args.output)
     plot_feature_outcome_correlation(ticks_df, args.output)
     analyze_failure_modes(ticks_df, args.output)

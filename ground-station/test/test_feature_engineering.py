@@ -16,7 +16,7 @@ from ml.feature_engineering import (
     compute_fec_saturation,
     compute_link_budget_margin,
     compute_loss_accel,
-    compute_score_volatility,
+    compute_snr_margin_volatility,
     compute_snr_roc,
     compute_time_since_change,
     join_outcomes,
@@ -26,10 +26,10 @@ from ml.feature_engineering import (
 
 def _make_tick(ts=1000, rssi=-40, snr=25.0, rssi_min=-45, ant=2,
                pkt_all=100, pkt_lost=1, pkt_fec=0, fec_k=8, fec_n=12,
-               loss_rate=0.01, fec_pressure=0.1, rf_score=0.8,
-               loss_score=0.9, fec_score=0.9, div_score=0.95,
-               score=1850.0, ema_fast=1850.0, ema_slow=1840.0,
-               snr_ema=25.0, changed=False, adapter='test-adapter',
+               loss_rate=0.01, fec_pressure=0.1,
+               snr_ema=25.0, snr_slope=0.0,
+               margin_cur=5.0, margin_tgt=5.0, emergency=False,
+               changed=False, adapter='test-adapter',
                mcs=4, gi='short', sel_fec_k=8, sel_fec_n=12,
                bitrate=15000, power=30, **overrides):
     """Create a tick record with defaults."""
@@ -38,10 +38,10 @@ def _make_tick(ts=1000, rssi=-40, snr=25.0, rssi_min=-45, ant=2,
         'ant': ant, 'pkt_all': pkt_all, 'pkt_lost': pkt_lost,
         'pkt_fec': pkt_fec, 'fec_k': fec_k, 'fec_n': fec_n,
         'loss_rate': loss_rate, 'fec_pressure': fec_pressure,
-        'rf_score': rf_score, 'loss_score': loss_score,
-        'fec_score': fec_score, 'div_score': div_score,
-        'score': score, 'ema_fast': ema_fast, 'ema_slow': ema_slow,
-        'snr_ema': snr_ema, 'changed': changed, 'adapter': adapter,
+        'snr_ema': snr_ema, 'snr_slope': snr_slope,
+        'margin_cur': margin_cur, 'margin_tgt': margin_tgt,
+        'emergency': emergency,
+        'changed': changed, 'adapter': adapter,
         'mcs': mcs, 'gi': gi, 'sel_fec_k': sel_fec_k,
         'sel_fec_n': sel_fec_n, 'bitrate': bitrate, 'power': power,
     }
@@ -218,23 +218,36 @@ class TestComputeFecSaturation:
         assert result.iloc[0] == 1.0
 
 
-class TestComputeScoreVolatility:
+class TestComputeSnrMarginVolatility:
 
     def test_stable_link(self):
-        df = pd.DataFrame([_make_tick(score=1500 + i * 0.5) for i in range(20)])
-        result = compute_score_volatility(df)
-        assert result.iloc[-1] < 5.0
+        """A slowly drifting margin yields low rolling std."""
+        df = pd.DataFrame([_make_tick(margin_cur=5.0 + i * 0.05)
+                           for i in range(20)])
+        result = compute_snr_margin_volatility(df)
+        assert result.iloc[-1] < 1.0
 
     def test_unstable_link(self):
-        scores = [1200 if i % 2 == 0 else 1800 for i in range(20)]
-        df = pd.DataFrame([_make_tick(score=s) for s in scores])
-        result = compute_score_volatility(df)
-        assert result.iloc[-1] > 100.0
+        """Alternating margin yields large rolling std."""
+        margins = [1.0 if i % 2 == 0 else 8.0 for i in range(20)]
+        df = pd.DataFrame([_make_tick(margin_cur=m) for m in margins])
+        result = compute_snr_margin_volatility(df)
+        assert result.iloc[-1] > 2.0
 
     def test_fewer_ticks_than_window(self):
-        df = pd.DataFrame([_make_tick(score=1500 + i * 10) for i in range(5)])
-        result = compute_score_volatility(df, window=20)
-        # Should still compute over available ticks
+        """Short series still produces a defined result (min_periods=1)."""
+        df = pd.DataFrame([_make_tick(margin_cur=1.0 + i)
+                           for i in range(5)])
+        result = compute_snr_margin_volatility(df, window=20)
+        assert result.iloc[-1] > 0
+
+    def test_fallback_to_mcs_threshold(self):
+        """When margin_cur is absent, falls back to snr_ema - MCS_SNR_THRESHOLD[mcs]."""
+        df = pd.DataFrame([_make_tick(snr_ema=20.0 + i * 0.5, mcs=4)
+                           for i in range(20)])
+        df = df.drop(columns=['margin_cur'])
+        result = compute_snr_margin_volatility(df)
+        # Steady linear rise → std is non-zero but modest
         assert result.iloc[-1] > 0
 
 
@@ -307,17 +320,17 @@ class TestComputeAllFeatures:
     def test_all_columns_present(self):
         df = pd.DataFrame([
             _make_tick(ts=100, snr_ema=25.0, loss_rate=0.01, fec_pressure=0.1,
-                       score=1800, mcs=4, changed=True),
+                       margin_cur=5.0, mcs=4, changed=True),
             _make_tick(ts=200, snr_ema=23.0, loss_rate=0.02, fec_pressure=0.2,
-                       score=1750, mcs=4, changed=False),
+                       margin_cur=3.0, mcs=4, changed=False),
             _make_tick(ts=300, snr_ema=24.0, loss_rate=0.015, fec_pressure=0.15,
-                       score=1780, mcs=4, changed=False),
+                       margin_cur=4.0, mcs=4, changed=False),
         ])
         result = compute_all_features(df)
 
         expected_columns = [
             'snr_roc', 'loss_accel', 'fec_saturation',
-            'score_volatility', 'link_budget_margin', 'time_since_change',
+            'snr_margin_volatility', 'link_budget_margin', 'time_since_change',
         ]
         for col in expected_columns:
             assert col in result.columns, f"Missing column: {col}"

@@ -185,10 +185,7 @@ class ReplaySimulator:
             self._current_tick_ts = int(tick['ts'])
 
             # RF metrics — used as-is (independent of TX choices)
-            best_rssi = float(tick.get('rssi', -50))
             best_snr = float(tick.get('snr', 20))
-            min_rssi = float(tick.get('rssi_min', best_rssi))
-            num_antennas = int(tick.get('ant', 1))
 
             # Counterfactual packet metrics using LinkModel
             # Use the MCS that was selected in the PREVIOUS tick
@@ -214,13 +211,12 @@ class ReplaySimulator:
             cum_fec_rec += fec_recovered
 
             # Feed through ProfileSelector
-            raw_score = self.selector.compute_score(
-                best_rssi, best_snr, min_rssi,
-                cum_all_packets, cum_lost_packets, cum_fec_rec,
-                fec_k, fec_n, num_antennas)
+            self.selector.evaluate_link(
+                best_snr, cum_all_packets, cum_lost_packets, cum_fec_rec,
+                fec_k, fec_n)
 
             prev_mcs_before_select = self.selector.current_profile_idx
-            changed, new_idx, new_profile = self.selector.select(raw_score)
+            changed, new_idx, new_profile = self.selector.select()
 
             # Stability tracks MCS transitions only — parameter-only changes
             # (FEC, bitrate, GI, power at same MCS) are cheap fine-tuning and

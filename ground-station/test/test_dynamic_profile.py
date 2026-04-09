@@ -24,54 +24,24 @@ udp_port = 9999
 HOST = 127.0.0.1
 PORT = 8103
 
-[weights]
-snr_weight = 0.5
-rssi_weight = 0.5
-
-[ranges]
-SNR_MIN = 10
-SNR_MAX = 36
-RSSI_MIN = -85
-RSSI_MAX = -40
-
 [keyframe]
 allow_idr = True
 idr_max_messages = 20
-
-[dynamic refinement]
-allow_penalty = False
-
-[noise]
-min_noise = 0.01
-max_noise = 0.1
-deduction_exponent = 0.5
-
-[error estimation]
-kalman_estimate = 0.005
-kalman_error_estimate = 0.1
-process_variance = 1e-5
-measurement_variance = 0.01
-
-[scoring]
-rf_weight = 0.5
-loss_weight = 0.25
-fec_weight = 0.15
-diversity_weight = 0.1
-max_loss_rate = 0.1
-max_rssi_spread = 20
 
 [profile selection]
 hold_fallback_mode_ms = 1000
 hold_modes_down_ms = 3000
 min_between_changes_ms = 200
-hysteresis_percent = 5
-hysteresis_percent_down = 5
-ema_fast_alpha = 0.5
-ema_slow_alpha = 0.15
-predict_multi = 1.0
 fast_downgrade = True
 upward_confidence_loops = 3
-limit_max_score_to = 2000
+
+[gate]
+hysteresis_up_db = 2.0
+hysteresis_down_db = 1.0
+snr_slope_alpha = 0.3
+snr_predict_horizon_ticks = 3
+emergency_loss_rate = 0.15
+emergency_fec_pressure = 0.75
 
 [dynamic]
 snr_safety_margin = 3
@@ -115,20 +85,23 @@ def _make_selector(overrides=None):
     return ProfileSelector(_make_config(overrides))
 
 
-def _feed_score(ps, best_snr, loss_rate=0.0, fec_pressure=0.0,
-                best_rssi=-50, min_rssi=-55, all_packets=1000,
-                lost_packets=0, fec_rec=0, num_antennas=2):
-    """Feed one tick of metrics into the selector."""
+def _feed_tick(ps, best_snr, loss_rate=0.0, fec_pressure=0.0,
+               all_packets=1000, lost_packets=0, fec_rec=0):
+    """Feed one tick of metrics into the selector via evaluate_link."""
     # Approximate lost_packets from loss_rate for the delta computation
     if lost_packets == 0 and loss_rate > 0:
         lost_packets = int(all_packets * loss_rate)
     if fec_rec == 0 and fec_pressure > 0:
         fec_rec = int(fec_pressure * 10)  # rough approximation
-    return ps.compute_score(
-        best_rssi=best_rssi, best_snr=best_snr, min_rssi=min_rssi,
-        all_packets=all_packets, lost_packets=lost_packets, fec_rec=fec_rec,
-        fec_k=8, fec_n=12, num_antennas=num_antennas
+    ps.evaluate_link(
+        best_snr=best_snr, all_packets=all_packets,
+        lost_packets=lost_packets, fec_rec=fec_rec,
+        fec_k=8, fec_n=12
     )
+
+
+# Backward-compat alias for existing test bodies
+_feed_score = _feed_tick
 
 
 class TestMCSSelection(unittest.TestCase):
@@ -460,8 +433,8 @@ class TestSelectIntegration(unittest.TestCase):
         ps.hold_modes_down_ms = 0
         ps.hold_fallback_mode_ms = 0
         for i in range(n):
-            score = _feed_score(ps, best_snr=best_snr, all_packets=1000 * (i + 1))
-            changed, idx, profile = ps.select(score)
+            _feed_tick(ps, best_snr=best_snr, all_packets=1000 * (i + 1))
+            changed, idx, profile = ps.select()
             if changed:
                 return changed, idx, profile
         return False, ps.current_profile_idx, ps.current_profile
@@ -479,8 +452,8 @@ class TestSelectIntegration(unittest.TestCase):
         self._warm_up(ps, best_snr=20)
 
         # Feed again with same SNR — should not change
-        score = _feed_score(ps, best_snr=20, all_packets=10000)
-        changed, _, _ = ps.select(score)
+        _feed_tick(ps, best_snr=20, all_packets=10000)
+        changed, _, _ = ps.select()
         self.assertFalse(changed)
 
     def test_dynamic_profile_updates_even_without_mcs_change(self):
@@ -490,8 +463,8 @@ class TestSelectIntegration(unittest.TestCase):
         self.assertIsNotNone(ps.current_profile)
 
         # Feed with higher loss — same MCS but FEC might downgrade
-        score = _feed_score(ps, best_snr=20, all_packets=20000, lost_packets=2000)
-        ps.select(score)
+        _feed_tick(ps, best_snr=20, all_packets=20000, lost_packets=2000)
+        ps.select()
         # Profile should still exist and be updated
         self.assertIsNotNone(ps.current_profile)
 
@@ -505,8 +478,8 @@ class TestSelectIntegration(unittest.TestCase):
 
         # Feed with significant loss to trigger FEC/bitrate change at same MCS
         ps.min_between_changes_ms = 0  # disable rate limiting
-        score = _feed_score(ps, best_snr=20, all_packets=20000, lost_packets=2000)
-        changed, idx, profile = ps.select(score)
+        _feed_tick(ps, best_snr=20, all_packets=20000, lost_packets=2000)
+        changed, idx, profile = ps.select()
 
         # MCS should stay the same but params should differ
         if idx == old_mcs and ps._profile_changed(old_profile, profile):
@@ -525,10 +498,11 @@ class TestMCSStepLimit(unittest.TestCase):
         ps.hold_modes_down_ms = 0
         ps.hold_fallback_mode_ms = 0
         for i in range(n):
-            score = _feed_score(ps, best_snr=target_snr, all_packets=1000 * (i + 1))
-            ps.select(score)
+            _feed_tick(ps, best_snr=target_snr, all_packets=1000 * (i + 1))
+            ps.select()
         # Reset timing so hold timers don't block subsequent tests
         ps.last_change_time_ms = 0
+        ps.last_mcs_change_time_ms = 0
 
     def test_upgrade_capped_to_one_step(self):
         """Starting at MCS 2, even if SNR qualifies for MCS 7, only step to MCS 3."""
@@ -539,8 +513,8 @@ class TestMCSStepLimit(unittest.TestCase):
         # Feed enough ticks for SNR EMA to converge and confidence to pass
         first_change_idx = None
         for i in range(15):
-            score = _feed_score(ps, best_snr=32, all_packets=10000 * (i + 1))
-            changed, idx, profile = ps.select(score)
+            _feed_tick(ps, best_snr=32, all_packets=10000 * (i + 1))
+            changed, idx, profile = ps.select()
             if changed and first_change_idx is None:
                 first_change_idx = idx
                 break
@@ -556,8 +530,8 @@ class TestMCSStepLimit(unittest.TestCase):
 
         # Feed several ticks at very low SNR so EMA drops enough
         for i in range(10):
-            score = _feed_score(ps, best_snr=7, all_packets=50000 * (i + 1))
-            changed, idx, profile = ps.select(score)
+            _feed_tick(ps, best_snr=7, all_packets=50000 * (i + 1))
+            changed, idx, profile = ps.select()
             if changed:
                 # Downgrade should jump more than 1 step (proves it's unlimited)
                 self.assertLess(idx, start_mcs - 1)
@@ -573,8 +547,8 @@ class TestMCSStepLimit(unittest.TestCase):
         # Feed many ticks so EMA converges and we can jump past +1
         changes = []
         for i in range(20):
-            score = _feed_score(ps, best_snr=32, all_packets=10000 * (i + 1))
-            changed, idx, profile = ps.select(score)
+            _feed_tick(ps, best_snr=32, all_packets=10000 * (i + 1))
+            changed, idx, profile = ps.select()
             if changed:
                 changes.append(idx)
                 break
@@ -668,8 +642,8 @@ class TestOscillationRegression(unittest.TestCase):
 
         mcs_history = []
         for i in range(20):
-            score = _feed_score(ps, best_snr=29, all_packets=1000 * (i + 1))
-            ps.select(score)
+            _feed_tick(ps, best_snr=29, all_packets=1000 * (i + 1))
+            ps.select()
             if ps.current_profile is not None:
                 mcs_history.append(ps.current_profile['mcs'])
 
@@ -679,6 +653,159 @@ class TestOscillationRegression(unittest.TestCase):
             unique = set(last_5)
             self.assertLessEqual(len(unique), 1,
                 f"MCS oscillating in last 5 ticks: {last_5}")
+
+
+class TestTwoChannelGate(unittest.TestCase):
+    """Tests for the two-channel gate (SNR margin + emergency triggers)."""
+
+    def _open_gates(self, ps):
+        """Disable timers so transitions are only constrained by gate logic."""
+        ps.last_change_time_ms = 0
+        ps.last_mcs_change_time_ms = 0
+        ps.min_between_changes_ms = 0
+        ps.hold_modes_down_ms = 0
+        ps.hold_fallback_mode_ms = 0
+
+    def _settle_at(self, ps, snr, n=20):
+        """Drive the selector until it lands at the steady-state MCS for snr."""
+        self._open_gates(ps)
+        for i in range(n):
+            _feed_tick(ps, best_snr=snr, all_packets=1000 * (i + 1))
+            ps.select()
+        self._open_gates(ps)
+
+    def test_upgrade_blocked_until_headroom(self):
+        """At SNR just above threshold (< hysteresis_up_db margin), MCS3→MCS4 blocked.
+        MCS4 threshold=17, safety=3 → need margin >= 2.0 dB above floor, i.e. snr >= 22.
+        At snr=21 (margin to MCS4 = 21-17-3=1.0 < 2.0), upgrade must not fire."""
+        ps = _make_selector()
+        self._settle_at(ps, snr=18)  # MCS3: 14+3=17 <= 18; MCS4 needs 20 > 18
+        self.assertEqual(ps.current_profile_idx, 3)
+
+        # Feed snr=21 many times — _compute_profile picks MCS4 (17+3=20<=21),
+        # but channel A requires margin(MCS4)=21-17-3=1.0 dB >= hysteresis_up_db=2.0.
+        upgraded = False
+        for i in range(20):
+            _feed_tick(ps, best_snr=21, all_packets=100000 + 1000 * (i + 1))
+            changed, idx, _ = ps.select()
+            if changed and idx > 3:
+                upgraded = True
+                break
+        self.assertFalse(upgraded, "Upgrade should be blocked by hysteresis_up_db")
+
+    def test_downgrade_blocked_by_hysteresis_down(self):
+        """At SNR slightly below current-MCS threshold (within hysteresis_down_db),
+        downgrade must NOT fire. Settle at MCS4 (snr~22), drop to 20.
+        Margin(MCS4) = 20 - 17 - 3 = 0; hysteresis_down_db=1.0 → still blocked."""
+        ps = _make_selector()
+        self._settle_at(ps, snr=22)  # MCS4: 17+3=20 <= 22
+        self.assertEqual(ps.current_profile_idx, 4)
+
+        # Drop to snr=20. Margin = 20-17-3 = 0. Not < -1.0 → no downgrade.
+        downgraded = False
+        for i in range(5):
+            _feed_tick(ps, best_snr=20, all_packets=200000 + 1000 * (i + 1))
+            changed, idx, _ = ps.select()
+            if changed and idx < 4:
+                downgraded = True
+                break
+        self.assertFalse(downgraded, "Downgrade within hysteresis_down_db must not fire")
+
+    def test_downgrade_fires_below_hysteresis_down(self):
+        """When SNR drops enough that margin < -hysteresis_down_db, downgrade fires."""
+        ps = _make_selector()
+        self._settle_at(ps, snr=22)  # MCS4
+        self.assertEqual(ps.current_profile_idx, 4)
+
+        # Drop snr far enough: margin(MCS4) = snr-17-3 = snr-20; need < -1 → snr < 19.
+        downgraded_to = None
+        for i in range(15):
+            _feed_tick(ps, best_snr=15, all_packets=200000 + 1000 * (i + 1))
+            changed, idx, _ = ps.select()
+            if changed and idx < 4:
+                downgraded_to = idx
+                break
+        self.assertIsNotNone(downgraded_to, "Expected downgrade below hysteresis_down_db")
+        self.assertLess(downgraded_to, 4)
+
+    def test_emergency_loss_forces_downgrade(self):
+        """High loss rate at healthy SNR forces at-least-one-step downgrade.
+        Note: the computed profile with the widened margin may already be below
+        current-1, so emergency clamps to min(computed, current-1) — meaning
+        idx < start_idx is the correct invariant, not idx == start_idx - 1."""
+        ps = _make_selector()
+        self._settle_at(ps, snr=24)  # MCS5 (20+3 <= 24)
+        self.assertEqual(ps.current_profile_idx, 5)
+        start_idx = ps.current_profile_idx
+
+        _feed_tick(ps, best_snr=24, all_packets=500000)
+        ps._current_loss_rate = 0.25  # > emergency_loss_rate=0.15
+        changed, idx, _ = ps.select()
+        self.assertTrue(changed)
+        self.assertLess(idx, start_idx)
+
+    def test_emergency_fec_forces_downgrade(self):
+        """High FEC pressure at healthy SNR forces one-step downgrade."""
+        ps = _make_selector()
+        self._settle_at(ps, snr=24)
+        self.assertEqual(ps.current_profile_idx, 5)
+        start_idx = ps.current_profile_idx
+
+        # Directly push fec_pressure above threshold via evaluate_link state.
+        _feed_tick(ps, best_snr=24, all_packets=200000)
+        ps._current_fec_pressure = 0.90  # > 0.75 threshold
+        changed, idx, _ = ps.select()
+        self.assertTrue(changed)
+        self.assertLess(idx, start_idx)
+
+    def test_emergency_bypasses_rate_limit(self):
+        """Emergency downgrade fires even within min_between_changes_ms."""
+        ps = _make_selector()
+        self._settle_at(ps, snr=24)  # MCS5
+        start_idx = ps.current_profile_idx
+
+        # Re-enable rate limit and pretend a change just happened.
+        ps.min_between_changes_ms = 5000
+        ps.last_change_time_ms = ps._now_ms()  # rate limit is now active
+        ps.last_mcs_change_time_ms = ps._now_ms()
+
+        # Normal tick at same SNR — rate limit blocks any update.
+        _feed_tick(ps, best_snr=24, all_packets=300000)
+        changed, _, _ = ps.select()
+        self.assertFalse(changed)
+
+        # Now force emergency via high loss — should bypass rate limit.
+        _feed_tick(ps, best_snr=24, all_packets=310000)
+        ps._current_loss_rate = 0.25  # > emergency_loss_rate=0.15
+        changed, idx, _ = ps.select()
+        self.assertTrue(changed, "Emergency should bypass rate limit")
+        self.assertLess(idx, start_idx)
+
+    def test_predictive_blocks_upgrade_on_falling_snr(self):
+        """Marginal upgrade must be blocked when SNR slope is sharply negative."""
+        ps = _make_selector()
+        self._settle_at(ps, snr=25)  # MCS5 (margin to MCS6 = 25-23-3 = -1)
+
+        # Establish a strongly negative slope by walking snr down.
+        self._open_gates(ps)
+        for i, snr in enumerate([25, 24, 23, 22, 21]):
+            _feed_tick(ps, best_snr=snr, all_packets=500000 + 1000 * (i + 1))
+            ps.select()
+
+        # Now push snr to exactly the upgrade boundary for MCS6 (margin ~2 dB).
+        # With negative slope, predicted_margin = margin + slope*horizon should be < 0.
+        self.assertLess(ps._snr_slope, 0.0)
+
+        upgraded = False
+        for i in range(3):
+            _feed_tick(ps, best_snr=28, all_packets=600000 + 1000 * (i + 1))
+            changed, idx, _ = ps.select()
+            if changed and idx > ps.current_profile_idx - 1:
+                # Check whether the change was actually an upgrade
+                if idx > 5:
+                    upgraded = True
+                    break
+        self.assertFalse(upgraded, "Negative slope prediction should block marginal upgrade")
 
 
 if __name__ == '__main__':

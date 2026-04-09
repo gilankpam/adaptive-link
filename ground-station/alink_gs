@@ -52,9 +52,7 @@ VIDEO_FPS = 60
 MTU_PAYLOAD_BYTES = 1446
 
 REQUIRED_SECTIONS = {
-    'outgoing', 'json', 'weights', 'ranges',
-    'keyframe', 'dynamic refinement', 'noise', 'error estimation',
-    'scoring', 'profile selection'
+    'outgoing', 'json', 'keyframe', 'profile selection', 'dynamic', 'gate'
 }
 
 
@@ -69,24 +67,6 @@ def load_configuration(config_file):
     return config
 
 
-
-
-# ─── Kalman filter ────────────────────────────────────────────────────────────
-
-class KalmanFilter:
-    def __init__(self, estimate, error_estimate, process_variance, measurement_variance):
-        self.estimate = estimate
-        self.error_estimate = error_estimate
-        self.process_variance = process_variance
-        self.measurement_variance = measurement_variance
-
-    def update(self, measurement):
-        predicted_estimate = self.estimate
-        predicted_error = self.error_estimate + self.process_variance
-        kalman_gain = predicted_error / (predicted_error + self.measurement_variance)
-        self.estimate = predicted_estimate + kalman_gain * (measurement - predicted_estimate)
-        self.error_estimate = (1 - kalman_gain) * predicted_error
-        return self.estimate
 
 
 # ─── Telemetry logger ────────────────────────────────────────────────────────
@@ -147,8 +127,8 @@ class TelemetryLogger:
 
     def log(self, timestamp_ms, best_rssi, best_snr, min_rssi, num_antennas,
             all_packets, lost_packets, fec_rec_packets, fec_k, fec_n,
-            loss_rate, fec_pressure, rf_score, loss_score, fec_score,
-            diversity_score, combined_score, ema_fast, ema_slow, snr_ema,
+            loss_rate, fec_pressure, snr_ema, snr_slope,
+            margin_current, margin_target, emergency,
             profile, profile_changed, adapter_id='default'):
         record = {
             'ts': timestamp_ms,
@@ -163,14 +143,11 @@ class TelemetryLogger:
             'fec_n': fec_n,
             'loss_rate': round(loss_rate, 6),
             'fec_pressure': round(fec_pressure, 4),
-            'rf_score': round(rf_score, 4),
-            'loss_score': round(loss_score, 4),
-            'fec_score': round(fec_score, 4),
-            'div_score': round(diversity_score, 4),
-            'score': round(combined_score, 1),
-            'ema_fast': round(ema_fast, 1),
-            'ema_slow': round(ema_slow, 1),
             'snr_ema': round(snr_ema, 2),
+            'snr_slope': round(snr_slope, 3),
+            'margin_cur': round(margin_current, 2),
+            'margin_tgt': round(margin_target, 2),
+            'emergency': emergency,
             'changed': profile_changed,
             'adapter': adapter_id,
         }
@@ -252,55 +229,44 @@ class TelemetryLogger:
 # ─── Profile selector ────────────────────────────────────────────────────────
 
 class ProfileSelector:
-    """Multi-factor profile selection with EMA smoothing, hysteresis,
-    confidence gating, and hold timers.
+    """Two-channel gate profile selector.
 
-    Ported from the drone-side C implementation (profile.c) and enhanced
-    with additional scoring factors available on the GS.
+    Channel A: SNR margin (slow/symmetric) drives normal upgrades and
+               graceful downgrades with confidence gating and trend prediction.
+    Channel B: Emergency triggers (fast/asymmetric) force immediate one-step
+               downgrade on excessive loss rate or FEC pressure.
+
+    The actual profile parameters (MCS/FEC/bitrate/GI/power) are computed by
+    _compute_profile() from physical link metrics.
     """
 
     def __init__(self, config):
-
-        # Scoring weights
-        self.rf_weight = config.getfloat('scoring', 'rf_weight')
-        self.loss_weight = config.getfloat('scoring', 'loss_weight')
-        self.fec_weight = config.getfloat('scoring', 'fec_weight')
-        self.diversity_weight = config.getfloat('scoring', 'diversity_weight')
-        self.max_loss_rate = config.getfloat('scoring', 'max_loss_rate')
-        self.max_rssi_spread = config.getfloat('scoring', 'max_rssi_spread')
-
-        # RF normalization ranges
-        self.snr_weight = config.getfloat('weights', 'snr_weight')
-        self.rssi_weight = config.getfloat('weights', 'rssi_weight')
-        self.snr_min = config.getint('ranges', 'snr_min')
-        self.snr_max = config.getint('ranges', 'snr_max')
-        self.rssi_min = config.getint('ranges', 'rssi_min')
-        self.rssi_max = config.getint('ranges', 'rssi_max')
-
         # Selection tuning
         ps = 'profile selection'
         self.hold_fallback_mode_ms = config.getint(ps, 'hold_fallback_mode_ms')
         self.hold_modes_down_ms = config.getint(ps, 'hold_modes_down_ms')
         self.min_between_changes_ms = config.getint(ps, 'min_between_changes_ms')
-        self.hysteresis_percent = config.getfloat(ps, 'hysteresis_percent')
-        self.hysteresis_percent_down = config.getfloat(ps, 'hysteresis_percent_down')
-        self.ema_fast_alpha = config.getfloat(ps, 'ema_fast_alpha')
-        self.ema_slow_alpha = config.getfloat(ps, 'ema_slow_alpha')
-        self.predict_multi = config.getfloat(ps, 'predict_multi')
         self.fast_downgrade = config.getboolean(ps, 'fast_downgrade')
         self.upward_confidence_loops = config.getint(ps, 'upward_confidence_loops')
-        self.limit_max_score_to = config.getint(ps, 'limit_max_score_to')
+
+        # Two-channel gate tuning
+        g = 'gate'
+        self.hysteresis_up_db = config.getfloat(g, 'hysteresis_up_db')
+        self.hysteresis_down_db = config.getfloat(g, 'hysteresis_down_db')
+        self.snr_slope_alpha = config.getfloat(g, 'snr_slope_alpha')
+        self.snr_predict_horizon_ticks = config.getfloat(g, 'snr_predict_horizon_ticks')
+        self.emergency_loss_rate = config.getfloat(g, 'emergency_loss_rate')
+        self.emergency_fec_pressure = config.getfloat(g, 'emergency_fec_pressure')
 
         # State
         self.current_profile_idx = -1
         self.previous_profile_idx = -2
         self.current_profile = None
-        self.smoothed_value = 1500.0
-        self.ema_fast = 0.0
-        self.ema_slow = 0.0
-        self.ema_initialized = False
-        self.last_value_sent = 100
+        # last_change_time_ms gates min_between_changes_ms (any profile update).
+        # last_mcs_change_time_ms gates hold_modes_down_ms / hold_fallback_mode_ms
+        # (MCS transitions only — param-only updates don't reset it).
         self.last_change_time_ms = 0
+        self.last_mcs_change_time_ms = 0
         self.up_confidence_count = 0
         self.up_target_profile = -1
 
@@ -325,17 +291,12 @@ class ProfileSelector:
         self.dyn_gop = config.getfloat(d, 'gop')
         self.max_mcs_step_up = config.getint(d, 'max_mcs_step_up', fallback=1)
 
-        # SNR EMA state
+        # Link state (updated by evaluate_link, consumed by _compute_profile and select)
         self.snr_ema = 0.0
         self.snr_ema_initialized = False
+        self._snr_slope = 0.0  # EMA of Δsnr_ema per tick
         self._current_loss_rate = 0.0
         self._current_fec_pressure = 0.0
-
-        # Sub-score tracking (for telemetry)
-        self._last_rf_score = 0.0
-        self._last_loss_score = 1.0
-        self._last_fec_score = 1.0
-        self._last_diversity_score = 1.0
 
         # Packet delta tracking
         self.prev_all_packets = 0
@@ -471,125 +432,86 @@ class ProfileSelector:
             'bandwidth': self.dyn_bandwidth,
         }
 
-    def compute_score(self, best_rssi, best_snr, min_rssi,
-                      all_packets, lost_packets, fec_rec,
-                      fec_k, fec_n, num_antennas):
-        """Multi-factor link quality score (1000-2000 range)."""
+    def evaluate_link(self, best_snr, all_packets, lost_packets, fec_rec, fec_k, fec_n):
+        """Update internal link state from one tick of wfb-ng metrics.
 
-        # 1. RF quality (normalized 0-1)
-        snr_range = self.snr_max - self.snr_min
-        rssi_range = self.rssi_max - self.rssi_min
-        snr_norm = self._clamp((best_snr - self.snr_min) / snr_range, 0, 1) if snr_range > 0 else 0
-        rssi_norm = self._clamp((best_rssi - self.rssi_min) / rssi_range, 0, 1) if rssi_range > 0 else 0
-        rf_score = self.snr_weight * snr_norm + self.rssi_weight * rssi_norm
-
-        # 2. Packet loss rate (over interval)
-        delta_lost = max(0, lost_packets - self.prev_lost_packets)
+        Maintains: snr_ema, _snr_slope, _current_loss_rate, _current_fec_pressure.
+        These are consumed by _compute_profile() and select().
+        """
+        # Packet loss rate (over interval since last tick)
         delta_all = max(0, all_packets - self.prev_all_packets)
+        delta_lost = max(0, lost_packets - self.prev_lost_packets)
         loss_rate = delta_lost / max(delta_all, 1)
-        loss_score = 1.0 - self._clamp(loss_rate / self.max_loss_rate, 0, 1)
 
-        # 3. FEC pressure
+        # FEC pressure (recovered packets vs FEC block capacity)
         delta_fec = max(0, fec_rec - self.prev_fec_rec)
         fec_redundancy = (fec_n - fec_k) if (fec_k and fec_n and fec_n > fec_k) else 1
         fec_capacity = fec_redundancy * (delta_all / max(fec_n, 1)) if fec_n else 1
         fec_pressure = delta_fec / max(fec_capacity, 1)
-        fec_score = 1.0 - self._clamp(fec_pressure, 0, 1)
-
-        # 4. Antenna diversity penalty
-        if num_antennas > 1 and min_rssi > -200:
-            rssi_spread = best_rssi - min_rssi
-            diversity_score = 1.0 - self._clamp(rssi_spread / self.max_rssi_spread, 0, 1)
-        else:
-            diversity_score = 1.0  # Single antenna or no data — no penalty
-
-        # 5. Weighted combination
-        combined = (self.rf_weight * rf_score +
-                    self.loss_weight * loss_score +
-                    self.fec_weight * fec_score +
-                    self.diversity_weight * diversity_score)
 
         # Update delta tracking
         self.prev_all_packets = all_packets
         self.prev_lost_packets = lost_packets
         self.prev_fec_rec = fec_rec
 
-        # Track sub-scores and condition metrics
-        self._last_rf_score = rf_score
-        self._last_loss_score = loss_score
-        self._last_fec_score = fec_score
-        self._last_diversity_score = diversity_score
         self._current_loss_rate = loss_rate
         self._current_fec_pressure = self._clamp(fec_pressure, 0, 1)
 
+        # SNR EMA + slope tracking for predictive gating
         if not self.snr_ema_initialized:
             self.snr_ema = best_snr
+            self._snr_slope = 0.0
             self.snr_ema_initialized = True
         else:
+            prev_ema = self.snr_ema
             self.snr_ema = (self.snr_ema_alpha * best_snr +
                             (1.0 - self.snr_ema_alpha) * self.snr_ema)
+            delta = self.snr_ema - prev_ema
+            self._snr_slope = (self.snr_slope_alpha * delta +
+                               (1.0 - self.snr_slope_alpha) * self._snr_slope)
 
-        return 1000 + combined * 1000
+    def _margin(self, mcs):
+        """SNR margin (dB) above the threshold required for the given MCS.
 
-    def select(self, raw_score):
-        """Run selection algorithm on a raw score. Returns (changed, profile_index, profile) tuple.
-
-        If changed is False, the caller should send a heartbeat instead.
+        Uses the same stress-widening formula as _compute_profile() so the
+        gate and the parameter mapper share a single source of truth.
         """
-        # Cap score
-        if self.limit_max_score_to < 2000 and raw_score > self.limit_max_score_to:
-            raw_score = float(self.limit_max_score_to)
+        if mcs < 0 or mcs >= len(MCS_SNR_THRESHOLDS):
+            return 0.0
+        stress_margin = (self.snr_safety_margin +
+                         self._current_loss_rate * self.loss_margin_weight +
+                         self._current_fec_pressure * self.fec_margin_weight)
+        return self.snr_ema - MCS_SNR_THRESHOLDS[mcs] - stress_margin
 
-        # Dual EMA smoothing
-        if not self.ema_initialized:
-            self.ema_fast = raw_score
-            self.ema_slow = raw_score
-            self.smoothed_value = raw_score
-            self.ema_initialized = True
-        else:
-            self.ema_fast = self.ema_fast_alpha * raw_score + (1.0 - self.ema_fast_alpha) * self.ema_fast
-            self.ema_slow = self.ema_slow_alpha * raw_score + (1.0 - self.ema_slow_alpha) * self.ema_slow
+    def _emergency_active(self):
+        return (self._current_loss_rate >= self.emergency_loss_rate or
+                self._current_fec_pressure >= self.emergency_fec_pressure)
 
-        # Legacy single-EMA (asymmetric up/down)
-        sf = 0.5 if raw_score >= self.last_value_sent else 0.8
-        self.smoothed_value = sf * raw_score + (1 - sf) * self.smoothed_value
+    def select(self):
+        """Decide whether to apply a new profile based on current link state.
 
-        # Predictive score
-        effective_score = self.smoothed_value
-        if self.ema_fast < self.ema_slow and self.predict_multi > 0:
-            gap = self.ema_slow - self.ema_fast
-            predicted = self.ema_fast - gap * self.predict_multi
-            if predicted < effective_score:
-                effective_score = predicted
-
-        # Rate limit
+        Returns (changed, profile_index, profile). If changed is False, the
+        caller should send a heartbeat instead of a profile message.
+        """
         now_ms = self._now_ms()
-        if (now_ms - self.last_change_time_ms) < self.min_between_changes_ms:
+        emergency = self._emergency_active()
+
+        # Channel B: emergency downgrades bypass rate limit
+        if not emergency and (now_ms - self.last_change_time_ms) < self.min_between_changes_ms:
             return False, self.current_profile_idx, self.current_profile
 
-        # Clamp to valid range
-        combined_value = int(math.floor(effective_score))
-        combined_value = max(1000, min(2000, combined_value))
-
-        # Hysteresis check
-        if self.last_value_sent != 0:
-            percent_change = abs((combined_value - self.last_value_sent) / self.last_value_sent) * 100
-        else:
-            percent_change = 100
-
-        is_downgrade = combined_value < self.last_value_sent
-        threshold = self.hysteresis_percent_down if is_downgrade else self.hysteresis_percent
-
-        if percent_change < threshold:
-            # Not enough change — but still feed confidence counter for upgrades
-            if not is_downgrade and combined_value != self.last_value_sent:
-                self._try_confidence_feed(combined_value)
-            return False, self.current_profile_idx, self.current_profile
-
-        # Profile determination
+        # Compute candidate from current link state
         new_profile = self._compute_profile()
         new_idx = new_profile['mcs']
-        # Limit upward MCS step size to prevent power-coupling oscillation
+
+        # Emergency forces at least one MCS step down from the current profile
+        if emergency and self.current_profile_idx > 0:
+            target = self.current_profile_idx - 1
+            if new_idx > target:
+                new_idx = target
+                new_profile = self._compute_profile(mcs_override=new_idx)
+
+        # Upward MCS step limit (prevents power-coupling oscillation)
         if (self.current_profile_idx >= 0 and
                 new_idx > self.current_profile_idx and
                 self.max_mcs_step_up > 0):
@@ -598,10 +520,27 @@ class ProfileSelector:
                 new_idx = capped_mcs
                 new_profile = self._compute_profile(mcs_override=capped_mcs)
 
+        # Channel A: SNR-margin hysteresis (skipped during emergency)
+        if not emergency and self.current_profile_idx >= 0:
+            cur = self.current_profile_idx
+            if new_idx > cur:
+                # Upgrade: require headroom above threshold + predictive check
+                tgt_margin = self._margin(new_idx)
+                predicted = tgt_margin + self._snr_slope * self.snr_predict_horizon_ticks
+                if tgt_margin < self.hysteresis_up_db or predicted < 0:
+                    # Not enough headroom — still feed confidence counter so that
+                    # when headroom arrives the upgrade can fire quickly.
+                    self._try_confidence_feed(new_idx)
+                    return False, self.current_profile_idx, self.current_profile
+            elif new_idx < cur:
+                # Downgrade: margin must be negative by at least hysteresis_down_db
+                if self._margin(cur) > -self.hysteresis_down_db:
+                    return False, self.current_profile_idx, self.current_profile
+
+        # Same-MCS path: may still need to push updated FEC/bitrate/GI/power
         if new_idx == self.current_profile_idx:
             self.up_confidence_count = 0
             self.up_target_profile = -1
-            # Check if any profile parameter changed (not just MCS)
             params_changed = (self.current_profile is None or
                               self._profile_changed(self.current_profile, new_profile))
             self.current_profile = new_profile
@@ -610,19 +549,17 @@ class ProfileSelector:
                 return True, self.current_profile_idx, self.current_profile
             return False, self.current_profile_idx, self.current_profile
 
-        # Direction
+        # Direction + timing + confidence gating
         is_profile_downgrade = new_idx < self.current_profile_idx
+        elapsed_since_mcs_ms = now_ms - self.last_mcs_change_time_ms
 
-        # Timing and confidence gating
-        elapsed_ms = now_ms - self.last_change_time_ms
-
-        if is_profile_downgrade and self.fast_downgrade:
+        if is_profile_downgrade and (emergency or self.fast_downgrade):
             # Fast downgrade — apply immediately
             self.up_confidence_count = 0
             self.up_target_profile = -1
         elif self.current_profile_idx == 0:
             # Exiting fallback — enforce fallback hold
-            if elapsed_ms <= self.hold_fallback_mode_ms:
+            if elapsed_since_mcs_ms < self.hold_fallback_mode_ms:
                 return False, self.current_profile_idx, self.current_profile
         elif not is_profile_downgrade:
             # Upgrade — confidence gating
@@ -634,32 +571,31 @@ class ProfileSelector:
             if self.up_confidence_count < self.upward_confidence_loops:
                 return False, self.current_profile_idx, self.current_profile
             # Also enforce hold timer for upgrades
-            if elapsed_ms <= self.hold_modes_down_ms:
+            if elapsed_since_mcs_ms < self.hold_modes_down_ms:
                 return False, self.current_profile_idx, self.current_profile
 
         # Apply the change
         self.previous_profile_idx = self.current_profile_idx
         self.current_profile_idx = new_idx
         self.current_profile = new_profile
-        self.last_value_sent = combined_value
         self.last_change_time_ms = now_ms
+        self.last_mcs_change_time_ms = now_ms
         self.up_confidence_count = 0
         self.up_target_profile = -1
 
         return True, new_idx, new_profile
 
-    def _try_confidence_feed(self, combined_value):
-        """Feed the confidence counter even when hysteresis isn't met."""
-        new_profile = self._compute_profile()
-        new_idx = new_profile['mcs']
+    def _try_confidence_feed(self, target_idx):
+        """Feed the confidence counter toward an upgrade target even when
+        hysteresis hasn't been met yet."""
         # Apply step limit so confidence targets the reachable MCS
         if (self.current_profile_idx >= 0 and
-                new_idx > self.current_profile_idx and
+                target_idx > self.current_profile_idx and
                 self.max_mcs_step_up > 0):
-            new_idx = min(new_idx, self.current_profile_idx + self.max_mcs_step_up)
-        if new_idx != self.current_profile_idx and new_idx > self.current_profile_idx:
-            if new_idx != self.up_target_profile:
-                self.up_target_profile = new_idx
+            target_idx = min(target_idx, self.current_profile_idx + self.max_mcs_step_up)
+        if target_idx != self.current_profile_idx and target_idx > self.current_profile_idx:
+            if target_idx != self.up_target_profile:
+                self.up_target_profile = target_idx
                 self.up_confidence_count = 1
             else:
                 self.up_confidence_count += 1
@@ -710,21 +646,10 @@ def generate_profile_message(profile_idx, profile):
 
 
 
-# ─── FEC adjustment helper ───────────────────────────────────────────────────
-
-def adjust_fec_recovered(fec_rec, fec_k_val, fec_n_val):
-    if fec_k_val is None or fec_n_val is None or fec_n_val == 0:
-        return fec_rec
-    redundancy = fec_n_val - fec_k_val
-    weight = 6.0 / (1 + redundancy)
-    return fec_rec * weight
-
-
 # ─── Main link calculation ───────────────────────────────────────────────────
 
 def calculate_link():
     global best_rssi, best_snr, min_rssi, lost_packets, fec_rec_packets
-    global final_score, penalty
     global keyframe_request_code, keyframe_request_remaining
 
     # Keyframe request on packet loss
@@ -734,38 +659,30 @@ def calculate_link():
         if verbose_mode:
             print(f"Generated new keyframe request code: {keyframe_request_code}")
 
-    # Kalman-filtered noise estimation for penalty
-    if all_packets == 0 or num_antennas == 0:
-        filtered_noise = 0
-    else:
-        adjusted_fec_rec = adjust_fec_recovered(fec_rec_packets, fec_k, fec_n)
-        error_ratio = (5 * lost_packets + adjusted_fec_rec) / (all_packets / num_antennas)
-        filtered_noise = kalman.update(error_ratio)
-
-    # Compute multi-factor score
-    raw_score = profile_selector.compute_score(
-        best_rssi, best_snr, min_rssi,
-        all_packets, lost_packets, fec_rec_packets,
-        fec_k, fec_n, num_antennas
+    # Update link state from this tick's metrics
+    profile_selector.evaluate_link(
+        best_snr, all_packets, lost_packets, fec_rec_packets, fec_k, fec_n
     )
 
-    # Optional noise penalty
-    if allow_penalty and filtered_noise >= min_noise:
-        deduction_ratio = min(((filtered_noise - min_noise) / (max_noise - min_noise)) ** deduction_exponent, 1.0)
-        raw_score = 1000 + (raw_score - 1000) * (1 - deduction_ratio)
+    # Run profile selection
+    changed, idx, profile = profile_selector.select()
 
-    final_score = raw_score
+    # Compute margins for telemetry/verbose (after select, so they reflect
+    # the current profile if it changed this tick)
+    cur_mcs = profile_selector.current_profile_idx
+    margin_cur = profile_selector._margin(cur_mcs) if cur_mcs >= 0 else 0.0
+    margin_tgt = profile_selector._margin(profile['mcs']) if profile is not None else 0.0
+    emergency = profile_selector._emergency_active()
 
     if verbose_mode:
-        msg = (f"Score: {final_score:.0f} | RSSI: {best_rssi} | SNR: {best_snr} | "
-               f"Lost: {lost_packets} | FEC rec: {fec_rec_packets} | "
-               f"SNR_EMA: {profile_selector.snr_ema:.1f} | "
+        msg = (f"SNR_EMA: {profile_selector.snr_ema:.1f} | "
+               f"margin[cur]: {margin_cur:+.1f}dB | "
+               f"slope: {profile_selector._snr_slope:+.2f} | "
+               f"RSSI: {best_rssi} | "
                f"loss: {profile_selector._current_loss_rate:.3f} | "
-               f"fec_p: {profile_selector._current_fec_pressure:.2f}")
+               f"fec_p: {profile_selector._current_fec_pressure:.2f}"
+               f"{' [EMERGENCY]' if emergency else ''}")
         print(msg)
-
-    # Run profile selection
-    changed, idx, profile = profile_selector.select(final_score)
 
     if changed and verbose_mode and profile is not None:
         print(f">>> Profile change: idx={idx} mcs={profile['mcs']} "
@@ -787,14 +704,11 @@ def calculate_link():
             fec_n=fec_n,
             loss_rate=profile_selector._current_loss_rate,
             fec_pressure=profile_selector._current_fec_pressure,
-            rf_score=profile_selector._last_rf_score,
-            loss_score=profile_selector._last_loss_score,
-            fec_score=profile_selector._last_fec_score,
-            diversity_score=profile_selector._last_diversity_score,
-            combined_score=final_score,
-            ema_fast=profile_selector.ema_fast,
-            ema_slow=profile_selector.ema_slow,
             snr_ema=profile_selector.snr_ema,
+            snr_slope=profile_selector._snr_slope,
+            margin_current=margin_cur,
+            margin_target=margin_tgt,
+            emergency=emergency,
             profile=profile,
             profile_changed=changed,
             adapter_id=telemetry_adapter_id,
@@ -938,24 +852,8 @@ if __name__ == "__main__":
     allow_idr = config.getboolean('keyframe', 'allow_idr')
     idr_max_messages = config.getint('keyframe', 'idr_max_messages')
 
-    # Dynamic refinement
-    allow_penalty = config.getboolean('dynamic refinement', 'allow_penalty')
-
-    # Noise and penalty parameters
-    min_noise = config.getfloat('noise', 'min_noise')
-    max_noise = config.getfloat('noise', 'max_noise')
-    deduction_exponent = config.getfloat('noise', 'deduction_exponent')
-
     # Initialize profile selector
     profile_selector = ProfileSelector(config)
-
-    # Initialize Kalman filter
-    kalman = KalmanFilter(
-        estimate=config.getfloat('error estimation', 'kalman_estimate'),
-        error_estimate=config.getfloat('error estimation', 'kalman_error_estimate'),
-        process_variance=config.getfloat('error estimation', 'process_variance'),
-        measurement_variance=config.getfloat('error estimation', 'measurement_variance'),
-    )
 
     # Initialize telemetry logger
     telemetry_logger = None
@@ -978,8 +876,6 @@ if __name__ == "__main__":
     fec_n = None
     receiving_video = False
     num_antennas = 0
-    penalty = 0
-    final_score = 1000
     waiting_for_video_printed = False
     video_rx_initial_message_printed = False
 

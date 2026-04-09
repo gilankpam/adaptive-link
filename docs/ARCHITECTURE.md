@@ -14,7 +14,7 @@
   - [Command Template System](#command-template-system)
 - [Data Flow](#data-flow)
   - [Signal Flow](#signal-flow)
-  - [Multi-Factor Scoring (Ground Station)](#multi-factor-scoring-ground-station)
+  - [Two-Channel Gate (Ground Station)](#two-channel-gate-ground-station)
   - [Profile Selection Algorithm (Ground Station)](#profile-selection-algorithm-ground-station)
   - [Profile Application (Drone)](#profile-application-drone)
   - [Jitter Measurement](#jitter-measurement)
@@ -33,7 +33,7 @@
 
 OpenIPC Adaptive-Link is an adaptive wireless link profile selector for OpenIPC FPV drone systems. It dynamically adjusts video bitrate, MCS (modulation/coding scheme), FEC (forward error correction), TX power, and other transmission parameters based on real-time signal quality from the ground station.
 
-**Architecture change (commit a6fcf7b):** Profile selection logic has been offloaded from the drone to the ground station. The GS now calculates multi-factor scores, runs the full selection algorithm, and sends finalized profile parameters to the drone. The drone simply applies received profiles.
+**Architecture change (commit a6fcf7b):** Profile selection logic has been offloaded from the drone to the ground station. The GS runs the full selection algorithm — a two-channel gate on SNR margin (dB) plus emergency loss/FEC triggers — and sends finalized profile parameters to the drone. The drone simply applies received profiles.
 
 **Dynamic mode (commit 4396a63):** New MCS-based adaptive tuning mode that computes profile parameters from real-time link metrics using 802.11n reference tables, replacing table-based profile lookup.
 
@@ -163,7 +163,7 @@ A multi-module, multi-threaded C daemon (12 source files in `drone/src/`). Core 
 4. **Monitoring** - TX drop detection, antenna RSSI parsing, OSD updates
 5. **HTTP client** - Native socket-based HTTP GET for camera API (replaces curl)
 
-**Note:** Profile selection logic (scoring, smoothing, hysteresis, confidence gating) has been removed from the drone and moved to the GS.
+**Note:** Profile selection logic (two-channel gate, hysteresis, confidence gating) lives entirely on the GS. The drone just applies received profiles.
 
 ### Ground Station (alink_gs)
 
@@ -171,10 +171,10 @@ A Python 3 script that:
 
 1. Connects to wfb-ng's JSON statistics TCP port
 2. Extracts per-antenna RSSI, SNR, FEC recovery, and packet loss metrics
-3. Calculates multi-factor score (RF quality, loss rate, FEC pressure, antenna diversity)
-4. Runs dual EMA smoothing with predictive trend detection
-5. Applies hysteresis and confidence gating for stable transitions
-6. Selects the appropriate profile from `profiles/*.conf` OR computes dynamically (dynamic mode)
+3. Updates per-tick link state in `ProfileSelector.evaluate_link()`: SNR EMA, SNR slope EMA, loss rate, FEC pressure (from packet-counter deltas)
+4. Runs the two-channel gate in `ProfileSelector.select()`: Channel A (SNR margin with up/down dB hysteresis + slope-based prediction) for normal transitions, Channel B (emergency loss/FEC triggers) for immediate fail-safe downgrades
+5. Applies temporal gating: confidence loops, hold timers, rate limiting, max MCS step-up
+6. Computes profile parameters dynamically via `_compute_profile()` (MCS from SNR margin, FEC from bitrate, bitrate from PHY rate × utilization × K/N, power from inverse MCS scaling)
 7. Sends UDP messages with finalized profile parameters to the drone (~10 Hz)
 8. Generates keyframe request codes on packet loss events
 9. Logs telemetry data for ML training (optional, JSONL format)
@@ -349,77 +349,77 @@ This decouples the control logic from hardware-specific commands, making it adap
 ```
 wfb-ng RX stats ──TCP──> alink_gs ──UDP (P: message)──> alink_drone ──system()/http_get()──> wfb_tx_cmd / camera API / iw
      │                      │
-  RSSI, SNR,          Multi-factor scoring +
-  FEC, loss           Profile selection (table or dynamic)
+  RSSI, SNR,          Two-channel gate (SNR margin + emergency) +
+  FEC, loss           Dynamic profile computation
 ```
 
-### Multi-Factor Scoring (Ground Station)
+### Two-Channel Gate (Ground Station)
 
-The GS computes a composite score from four weighted factors:
+The GS gates profile changes on physical link quantities — no synthetic score. Per tick:
 
 ```
-1. RF Quality Score (50% weight):
-   snr_norm  = clamp((snr - SNR_MIN) / (SNR_MAX - SNR_MIN), 0, 1)
-   rssi_norm = clamp((rssi - RSSI_MIN) / (RSSI_MAX - RSSI_MIN), 0, 1)
-   rf_score  = snr_norm * 0.5 + rssi_norm * 0.5
+evaluate_link(best_snr, all_pkts, lost_pkts, fec_rec, fec_k, fec_n):
+  # Packet-counter deltas
+  loss_rate    = Δlost / max(Δall, 1)
+  fec_pressure = Δfec_rec / fec_capacity                       # clamped [0, 1]
+  snr_ema      = α_snr * best_snr + (1-α_snr) * snr_ema
+  _snr_slope   = α_slope * Δsnr_ema + (1-α_slope) * _snr_slope
+```
 
-2. Packet Loss Score (25% weight):
-   loss_rate = lost_packets / all_packets (since last update)
-   loss_score = 1.0 - loss_rate
+The margin helper reuses the exact stress-widened formula from `_compute_profile()`:
 
-3. FEC Pressure Score (15% weight):
-   redundancy = fec_n - fec_k
-   weighted_fec = fec_rec * (6.0 / (1 + redundancy))
-   fec_score = 1.0 - min(weighted_fec / all_packets, max_loss_rate)
-
-4. Antenna Diversity Score (10% weight):
-   rssi_spread = max_rssi - min_rssi
-   diversity_score = 1.0 - (rssi_spread / max_rssi_spread)
-
-5. Combined Score:
-   score = 1000 + (rf_weight*rf_score + loss_weight*loss_score +
-                   fec_weight*fec_score + diversity_weight*diversity_score) * 1000
+```
+_margin(mcs) = snr_ema
+               - MCS_SNR_THRESHOLDS[mcs]
+               - (snr_safety_margin
+                  + loss_rate * loss_margin_weight
+                  + fec_pressure * fec_margin_weight)
 ```
 
 ### Profile Selection Algorithm (Ground Station)
 
-The `ProfileSelector` class implements the full selection pipeline:
+The `ProfileSelector.select()` method runs the two-channel gate:
 
 ```
-1. RAW SCORE COMPUTATION
-   Calculate multi-factor score from RF, loss, FEC, and diversity metrics
+1. CHANNEL B: EMERGENCY DETECTION
+   emergency = (loss_rate >= emergency_loss_rate) OR
+               (fec_pressure >= emergency_fec_pressure)
 
-2. SCORE CAPPING
-   raw_score = min(raw_score, limit_max_score_to)   // default: 2000
+2. RATE LIMITING (emergencies bypass)
+   Skip if not emergency and elapsed < min_between_changes_ms
 
-3. DUAL EMA SMOOTHING
-   ema_fast = ema_fast_alpha * raw_score + (1 - ema_fast_alpha) * ema_fast    // α=0.5
-   ema_slow = ema_slow_alpha * raw_score + (1 - ema_slow_alpha) * ema_slow    // α=0.15
+3. CANDIDATE PROFILE
+   new_profile = _compute_profile()
+   new_idx     = new_profile.mcs
 
-4. PREDICTIVE SCORE (when degrading: fast < slow)
-   gap = ema_slow - ema_fast
-   effective = min(smoothed, ema_fast - gap * predict_multi)   // predict_multi=1.0
+4. EMERGENCY CLAMP
+   if emergency and current_idx > 0:
+       new_idx = min(new_idx, current_idx - 1)       # force one-step down
+       new_profile = _compute_profile(mcs_override=new_idx)
 
-5. RATE LIMITING
-   Skip if elapsed_ms < min_between_changes_ms   // default: 200ms
+5. STEP-LIMIT UPGRADE (max_mcs_step_up)
+   Cap upgrade to current + max_mcs_step_up
 
-6. HYSTERESIS CHECK
-   pct_change = |effective - last_sent| / last_sent * 100
-   threshold  = (improving) ? hysteresis_percent : hysteresis_percent_down
-   Skip if pct_change < threshold                 // default: 5% both directions
+6. CHANNEL A: SNR-MARGIN GATE (skipped when emergency)
+   If upgrading:
+     predicted = _margin(new_idx) + _snr_slope * snr_predict_horizon_ticks
+     Reject unless _margin(new_idx) >= hysteresis_up_db AND predicted >= 0
+   If downgrading:
+     Reject unless _margin(current_idx) <= -hysteresis_down_db
 
-7. PROFILE LOOKUP (table mode) OR DYNAMIC COMPUTATION (dynamic mode)
-   - Table mode: Match effective score against profiles/*.conf range boundaries
-   - Dynamic mode: Compute profile from SNR EMA, loss rate, FEC pressure
+7. SAME-MCS PATH
+   If new_idx == current_idx: update params only (FEC/bitrate/GI/power)
 
-8. ASYMMETRIC STEPPING
-   - Downgrade (fast_downgrade=True): bypass hold timer, apply immediately
-   - Upgrade: require upward_confidence_loops (default 3) consecutive
-     evaluations selecting same higher profile
-   - Leaving fallback (profile 0): wait hold_fallback_mode_ms   // default: 1000ms
+8. CONFIDENCE GATING (upgrades)
+   Require upward_confidence_loops consecutive ticks selecting same higher MCS
 
-9. SEND TO DRONE
-   Send P: message with profile index and all parameters
+9. HOLD TIMERS (use last_mcs_change_time_ms — param-only updates don't reset it)
+   - hold_fallback_mode_ms when leaving MCS 0
+   - hold_modes_down_ms before applying a new upgrade
+
+10. APPLY + SEND
+    Update last_change_time_ms; if MCS changed, update last_mcs_change_time_ms.
+    Send P: message with profile index and all parameters.
 ```
 
 ### Profile Application (Drone)
@@ -580,39 +580,19 @@ The first three mutexes are allocated in `alink_daemon_t` (main.c) and passed by
 | outgoing | `udp_port` | 9999 | Drone listen port |
 | json | `HOST` | 127.0.0.1 | wfb-ng stats host |
 | json | `PORT` | 8103 | wfb-ng stats port |
-| weights | `snr_weight` | 0.5 | SNR contribution to RF score |
-| weights | `rssi_weight` | 0.5 | RSSI contribution to RF score |
-| ranges | `SNR_MIN/MAX` | 12/38 | SNR normalization bounds |
-| ranges | `RSSI_MIN/MAX` | -80/-30 | RSSI normalization bounds (dBm) |
 | keyframe | `allow_idr` | True | Generate keyframe request codes |
 | keyframe | `idr_max_messages` | 20 | Messages to include keyframe code |
-| dynamic refinement | `allow_penalty` | False | Apply noise penalty to score |
-| noise | `min_noise` | 0.01 | Minimum noise threshold |
-| noise | `max_noise` | 0.1 | Maximum noise threshold |
-| noise | `deduction_exponent` | 0.5 | Penalty curve exponent |
-| error estimation | `kalman_estimate` | 0.005 | Initial Kalman estimate |
-| error estimation | `kalman_error_estimate` | 0.1 | Initial Kalman error |
-| error estimation | `process_variance` | 1e-5 | Kalman process variance |
-| error estimation | `measurement_variance` | 0.01 | Kalman measurement variance |
-| scoring | `rf_weight` | 0.5 | RF quality weight |
-| scoring | `loss_weight` | 0.25 | Packet loss weight |
-| scoring | `fec_weight` | 0.15 | FEC pressure weight |
-| scoring | `diversity_weight` | 0.1 | Antenna diversity weight |
-| scoring | `max_loss_rate` | 0.1 | Max loss rate for scoring |
-| scoring | `max_rssi_spread` | 20 | Max RSSI spread for scoring |
-| profile selection | `txprofiles_file` | /etc/txprofiles.conf | Profile file path |
 | profile selection | `hold_fallback_mode_ms` | 1000 | Hold time after leaving fallback |
 | profile selection | `hold_modes_down_ms` | 3000 | Hold time before upgrades |
 | profile selection | `min_between_changes_ms` | 200 | Minimum interval between changes |
-| profile selection | `hysteresis_percent` | 5 | Hysteresis for upgrades (%) |
-| profile selection | `hysteresis_percent_down` | 5 | Hysteresis for downgrades (%) |
-| profile selection | `ema_fast_alpha` | 0.5 | Fast EMA weight |
-| profile selection | `ema_slow_alpha` | 0.15 | Slow EMA weight |
-| profile selection | `predict_multi` | 1.0 | Predictive multiplier (0 = disabled) |
 | profile selection | `fast_downgrade` | True | Immediate downgrades |
-| profile selection | `upward_confidence_loops` | 3 | Consecutive evaluations for upgrade |
-| profile selection | `limit_max_score_to` | 2000 | Maximum score cap |
-| profile selection | `dynamic_mode` | False | Enable dynamic profile calculation |
+| profile selection | `upward_confidence_loops` | 3 | Consecutive ticks required for an upgrade |
+| **gate** | `hysteresis_up_db` | 2.5 | dB headroom above threshold before upgrade fires |
+| **gate** | `hysteresis_down_db` | 1.0 | dB below threshold before downgrade fires |
+| **gate** | `snr_slope_alpha` | 0.3 | EMA α for Δsnr_ema trend tracking |
+| **gate** | `snr_predict_horizon_ticks` | 3 | Lookahead ticks for predictive upgrade gate |
+| **gate** | `emergency_loss_rate` | 0.15 | Loss rate that forces immediate one-step downgrade |
+| **gate** | `emergency_fec_pressure` | 0.75 | FEC pressure that forces immediate one-step downgrade |
 | **dynamic** | `snr_safety_margin` | 3 | SNR safety margin (dB) |
 | **dynamic** | `snr_ema_alpha` | 0.3 | SNR EMA smoothing factor |
 | **dynamic** | `loss_margin_weight` | 20 | Loss rate margin multiplier |
@@ -651,7 +631,7 @@ Loads telemetry JSONL files and generates diagnostic plots:
 - Loss rate vs FEC pressure relationship
 - MCS vs SNR analysis with box plots
 - Antenna diversity analysis
-- Score components time series
+- SNR margin time series
 - MCS transition matrix heatmap
 - Feature-outcome correlation matrix
 - Failure mode analysis
@@ -661,7 +641,7 @@ Computes derived features from telemetry data:
 - `snr_roc`: SNR rate of change (first derivative)
 - `loss_accel`: Loss rate acceleration (second derivative)
 - `fec_saturation`: FEC pressure proximity to saturation
-- `score_volatility`: Rolling standard deviation of score
+- `snr_margin_volatility`: Rolling standard deviation of SNR margin
 - `link_budget_margin`: SNR above MCS threshold
 - `time_since_change`: Elapsed time since last profile change
 

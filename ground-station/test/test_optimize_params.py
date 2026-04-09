@@ -31,10 +31,10 @@ exec(_code)
 
 def _make_tick(ts=1000, rssi=-40, snr=25.0, rssi_min=-45, ant=2,
                pkt_all=100, pkt_lost=1, pkt_fec=0, fec_k=8, fec_n=12,
-               loss_rate=0.01, fec_pressure=0.1, rf_score=0.8,
-               loss_score=0.9, fec_score=0.9, div_score=0.95,
-               score=1850.0, ema_fast=1850.0, ema_slow=1840.0,
-               snr_ema=25.0, changed=False, adapter='test-adapter',
+               loss_rate=0.01, fec_pressure=0.1,
+               snr_ema=25.0, snr_slope=0.0,
+               margin_cur=5.0, margin_tgt=5.0, emergency=False,
+               changed=False, adapter='test-adapter',
                mcs=4, gi='short', sel_fec_k=8, sel_fec_n=12,
                bitrate=15000, power=30, **overrides):
     record = {
@@ -42,10 +42,10 @@ def _make_tick(ts=1000, rssi=-40, snr=25.0, rssi_min=-45, ant=2,
         'ant': ant, 'pkt_all': pkt_all, 'pkt_lost': pkt_lost,
         'pkt_fec': pkt_fec, 'fec_k': fec_k, 'fec_n': fec_n,
         'loss_rate': loss_rate, 'fec_pressure': fec_pressure,
-        'rf_score': rf_score, 'loss_score': loss_score,
-        'fec_score': fec_score, 'div_score': div_score,
-        'score': score, 'ema_fast': ema_fast, 'ema_slow': ema_slow,
-        'snr_ema': snr_ema, 'changed': changed, 'adapter': adapter,
+        'snr_ema': snr_ema, 'snr_slope': snr_slope,
+        'margin_cur': margin_cur, 'margin_tgt': margin_tgt,
+        'emergency': emergency,
+        'changed': changed, 'adapter': adapter,
         'mcs': mcs, 'gi': gi, 'sel_fec_k': sel_fec_k,
         'sel_fec_n': sel_fec_n, 'bitrate': bitrate, 'power': power,
     }
@@ -64,8 +64,8 @@ def _make_ticks_df(n=50, adapter='test-adapter', snr=25.0):
 
 class TestParameterSpace:
 
-    def test_scoring_weights_sum_to_one(self):
-        """Scoring weights must sum to approximately 1.0."""
+    def test_gate_params_in_range(self):
+        """Gate parameters must land inside their declared search bounds."""
         space = ParameterSpace(_BASE_CONFIG_STR)
         study = optuna.create_study()
 
@@ -74,26 +74,12 @@ class TestParameterSpace:
             config = space.define_trial(trial)
             study.tell(trial, 0.0)
 
-            rf = config.getfloat('scoring', 'rf_weight')
-            loss = config.getfloat('scoring', 'loss_weight')
-            fec = config.getfloat('scoring', 'fec_weight')
-            div = config.getfloat('scoring', 'diversity_weight')
-            total = rf + loss + fec + div
-            assert 0.1 <= total <= 1.7, f"Weights sum to {total}"
-
-    def test_rf_weights_sum_to_one(self):
-        """snr_weight + rssi_weight must equal 1.0."""
-        space = ParameterSpace(_BASE_CONFIG_STR)
-        study = optuna.create_study()
-
-        for _ in range(5):
-            trial = study.ask()
-            config = space.define_trial(trial)
-            study.tell(trial, 0.0)
-
-            snr = config.getfloat('weights', 'snr_weight')
-            rssi = config.getfloat('weights', 'rssi_weight')
-            assert abs(snr + rssi - 1.0) < 1e-9
+            assert 0.5 <= config.getfloat('gate', 'hysteresis_up_db') <= 6.0
+            assert 0.0 <= config.getfloat('gate', 'hysteresis_down_db') <= 4.0
+            assert 0.05 <= config.getfloat('gate', 'snr_slope_alpha') <= 0.8
+            assert 0.0 <= config.getfloat('gate', 'snr_predict_horizon_ticks') <= 10.0
+            assert 0.05 <= config.getfloat('gate', 'emergency_loss_rate') <= 0.35
+            assert 0.4 <= config.getfloat('gate', 'emergency_fec_pressure') <= 0.95
 
     def test_config_creates_valid_profile_selector(self):
         """Generated config should create a valid ProfileSelector."""
@@ -127,8 +113,7 @@ class TestParameterSpace:
         config = space.define_trial(trial)
         study.tell(trial, 0.0)
 
-        expected = ['scoring', 'weights', 'ranges', 'profile selection',
-                    'dynamic', 'noise', 'error estimation']
+        expected = ['profile selection', 'gate', 'dynamic']
         for section in expected:
             assert config.has_section(section), f"Missing section: {section}"
 
@@ -200,7 +185,7 @@ class TestConfigOutput:
         # Should parse without error
         loaded = configparser.ConfigParser()
         loaded.read(output_path)
-        assert loaded.has_section('scoring')
+        assert loaded.has_section('gate')
         assert loaded.has_section('dynamic')
 
     def test_metadata_header(self, tmp_path):

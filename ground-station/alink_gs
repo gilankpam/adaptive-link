@@ -46,13 +46,13 @@ PHY_RATES_40MHZ = [
 ]
 
 # Fixed video frame rate (static config for now)
-VIDEO_FPS = 60
+VIDEO_FPS = 90
 
 # WFB-NG MTU payload byte size (standard for OpenIPC)
 MTU_PAYLOAD_BYTES = 1446
 
 REQUIRED_SECTIONS = {
-    'outgoing', 'json', 'keyframe', 'profile selection', 'dynamic', 'gate'
+    'outgoing', 'wfb-ng', 'keyframe', 'profile selection', 'dynamic', 'gate'
 }
 
 
@@ -845,8 +845,8 @@ if __name__ == "__main__":
     udp_port = config.getint('outgoing', 'udp_port')
 
     # JSON data settings
-    host = config.get('json', 'host')
-    port = config.getint('json', 'port')
+    host = config.get('wfb-ng', 'host')
+    port = config.getint('wfb-ng', 'port')
 
     # Keyframe settings
     allow_idr = config.getboolean('keyframe', 'allow_idr')

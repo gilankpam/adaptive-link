@@ -276,7 +276,7 @@ int main(int argc, char *argv[]) {
             /* Strip length off the start of the message */
             char *message = buffer + sizeof(uint32_t);
             if (msg_length >= 2 && strncmp(message, "H:", 2) == 0) {
-                msg_handle_hello(&daemon.ms, message + 2, msg_length - 2,
+                msg_handle_hello(message + 2, msg_length - 2,
                                  &daemon.hw, daemon.sockfd, &client_addr);
                 continue;   /* handshake is NOT a heartbeat — do not touch message_count */
             }

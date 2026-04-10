@@ -17,11 +17,11 @@ UNITY_DIR = test/unity
 UNITY_SRC = $(UNITY_DIR)/src/unity.c
 UNITY_INC = $(UNITY_DIR)/src
 
-# Test sources
-TEST_SRC = test/test_util.c
-TEST_BIN = test/test_util
+# Test sources - use wildcard to discover all test_*.c files
+TEST_SRC := $(wildcard test/test_*.c)
+TEST_BIN := $(TEST_SRC:.c=)
 
-.PHONY: all clean test test-util
+.PHONY: all clean test
 
 all: $(BIN)
 
@@ -35,23 +35,15 @@ clean:
 	rm -f $(OBJ) $(BIN)
 	rm -f $(TEST_BIN)
 
-# Test targets
+# Test targets - run all discovered tests
 test: $(TEST_BIN)
-	./$(TEST_BIN)
+	@for bin in $(TEST_BIN); do echo "Running $$bin..."; ./$$bin || exit 1; done
 
-test-util: $(TEST_BIN)
-	./$(TEST_BIN)
+# Build rule for test_util - link util.c
+test/test_util: test/test_util.c $(SRC_DIR)/util.c $(UNITY_SRC)
+	$(CC) -I$(SRC_DIR) -I$(UNITY_INC) $(CFLAGS) $(OPT) $< $(SRC_DIR)/util.c $(UNITY_SRC) $(LDFLAGS) -ldl -o $@
 
-$(TEST_BIN): $(TEST_SRC) $(SRC_DIR)/util.c $(UNITY_SRC)
-	$(CC) -I$(SRC_DIR) -I$(UNITY_INC) $(CFLAGS) $(OPT) $(TEST_SRC) $(SRC_DIR)/util.c $(UNITY_SRC) \
-		$(LDFLAGS) -ldl -o $@
-TEST_MSG_SRC = test/test_message.c
-TEST_MSG_BIN = test/test_message
-
-test-c: $(TEST_BIN) $(TEST_MSG_BIN)
-	./$(TEST_BIN)
-	./$(TEST_MSG_BIN)
-
-$(TEST_MSG_BIN): $(TEST_MSG_SRC)
-	$(CC) -I$(SRC_DIR) -I$(UNITY_INC) $(CFLAGS) $(OPT) $(TEST_MSG_SRC) $(UNITY_SRC) $(LDFLAGS) -ldl -o $@
+# Build rule for test_message - message.c is included via #include with mocks, only need util.c
+test/test_message: test/test_message.c $(SRC_DIR)/util.c $(UNITY_SRC)
+	$(CC) -I$(SRC_DIR) -I$(UNITY_INC) $(CFLAGS) $(OPT) $< $(SRC_DIR)/util.c $(UNITY_SRC) $(LDFLAGS) -ldl -o $@
 

@@ -57,17 +57,14 @@ void setUp(void) {
 void tearDown(void) {}
 
 void test_handle_hello_valid(void) {
-    msg_state_t ms;
-    memset(&ms, 0, sizeof(ms));
     hw_state_t hw = {0};
     hw.global_fps = 90;
     hw.x_res = 1920;
     hw.y_res = 1080;
     struct sockaddr_in addr = {0};
 
-    int ret = msg_handle_hello(&ms, "12345", 5, &hw, 0, &addr);
+    int ret = msg_handle_hello("12345", 5, &hw, 0, &addr);
     TEST_ASSERT_EQUAL(0, ret);
-    TEST_ASSERT_TRUE(ms.time_synced);
     TEST_ASSERT_EQUAL(1, mock_sendto_called);
     
     uint32_t len_be;
@@ -81,51 +78,23 @@ void test_handle_hello_valid(void) {
 }
 
 void test_handle_hello_malformed(void) {
-    msg_state_t ms;
-    memset(&ms, 0, sizeof(ms));
     hw_state_t hw = {0};
     struct sockaddr_in addr = {0};
 
     // Neg
-    TEST_ASSERT_NOT_EQUAL(0, msg_handle_hello(&ms, "-100", 4, &hw, 0, &addr));
+    TEST_ASSERT_NOT_EQUAL(0, msg_handle_hello("-100", 4, &hw, 0, &addr));
     // Zero
-    TEST_ASSERT_NOT_EQUAL(0, msg_handle_hello(&ms, "0", 1, &hw, 0, &addr));
+    TEST_ASSERT_NOT_EQUAL(0, msg_handle_hello("0", 1, &hw, 0, &addr));
     // Non-numeric
-    TEST_ASSERT_NOT_EQUAL(0, msg_handle_hello(&ms, "abc", 3, &hw, 0, &addr));
+    TEST_ASSERT_NOT_EQUAL(0, msg_handle_hello("abc", 3, &hw, 0, &addr));
 }
 
 void test_handle_hello_forward_compat(void) {
-    msg_state_t ms;
-    memset(&ms, 0, sizeof(ms));
     hw_state_t hw = {0};
     struct sockaddr_in addr = {0};
 
-    int ret = msg_handle_hello(&ms, "555:extra:stuff", 15, &hw, 0, &addr);
+    int ret = msg_handle_hello("555:extra:stuff", 15, &hw, 0, &addr);
     TEST_ASSERT_EQUAL(0, ret);
-    TEST_ASSERT_TRUE(ms.time_synced);
-}
-
-void test_msg_update_latency(void) {
-    msg_state_t ms;
-    memset(&ms, 0, sizeof(ms));
-    osd_state_t os;
-    ms.osd = &os;
-    ms.time_synced = true;
-    
-    pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
-    ms.pause_mutex = &mut;
-    bool paused = false;
-    ms.paused = &paused;
-    profile_state_t ps;
-    ms.ps = &ps;
-
-    mock_time_ms = 500;
-    
-    msg_process(&ms, "P:1:short:0:1:1:1:1:1:1:450");
-    
-    TEST_ASSERT_EQUAL(50, ms.last_latency_ms);
-    TEST_ASSERT_EQUAL(50, ms.avg_latency_ms);
-    TEST_ASSERT_EQUAL(50, msg_get_latency(&ms));
 }
 
 int main(void) {
@@ -133,6 +102,5 @@ int main(void) {
     RUN_TEST(test_handle_hello_valid);
     RUN_TEST(test_handle_hello_malformed);
     RUN_TEST(test_handle_hello_forward_compat);
-    RUN_TEST(test_msg_update_latency);
     return UNITY_END();
 }

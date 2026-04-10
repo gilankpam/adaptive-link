@@ -29,7 +29,6 @@ void msg_init(msg_state_t *ms, profile_state_t *ps, keyframe_state_t *ks,
     ms->pause_mutex = pause_mutex;
     ms->paused = paused;
     ms->cmd = cmd;
-    ms->time_synced = false;
     ms->jitter_first_sample = true;
     ms->prev_gs_ts_ms = 0;
     ms->prev_drone_ts_ms = 0;
@@ -37,7 +36,7 @@ void msg_init(msg_state_t *ms, profile_state_t *ps, keyframe_state_t *ks,
     ms->avg_jitter_ms = 0;
 }
 
-int msg_handle_hello(msg_state_t *ms, const char *payload, size_t payload_len,
+int msg_handle_hello(const char *payload, size_t payload_len,
                      const hw_state_t *hw, int sockfd,
                      const struct sockaddr_in *client_addr) {
     /* Copy to a NUL-terminated local buffer so strtoll works cleanly. */
@@ -81,7 +80,6 @@ int msg_handle_hello(msg_state_t *ms, const char *payload, size_t payload_len,
         return -1;
     }
 
-    ms->time_synced = true;
     return 0;
 }
 
@@ -108,7 +106,7 @@ static void msg_update_jitter(msg_state_t *ms, uint64_t gs_send_time_ms) {
         ms->prev_gs_ts_ms = gs_send_time_ms;
         ms->prev_drone_ts_ms = drone_time_ms;
         ms->jitter_first_sample = false;
-        snprintf(ms->osd->latency, sizeof(ms->osd->latency), "Jit: 0ms");
+        snprintf(ms->osd->jitter, sizeof(ms->osd->jitter), "Jit: 0ms");
         return;
     }
 
@@ -126,17 +124,7 @@ static void msg_update_jitter(msg_state_t *ms, uint64_t gs_send_time_ms) {
     /* EMA with alpha = 0.1, seeded by the first measurable sample. */
     ms->avg_jitter_ms = (uint32_t)((ms->last_jitter_ms + 9ULL * ms->avg_jitter_ms) / 10);
 
-    snprintf(ms->osd->latency, sizeof(ms->osd->latency), "Jit: %ums", ms->avg_jitter_ms);
-
-    if (ms->time_synced) {
-        long lat = (long)(drone_time_ms - gs_send_time_ms);
-        ms->last_latency_ms = lat;
-        if (ms->avg_latency_ms == 0) {
-            ms->avg_latency_ms = lat;
-        } else {
-            ms->avg_latency_ms = (ms->avg_latency_ms * 7 + lat) / 8;
-        }
-    }
+    snprintf(ms->osd->jitter, sizeof(ms->osd->jitter), "Jit: %ums", ms->avg_jitter_ms);
 }
 
 /**
@@ -250,6 +238,3 @@ void msg_process(msg_state_t *ms, const char *msg) {
     }
 }
 
-long msg_get_latency(const msg_state_t *ms) {
-    return ms->time_synced ? ms->avg_latency_ms : -1;
-}

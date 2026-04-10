@@ -452,7 +452,7 @@ The drone receives `P:` messages and applies profiles via `profile_apply_direct(
 
 ### Jitter Measurement
 
-The drone measures inter-arrival jitter between GS messages without requiring clock synchronization:
+The drone measures **inter-arrival jitter** between GS messages without requiring clock synchronization. This is distinct from one-way latency - it measures the variation in message delivery intervals rather than absolute timing.
 
 ```
 1. On each message arrival, record arrival timestamp (drone's CLOCK_MONOTONIC)
@@ -460,7 +460,7 @@ The drone measures inter-arrival jitter between GS messages without requiring cl
 2. For consecutive messages:
    inter_arrival[i] = arrival_time[i] - arrival_time[i-1]
 
-3. Compute jitter as average deviation:
+3. Compute jitter as average deviation from expected interval:
    expected_interval = average(inter_arrival[])
    jitter = average(|inter_arrival[i] - expected_interval|)
 
@@ -470,6 +470,8 @@ Benefits:
 - No clock sync required between GS and drone
 - Detects network congestion or GS CPU spikes
 - Helps diagnose timing issues in profile delivery
+
+Note: One-way latency measurement is not implemented. The inter-arrival jitter metric provides sufficient insight into link timing stability without the complexity of clock synchronization.
 ```
 
 ---

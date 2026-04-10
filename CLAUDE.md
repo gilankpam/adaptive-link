@@ -58,7 +58,7 @@ Module structure:
 - `osd.c` — OSD string assembly, channel caching, UDP output (`osd_state_t`)
 - `keyframe.c` — keyframe request deduplication, pause/resume (`keyframe_state_t`)
 - `rssi_monitor.c` — RSSI queue and antenna thread (`rssi_state_t`)
-- `message.c` — UDP message parsing, jitter measurement (`msg_state_t`)
+- `message.c` — UDP message parsing, inter-arrival jitter measurement (`msg_state_t`)
 - `tx_monitor.c`, `fallback.c` — thread modules
 - `http_client.c` — native socket-based HTTP GET (no curl dependency)
 

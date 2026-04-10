@@ -24,7 +24,7 @@ void osd_init(osd_state_t *os) {
     strncpy(os->gs_stats, "waiting for gs.", sizeof(os->gs_stats));
     strncpy(os->extra_stats, "initializing...", sizeof(os->extra_stats));
     strncpy(os->score_related, "initializing...", sizeof(os->score_related));
-    strncpy(os->latency, "Jit: 0ms", sizeof(os->latency));
+    strncpy(os->jitter, "Jit: 0ms", sizeof(os->jitter));
     os->set_osd_font_size = 20;
     os->set_osd_colour = 7;
 
@@ -147,19 +147,10 @@ void *osd_thread_func(void *arg) {
             /* Line 5: extra stats */
             osd_off += snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off, "\n%s%s",
                     pos_prefix, os->extra_stats);
-            /* Line 6: latency (conditional) */
-            if (os->latency[0] != '\0') {
+            /* Line 6: jitter (conditional) */
+            if (os->jitter[0] != '\0') {
                 osd_off += snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off, "\n%s%s",
-                        pos_prefix, os->latency);
-                char tmp[32];
-                long lat = msg_get_latency((msg_state_t*)ta->ms);
-                if (lat >= 0) {
-                    snprintf(tmp, sizeof(tmp), " Lat: %ldms", lat);
-                } else {
-                    snprintf(tmp, sizeof(tmp), " Lat: --");
-                }
-                strncat(full_osd_string, tmp, sizeof(full_osd_string) - strlen(full_osd_string) - 1);
-                osd_off = strlen(full_osd_string);
+                        pos_prefix, os->jitter);
             }
         } else if (cfg->osd_level == 4) {
             snprintf(full_osd_string, sizeof(full_osd_string), "%s%s %s | %s | %s | %s | %s",

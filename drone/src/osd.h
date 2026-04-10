@@ -24,7 +24,7 @@ typedef struct {
     char gs_stats[64];
     char extra_stats[256];
     char score_related[64];
-    char latency[32];             /* Latency display (e.g., "Lat: 5ms") */
+    char jitter[32];              /* Jitter display (e.g., "Jit: 5ms") */
     int set_osd_font_size;
     int set_osd_colour;
     

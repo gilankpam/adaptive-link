@@ -18,7 +18,6 @@ from ml.optimize_params import (
     AdapterOptimizer,
     ParameterSpace,
     _expand_param_tokens,
-    _load_adapter_constraints,
     _read_skip_set,
     _resolve_selection,
     write_optimized_config,
@@ -105,8 +104,8 @@ class TestParameterSpace:
         ps = ProfileSelector(config, _MockHandshake())
 
     def test_adapter_max_mcs_constraint(self):
-        """max_mcs should be bounded by adapter capability."""
-        space = ParameterSpace(_BASE_CONFIG_STR, {'max_mcs': 3, 'bandwidths': [20]})
+        """max_mcs should be bounded by max_mcs_bound parameter."""
+        space = ParameterSpace(_BASE_CONFIG_STR, max_mcs_bound=3)
         study = optuna.create_study()
 
         for _ in range(10):
@@ -115,7 +114,7 @@ class TestParameterSpace:
             study.tell(trial, 0.0)
 
             max_mcs = config.getint('dynamic', 'max_mcs')
-            assert max_mcs <= 3, f"max_mcs={max_mcs} exceeds adapter limit of 3"
+            assert max_mcs <= 3, f"max_mcs={max_mcs} exceeds bound of 3"
 
     def test_all_sections_present(self):
         """Generated config should have all expected sections."""
@@ -442,31 +441,30 @@ class TestConfigOutputPreservation:
 
 
 # =============================================================
-# Tests for adapter constraints loading
+# Tests for max_mcs_bound parameter
 # =============================================================
 
-class TestLoadAdapterConstraints:
+class TestMaxMcsBound:
 
-    def test_load_constraints(self, tmp_path):
-        """Should parse adapter constraints from YAML."""
-        yaml_content = {
-            'profiles': {
-                'test-adapter': {
-                    'mcs': [0, 1, 2, 3],
-                    'bw': [20],
-                }
-            }
-        }
-        yaml_path = str(tmp_path / 'adapters.yaml')
-        import yaml
-        with open(yaml_path, 'w') as f:
-            yaml.dump(yaml_content, f)
+    def test_default_max_mcs_bound(self):
+        """Default max_mcs_bound should be 7."""
+        space = ParameterSpace(_BASE_CONFIG_STR)
+        assert space.max_mcs_bound == 7
 
-        constraints = _load_adapter_constraints(yaml_path)
-        assert constraints['test-adapter']['max_mcs'] == 3
-        assert constraints['test-adapter']['bandwidths'] == [20]
+    def test_custom_max_mcs_bound(self):
+        """Custom max_mcs_bound should be respected."""
+        space = ParameterSpace(_BASE_CONFIG_STR, max_mcs_bound=4)
+        assert space.max_mcs_bound == 4
 
-    def test_missing_file(self):
-        """Missing YAML file should return empty dict."""
-        result = _load_adapter_constraints('/nonexistent/path.yaml')
-        assert result == {}
+    def test_max_mcs_samples_within_bound(self):
+        """max_mcs should only sample values within the bound."""
+        space = ParameterSpace(_BASE_CONFIG_STR, selected_params={'max_mcs'}, max_mcs_bound=4)
+        study = optuna.create_study()
+
+        for _ in range(10):
+            trial = study.ask()
+            config = space.define_trial(trial)
+            study.tell(trial, 0.0)
+
+            max_mcs = config.getint('dynamic', 'max_mcs')
+            assert 0 <= max_mcs <= 4, f"max_mcs={max_mcs} outside expected range [0, 4]"

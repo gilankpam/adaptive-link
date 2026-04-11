@@ -14,7 +14,6 @@ import sys
 
 import optuna
 import pandas as pd
-import yaml
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from ml.replay_simulator import load_config_from_file, ReplaySimulator
@@ -30,8 +29,7 @@ from ml.feature_engineering import load_telemetry
 #   choices is the list of options for categorical parameters
 #
 # Runtime overrides applied in ParameterSpace.define_trial():
-#   - max_mcs: `high` is replaced by the adapter's max MCS
-#   - bandwidth: `choices` is replaced by the adapter's supported bandwidths
+#   - max_mcs: `high` is replaced by max_mcs_bound (read from config)
 PARAM_REGISTRY = [
     ('hold_fallback_mode_ms',            'profile selection', 'int',     200,  5000, None),
     ('hold_modes_down_ms',               'profile selection', 'int',     500, 10000, None),
@@ -48,7 +46,7 @@ PARAM_REGISTRY = [
     ('snr_ema_alpha',                    'dynamic',           'float',  0.05,   0.8, None),
     ('loss_margin_weight',               'dynamic',           'float',   5.0,  50.0, None),
     ('fec_margin_weight',                'dynamic',           'float',   1.0,  15.0, None),
-    ('max_mcs',                          'dynamic',           'int',       2,  None, None),  # high resolved per adapter
+    ('max_mcs',                          'dynamic',           'int',       2,  None, None),
     ('short_gi_snr_margin',              'dynamic',           'float',   2.0,  10.0, None),
     ('loss_threshold_for_fec_downgrade', 'dynamic',           'float',  0.01,  0.15, None),
     ('fec_redundancy_ratio',             'dynamic',           'float',  0.15,  0.40, None),
@@ -57,7 +55,6 @@ PARAM_REGISTRY = [
     ('min_bitrate',                      'dynamic',           'int',    1000,  5000, None),
     ('max_power',                        'dynamic',           'int',    1000,  2900, None),
     ('min_power',                        'dynamic',           'int',      50,  1000, None),
-    ('bandwidth',                        'dynamic',           'cat',    None,  None, [20, 40]),  # choices resolved per adapter
 ]
 
 PARAM_SECTION = {name: section for (name, section, *_) in PARAM_REGISTRY}
@@ -159,48 +156,22 @@ def _print_registry():
     print("  profile_selection, gate, dynamic")
 
 
-def _load_adapter_constraints(adapters_yaml_path):
-    """Load per-adapter constraints from wlan_adapters.yaml.
-
-    Returns dict mapping adapter_id -> {max_mcs: int, bandwidths: list}.
-    """
-    if not os.path.exists(adapters_yaml_path):
-        return {}
-
-    with open(adapters_yaml_path) as f:
-        data = yaml.safe_load(f)
-
-    constraints = {}
-    for adapter_id, info in data.get('profiles', {}).items():
-        mcs_list = info.get('mcs', [0, 1, 2, 3, 4, 5, 6, 7])
-        bw_list = info.get('bw', [20])
-        constraints[adapter_id] = {
-            'max_mcs': max(mcs_list) if mcs_list else 7,
-            'bandwidths': bw_list,
-        }
-    return constraints
-
-
 class ParameterSpace:
     """Defines the tunable parameters for the two-channel gate with bounds."""
 
-    def __init__(self, base_config_str, adapter_constraints=None, selected_params=None):
+    def __init__(self, base_config_str, selected_params=None, max_mcs_bound=7):
         """Initialize parameter space.
 
         Args:
             base_config_str: INI config string used as the baseline for trials.
-            adapter_constraints: Optional dict with 'max_mcs' and 'bandwidths'
-                                 for the target adapter.
             selected_params: Optional set of parameter names to sample. When
                              None, every parameter in PARAM_REGISTRY is sampled
                              (current behavior). Names not in the set keep
                              their baseline value from base_config_str.
+            max_mcs_bound: Upper bound for max_mcs parameter (default: 7).
         """
         self.base_config_str = base_config_str
-        self.constraints = adapter_constraints or {
-            'max_mcs': 7,
-            'bandwidths': [20, 40],
-        }
+        self.max_mcs_bound = max_mcs_bound
         self.selected_params = selected_params
 
     def define_trial(self, trial):
@@ -220,11 +191,9 @@ class ParameterSpace:
                 # Baseline value from base_config_str stays in place.
                 continue
 
-            # Runtime overrides for adapter-dependent parameters.
+            # Runtime override for max_mcs upper bound.
             if name == 'max_mcs':
-                high = self.constraints.get('max_mcs', 7)
-            elif name == 'bandwidth':
-                choices = self.constraints.get('bandwidths', [20, 40])
+                high = self.max_mcs_bound
 
             if kind == 'int':
                 val = trial.suggest_int(name, low, high)
@@ -242,26 +211,25 @@ class AdapterOptimizer:
     """Runs Bayesian optimization for a single adapter type."""
 
     def __init__(self, adapter_id, ticks_df, base_config_str,
-                 adapter_constraints=None, n_trials=200, seed=42,
-                 selected_params=None):
+                 n_trials=200, seed=42, selected_params=None, max_mcs_bound=7):
         """Initialize optimizer.
 
         Args:
             adapter_id: Adapter identifier for filtering telemetry.
             ticks_df: DataFrame of telemetry ticks (may contain multiple adapters).
             base_config_str: INI config string used as the baseline.
-            adapter_constraints: Optional constraints from wlan_adapters.yaml.
             n_trials: Number of optimization trials.
             seed: Random seed for reproducibility.
             selected_params: Optional set of parameter names to optimize.
                              None = optimize every parameter in PARAM_REGISTRY.
+            max_mcs_bound: Upper bound for max_mcs parameter (default: 7).
         """
         self.adapter_id = adapter_id
         self.base_config_str = base_config_str
         self.n_trials = n_trials
         self.seed = seed
         self.param_space = ParameterSpace(
-            base_config_str, adapter_constraints, selected_params=selected_params
+            base_config_str, selected_params=selected_params, max_mcs_bound=max_mcs_bound
         )
 
         # Filter ticks to this adapter
@@ -472,10 +440,6 @@ def main():
                         help='Random seed for reproducibility (default: 42)')
     parser.add_argument('--config',
                         help='Path to alink_gs.conf baseline config file')
-    parser.add_argument('--adapters-yaml',
-                        default=os.path.join(os.path.dirname(__file__),
-                                             '..', '..', 'config', 'wlan_adapters.yaml'),
-                        help='Path to wlan_adapters.yaml')
     sel_group = parser.add_mutually_exclusive_group()
     sel_group.add_argument('--params', default=None,
                            help='Comma-separated parameter names OR section '
@@ -519,8 +483,15 @@ def main():
     ticks_df, _ = load_telemetry(args.telemetry_dir)
     print(f"  Loaded {len(ticks_df)} ticks")
 
-    # Load adapter constraints
-    adapter_constraints = _load_adapter_constraints(args.adapters_yaml)
+    # Determine max_mcs bound from config
+    temp_config = configparser.ConfigParser()
+    temp_config.read_string(base_config_str)
+    max_mcs_bound = 7  # default
+    if temp_config.has_section('dynamic') and temp_config.has_option('dynamic', 'max_mcs'):
+        try:
+            max_mcs_bound = temp_config.getint('dynamic', 'max_mcs')
+        except ValueError:
+            pass
 
     # Determine which adapters to optimize
     if args.adapter == 'all':
@@ -535,18 +506,15 @@ def main():
         print(f"\n{'='*60}")
         print(f"Optimizing for adapter: {adapter_id}")
         print(f"{'='*60}")
-
-        constraints = adapter_constraints.get(adapter_id, {
-            'max_mcs': 7, 'bandwidths': [20, 40]
-        })
+        print(f"  max_mcs bound: {max_mcs_bound}")
 
         try:
             optimizer = AdapterOptimizer(
                 adapter_id, ticks_df, base_config_str,
-                adapter_constraints=constraints,
                 n_trials=args.n_trials,
                 seed=args.seed,
                 selected_params=selected,
+                max_mcs_bound=max_mcs_bound,
             )
         except ValueError as e:
             print(f"  Skipping: {e}")

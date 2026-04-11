@@ -24,7 +24,7 @@ void osd_init(osd_state_t *os) {
     strncpy(os->gs_stats, "waiting for gs.", sizeof(os->gs_stats));
     strncpy(os->extra_stats, "initializing...", sizeof(os->extra_stats));
     strncpy(os->score_related, "initializing...", sizeof(os->score_related));
-    strncpy(os->jitter, "Jit: 0ms", sizeof(os->jitter));
+    os->jitter_ms = 0;
     os->set_osd_font_size = 20;
     os->set_osd_colour = 7;
 
@@ -103,11 +103,9 @@ void *osd_thread_func(void *arg) {
         int wfb_ch = get_cached_channel(os);
 
         snprintf(os->extra_stats, sizeof(os->extra_stats),
-             "xtx%ld(%d)%s gs_idr%d [ch%d]",
+             "xtx:%ld idr:%d ch:%d",
              hw->global_total_tx_dropped,
-             keyframe_get_total_xtx(ks),
-             ps->bitrate_reduced ? "R" : "",
-             keyframe_get_total(ks),
+             ks->total_requests,
              wfb_ch);
 
         if (rssi_get_weak_antenna(rs)) {
@@ -147,11 +145,9 @@ void *osd_thread_func(void *arg) {
             /* Line 5: extra stats */
             osd_off += snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off, "\n%s%s",
                     pos_prefix, os->extra_stats);
-            /* Line 6: jitter (conditional) */
-            if (os->jitter[0] != '\0') {
-                osd_off += snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off, "\n%s%s",
-                        pos_prefix, os->jitter);
-            }
+            /* Line 6: jitter + resolution */
+            osd_off += snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off, "\n%sjit:%ums res:%dp",
+                    pos_prefix, os->jitter_ms, hw->y_res);
         } else if (cfg->osd_level == 4) {
             snprintf(full_osd_string, sizeof(full_osd_string), "%s%s %s | %s | %s | %s | %s",
                     pos_prefix, os->profile, os->profile_fec, local_regular_osd, os->score_related, os->gs_stats, os->extra_stats);

@@ -51,11 +51,3 @@ bool keyframe_fire_request(keyframe_state_t *ks, const alink_config_t *cfg,
     }
     return true;
 }
-
-int keyframe_get_total(const keyframe_state_t *ks) {
-    return ks->total_requests;
-}
-
-int keyframe_get_total_xtx(const keyframe_state_t *ks) {
-    return ks->total_requests_xtx;
-}

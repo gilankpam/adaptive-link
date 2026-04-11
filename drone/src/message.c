@@ -103,7 +103,7 @@ static void msg_update_jitter(msg_state_t *ms, uint64_t gs_send_time_ms) {
         ms->prev_gs_ts_ms = gs_send_time_ms;
         ms->prev_drone_ts_ms = drone_time_ms;
         ms->jitter_first_sample = false;
-        snprintf(ms->osd->jitter, sizeof(ms->osd->jitter), "Jit: 0ms");
+        ms->osd->jitter_ms = 0;
         return;
     }
 
@@ -121,7 +121,7 @@ static void msg_update_jitter(msg_state_t *ms, uint64_t gs_send_time_ms) {
     /* EMA with alpha = 0.1, seeded by the first measurable sample. */
     ms->avg_jitter_ms = (uint32_t)((ms->last_jitter_ms + 9ULL * ms->avg_jitter_ms) / 10);
 
-    snprintf(ms->osd->jitter, sizeof(ms->osd->jitter), "Jit: %ums", ms->avg_jitter_ms);
+    ms->osd->jitter_ms = ms->avg_jitter_ms;
 }
 
 /**

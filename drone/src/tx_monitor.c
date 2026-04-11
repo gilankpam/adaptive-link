@@ -80,7 +80,6 @@ void *txmon_thread_func(void *arg) {
                        && snap_prev_gop > 0.5f;
         if (fire_kf) {
             ks->last_request_time = now;
-            ks->total_requests_xtx++;
         }
         pthread_mutex_unlock(&ks->mutex);
 

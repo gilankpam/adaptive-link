@@ -16,7 +16,6 @@
 
 typedef struct {
     int total_requests;
-    int total_requests_xtx;
     struct timespec last_request_time;
     pthread_mutex_t mutex;
     log_level_t log_level;
@@ -31,8 +30,5 @@ void keyframe_init(keyframe_state_t *ks);
  */
 bool keyframe_fire_request(keyframe_state_t *ks, const alink_config_t *cfg,
                            const cmd_ctx_t *cmd);
-
-int keyframe_get_total(const keyframe_state_t *ks);
-int keyframe_get_total_xtx(const keyframe_state_t *ks);
 
 #endif /* ALINK_KEYFRAME_H */

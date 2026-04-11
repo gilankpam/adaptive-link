@@ -15,7 +15,9 @@
 #include "command.h"
 
 typedef struct {
-    int total_requests;
+    /* Written under mutex by keyframe_fire_request, read lockless by the
+     * OSD thread — volatile forces a fresh load on each tick. */
+    volatile int total_requests;
     struct timespec last_request_time;
     pthread_mutex_t mutex;
     log_level_t log_level;

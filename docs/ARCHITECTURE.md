@@ -338,6 +338,8 @@ idrCommandTemplate   = http_get localhost 80 /request/idr
 
 **Command execution:** All shell commands use `cmd_exec_with_timeout()` for execution. The legacy `cmd_exec()` and `cmd_exec_noquote()` functions have been removed. Commands that exceed the timeout (default 500ms) are killed and return -1.
 
+**Trust model:** `cmd_format()` substitutes placeholder values unescaped into the resulting command line, which is then fed to `/bin/sh -c`. This is safe because placeholder values originate from `_compute_profile()` and reference tables on the GS — not from user input — and `/etc/alink.conf` itself is operator-controlled. A malicious config file is equivalent to shell access. The one place config values *do* flow into a runtime format string is `customOSD`, which is validated by `customosd_format_is_safe()` in `config.c`: only `%d`/`%i`/`%%` are accepted and the conversion-specifier count is capped at 2, closing format-string injection at the OSD `snprintf` site. `replace_placeholder()` compares its post-substitution length to `MAX_COMMAND_SIZE` and logs an error + aborts instead of silently truncating an oversized command.
+
 This decouples the control logic from hardware-specific commands, making it adaptable to different camera/radio stacks.
 
 ---
@@ -429,20 +431,18 @@ The drone receives `P:` messages and applies profiles via `profile_apply_direct(
 ```
 1. Parse P: message (profile_idx, gi, mcs, fec_k, fec_n, bitrate, gop, power, bandwidth, gs_ts_ms, rtt_ms)
 
-2. Store as lastAppliedProfile (for re-application via command)
+2. Skip if profile_index == currentProfile (GS sends current profile every tick for reliability)
 
-3. Skip if profile_index == currentProfile (GS sends current profile every tick for reliability)
-
-4. Update tracking state:
+3. Update tracking state:
    previousProfile = currentProfile
    currentProfile = profile_index
    prevTimeStamp = now_ms()
 
-5. Compute ROI QP on drone side (if not provided by GS):
+4. Compute ROI QP on drone side (if not provided by GS):
    - calc_roiQp_from_bitrate() computes ROI QP based on bitrate and resolution
    - Higher bitrate = lower ROI QP (better quality in center region)
 
-6. Dispatch to async worker thread (non-blocking)
+5. Dispatch to async worker thread (non-blocking)
    - Apply commands in order: QpDelta → FPS → Power → GOP → MCS → FEC/Bitrate → ROI → IDR
    - Execute via cmd_exec_with_timeout() (500ms default timeout)
    - Pace execution with configurable delays
@@ -504,9 +504,11 @@ K:                                     # GS → drone: trigger keyframe request
 Frame bound check:
 The drone main.c recv loop rejects datagrams shorter than the 4-byte prefix,
 rejects msg_length==0 or msg_length > (received - 4), and null-terminates the
-buffer at the end of the DECLARED payload so downstream strtok/strncmp can't
-run past a truncated frame. Defensive only — wfb-ng is trusted — but catches
-buggy senders cleanly.
+buffer at the end of the DECLARED payload so downstream strtok_r/strncmp can't
+run past a truncated frame. msg_process_profile takes an explicit msg_len and
+uses strndup(msg, msg_len) rather than strdup, so a payload with no interior
+NUL can't over-read. Defensive only — wfb-ng is trusted — but catches buggy
+senders cleanly.
 ```
 
 The GS sends the current profile on every tick for UDP reliability. The drone skips application if the profile index matches the current profile.
@@ -592,7 +594,15 @@ The drone daemon includes several performance optimizations to reduce CPU and I/
 
 5. **API batching**: Multiple camera parameters (qpDelta, bitrate, gop, roiQp) are batched into a single HTTP request via `profile_apply_api_batch()`, reducing the number of network round-trips.
 
-6. **Jitter measurement**: Inter-arrival jitter is computed from message timestamps without requiring clock synchronization between GS and drone, enabling network quality monitoring with minimal overhead.
+6. **Jitter measurement**: Inter-arrival jitter is computed from message timestamps without requiring clock synchronization between GS and drone. The drone-side component uses `CLOCK_MONOTONIC` so wall-clock steps can't poison the delta.
+
+7. **O(1) RSSI rolling average**: `rssi_monitor.c` keeps a running sum per antenna and updates it incrementally (subtract the sample being evicted from the ring, add the new one) instead of re-summing `RSSI_HISTORY_SIZE = 20` entries on every `RX_ANT` line. At 4 antennas × ~10 Hz this trims ~800 adds/sec to ~80.
+
+8. **Edge-triggered weak-antenna log**: The OSD renders the weak-antenna warning every tick (5 Hz), but the stdout `INFO_LOG` line only fires when the boolean flips — rising edge logs "Weak drone antenna detected!", falling edge logs "Drone antenna recovered." No more 5 identical lines/second while the condition holds.
+
+9. **Table-driven config loader**: `config_load()` uses a static `CONFIG_KEYS[]` dispatch table (key name → struct offset + type tag) instead of a hand-written `else if` chain. Load-time cost is trivially different; the win is that adding a config field is a one-line table insert, not a new branch arm.
+
+10. **Collapsed previous-value tracking**: `profile_state_t` keeps a single `Profile prevApplied` struct instead of 8 scattered `prevSet*` fields. Delta detection in every `apply_*_step` compares directly against `ps->prevApplied.field`, and adding a new profile field automatically gets a "previous" slot. No semantic change — one source of truth.
 
 ---
 

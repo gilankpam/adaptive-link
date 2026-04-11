@@ -223,8 +223,3 @@ int http_get(const char *host, int port, const char *path,
     close(sock);
     return 0;
 }
-
-int http_get_no_response(const char *host, int port, const char *path, int timeout_ms) {
-    // Just call http_get with NULL response buffer
-    return http_get(host, port, path, NULL, 0, timeout_ms);
-}

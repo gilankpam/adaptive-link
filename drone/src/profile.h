@@ -33,21 +33,11 @@ typedef struct {
     int previousProfile;
     uint64_t prevTimeStamp;
 
-    /* Last applied profile (for re-application via cmd_server) */
-    Profile lastAppliedProfile;
-    bool hasAppliedProfile;
-
-    /* Previous-value tracking for apply_profile delta detection.
-     * Protected by worker_mutex when accessed from tx_monitor. */
-    int prevWfbPower;
-    float prevSetGop;
-    int prevBandwidth;
-    char prevSetGI[10];
-    int prevSetMCS;
-    int prevSetFecK;
-    int prevSetFecN;
-    int prevSetBitrate;
-    int prevDivideFpsBy;
+    /* Previous-value tracking for apply_*_step delta detection. Mirrors the
+     * Profile struct so adding a new profile field automatically gets a
+     * "previous" slot. Protected by worker_mutex when accessed from
+     * tx_monitor. prevFPS is separate because FPS isn't part of Profile. */
+    Profile prevApplied;
     int prevFPS;
 
     /* FEC/bitrate restore tracking */

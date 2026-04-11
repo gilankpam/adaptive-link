@@ -24,7 +24,8 @@ typedef struct {
 
 void cmd_init(cmd_ctx_t *ctx, long pace_exec_us, log_level_t log_level);
 void cmd_format(char *dest, size_t dest_size, const char *tmpl,
-                int count, const char **keys, const char **values);
+                int count, const char **keys, const char **values,
+                log_level_t log_level);
 
 /**
  * Execute a shell command with timeout using fork()/exec().

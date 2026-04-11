@@ -107,9 +107,11 @@ static void msg_update_jitter(msg_state_t *ms, uint64_t gs_send_time_ms) {
         return;
     }
 
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    uint64_t drone_time_ms = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+    /* Monotonic clock: REALTIME can jump (NTP, manual set), which would
+     * underflow the uint64_t delta below and poison the EMA for ~10 ticks.
+     * Constant offset between drone and GS clocks cancels in the delta math
+     * regardless of which clock the drone uses, so monotonic is safe. */
+    uint64_t drone_time_ms = util_now_ms();
 
     if (ms->jitter_first_sample) {
         /* Seed the delta pair; no jitter measurement possible yet. */
@@ -140,7 +142,7 @@ static void msg_update_jitter(msg_state_t *ms, uint64_t gs_send_time_ms) {
 /**
  * Process a profile message: P:<index>:<GI>:<MCS>:<FecK>:<FecN>:<Bitrate>:<GOP>:<Power>:<Bandwidth>:<timestamp>
  */
-static void msg_process_profile(msg_state_t *ms, const char *msg) {
+static void msg_process_profile(msg_state_t *ms, const char *msg, size_t msg_len) {
     Profile profile;
     memset(&profile, 0, sizeof(profile));
 
@@ -148,13 +150,16 @@ static void msg_process_profile(msg_state_t *ms, const char *msg) {
     uint64_t gs_timestamp_ms = 0;
     int32_t rtt_ms = -1;
 
-    char *msgCopy = strdup(msg);
+    /* strndup bounds the copy to the declared payload, so we never read past
+     * the frame even if the buffer wasn't NUL-terminated upstream. */
+    char *msgCopy = strndup(msg, msg_len);
     if (msgCopy == NULL) {
         ERROR_LOG(ms->cfg, "Failed to allocate memory\n");
         return;
     }
 
-    char *token = strtok(msgCopy, ":");
+    char *saveptr = NULL;
+    char *token = strtok_r(msgCopy, ":", &saveptr);
     int index = 0;
 
     while (token != NULL) {
@@ -196,7 +201,7 @@ static void msg_process_profile(msg_state_t *ms, const char *msg) {
             default:
                 break;
         }
-        token = strtok(NULL, ":");
+        token = strtok_r(NULL, ":", &saveptr);
         index++;
     }
 
@@ -223,10 +228,10 @@ static void msg_process_profile(msg_state_t *ms, const char *msg) {
     profile_apply_direct(ms->ps, &profile, profile_index, ms->osd);
 }
 
-void msg_process(msg_state_t *ms, const char *msg) {
-    if (msg[0] == 'P' && msg[1] == ':') {
-        msg_process_profile(ms, msg + 2);
-    } else if (msg[0] == 'K' && msg[1] == '\0') {
+void msg_process(msg_state_t *ms, const char *msg, size_t msg_len) {
+    if (msg_len >= 2 && msg[0] == 'P' && msg[1] == ':') {
+        msg_process_profile(ms, msg + 2, msg_len - 2);
+    } else if (msg_len == 1 && msg[0] == 'K') {
         keyframe_fire_request(ms->ks, ms->cfg, ms->cmd);
     } else {
         ERROR_LOG(ms->cfg, "Unknown message format: %.20s...\n", msg);

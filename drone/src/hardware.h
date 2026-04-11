@@ -21,7 +21,9 @@ typedef struct {
     int global_fps;
     int total_pixels;
     bool tx_dropped_initialized;
-    long global_total_tx_dropped;
+    /* Written by tx_monitor thread, read lockless by the OSD thread —
+     * volatile forces a fresh load each tick. Single-writer, so no RMW race. */
+    volatile long global_total_tx_dropped;
     uint64_t camera_info_cache_time;  /* Last camera FPS/res refresh (ms) */
     log_level_t log_level;
 } hw_state_t;

@@ -1,6 +1,15 @@
 /**
  * @file command.c
  * @brief Command template substitution and execution with timeout support.
+ *
+ * TRUST MODEL: Template values are substituted **unescaped** into a
+ * `/bin/sh -c` command line. The wfb-ng tunnel between GS and drone is
+ * trusted (encrypted, authenticated link), so the GS is responsible for
+ * sanitizing any value that ends up in a placeholder before sending it.
+ * If this trust assumption ever changes (e.g. inputs from an untrusted
+ * source), `replace_placeholder` and `cmd_exec_with_timeout` must be
+ * replaced with an `execv()`-based path that takes argv arrays directly,
+ * bypassing the shell entirely.
  */
 #include "command.h"
 #include "config.h"
@@ -16,18 +25,36 @@
 
 #define DEFAULT_EXEC_TIMEOUT_MS 500
 
-static void replace_placeholder(char *str, const char *placeholder, const char *value) {
-    char buffer[MAX_COMMAND_SIZE];
+/* Substitutes `value` into `str` UNESCAPED — see TRUST MODEL at top of file.
+ * Returns 0 on success, -1 if substitution would overflow MAX_COMMAND_SIZE
+ * (in which case `str` is left unchanged and an error is logged). */
+static int replace_placeholder(char *str, const char *placeholder, const char *value,
+                               log_level_t log_level) {
     char *pos = strstr(str, placeholder);
     if (!pos)
-        return;
-    size_t prefix_len = pos - str;
-    buffer[0] = '\0';
-    strncat(buffer, str, prefix_len);
-    strncat(buffer, value, sizeof(buffer) - strlen(buffer) - 1);
-    strncat(buffer, pos + strlen(placeholder), sizeof(buffer) - strlen(buffer) - 1);
-    strncpy(str, buffer, MAX_COMMAND_SIZE);
-    str[MAX_COMMAND_SIZE-1] = '\0';
+        return 0;
+
+    size_t prefix_len = (size_t)(pos - str);
+    size_t value_len = strlen(value);
+    size_t ph_len = strlen(placeholder);
+    size_t suffix_len = strlen(pos + ph_len);
+    size_t needed = prefix_len + value_len + suffix_len + 1; /* + NUL */
+
+    if (needed > MAX_COMMAND_SIZE) {
+        ERROR_LOG_LEVEL(log_level,
+                        "Command template truncation: substituting '%s'='%s' "
+                        "needs %zu bytes, max %d. Aborting substitution.\n",
+                        placeholder, value, needed, MAX_COMMAND_SIZE);
+        return -1;
+    }
+
+    char buffer[MAX_COMMAND_SIZE];
+    memcpy(buffer, str, prefix_len);
+    memcpy(buffer + prefix_len, value, value_len);
+    memcpy(buffer + prefix_len + value_len, pos + ph_len, suffix_len);
+    buffer[prefix_len + value_len + suffix_len] = '\0';
+    memcpy(str, buffer, prefix_len + value_len + suffix_len + 1);
+    return 0;
 }
 
 void cmd_init(cmd_ctx_t *ctx, long pace_exec_us, log_level_t log_level) {
@@ -137,14 +164,15 @@ static int exec_with_timeout(const char *command, int timeout_ms, log_level_t lo
 }
 
 void cmd_format(char *dest, size_t dest_size, const char *tmpl,
-                int count, const char **keys, const char **values) {
+                int count, const char **keys, const char **values,
+                log_level_t log_level) {
     char temp[MAX_COMMAND_SIZE];
     strncpy(temp, tmpl, sizeof(temp));
     temp[sizeof(temp)-1] = '\0';
     char placeholder[64];
     for (int i = 0; i < count; i++) {
         snprintf(placeholder, sizeof(placeholder), "{%s}", keys[i]);
-        replace_placeholder(temp, placeholder, values[i]);
+        replace_placeholder(temp, placeholder, values[i], log_level);
     }
     strncpy(dest, temp, dest_size);
     dest[dest_size-1] = '\0';

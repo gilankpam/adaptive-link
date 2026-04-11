@@ -41,19 +41,14 @@ void *rssi_thread_func(void *arg) {
 
     const int MAX_LINE = 512;
 
-    int rssi_history[NUM_ANTENNA_SLOTS][RSSI_HISTORY_SIZE];
-    int rssi_index[NUM_ANTENNA_SLOTS];
-    int rssi_avg[NUM_ANTENNA_SLOTS];
-    int rssi_count[NUM_ANTENNA_SLOTS];
-
-    for (int i = 0; i < NUM_ANTENNA_SLOTS; i++) {
-        rssi_index[i] = 0;
-        rssi_avg[i] = 0;
-        rssi_count[i] = 0;
-        for (int j = 0; j < RSSI_HISTORY_SIZE; j++) {
-            rssi_history[i][j] = 0;
-        }
-    }
+    int rssi_history[NUM_ANTENNA_SLOTS][RSSI_HISTORY_SIZE] = {{0}};
+    int rssi_index[NUM_ANTENNA_SLOTS] = {0};
+    int rssi_avg[NUM_ANTENNA_SLOTS] = {0};
+    int rssi_count[NUM_ANTENNA_SLOTS] = {0};
+    /* Running sum per antenna so the rolling average is O(1) per sample —
+     * subtract the slot we're about to overwrite (only once the ring is
+     * full) and add the new value, instead of re-summing the whole ring. */
+    int rssi_sum[NUM_ANTENNA_SLOTS] = {0};
 
     char line[MAX_LINE];
     while (1) {
@@ -76,26 +71,29 @@ void *rssi_thread_func(void *arg) {
                     rs->num_antennas_drone = antenna + 1;
                 }
 
+                char *saveptr = NULL;
                 char *token;
                 int token_count = 0, rssi = 0;
-                token = strtok(colon_values, ":");
+                token = strtok_r(colon_values, ":", &saveptr);
                 while (token) {
                     if (++token_count == 3) {
                         rssi = atoi(token);
                         break;
                     }
-                    token = strtok(NULL, ":");
+                    token = strtok_r(NULL, ":", &saveptr);
                 }
 
-                rssi_history[antenna][rssi_index[antenna] % RSSI_HISTORY_SIZE] = rssi;
+                int slot = rssi_index[antenna] % RSSI_HISTORY_SIZE;
+                if (rssi_count[antenna] >= RSSI_HISTORY_SIZE) {
+                    /* Ring is full — evict the slot we're about to overwrite. */
+                    rssi_sum[antenna] -= rssi_history[antenna][slot];
+                } else {
+                    rssi_count[antenna]++;
+                }
+                rssi_history[antenna][slot] = rssi;
+                rssi_sum[antenna] += rssi;
                 rssi_index[antenna]++;
-                rssi_count[antenna]++;
-
-                int sum = 0, count = rssi_count[antenna] < RSSI_HISTORY_SIZE ? rssi_count[antenna] : RSSI_HISTORY_SIZE;
-                for (int i = 0; i < count; i++) {
-                    sum += rssi_history[antenna][i];
-                }
-                rssi_avg[antenna] = sum / count;
+                rssi_avg[antenna] = rssi_sum[antenna] / rssi_count[antenna];
 
                 int min_rssi = INT_MAX, max_rssi = INT_MIN;
                 for (int i = 0; i < NUM_ANTENNA_SLOTS; i++) {

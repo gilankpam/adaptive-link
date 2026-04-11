@@ -118,7 +118,8 @@ void test_process_profile_parses_rtt_field(void) {
     init_ms_for_profile(&ms, &osd, &cfg);
 
     /* P:<idx>:<GI>:<MCS>:<FecK>:<FecN>:<Bitrate>:<GOP>:<Power>:<BW>:<ts>:<rtt> */
-    msg_process(&ms, "P:0:LONG:1:10:15:8000:1:50:20:1700000000000:42");
+    const char *p1 = "P:0:LONG:1:10:15:8000:1:50:20:1700000000000:42";
+    msg_process(&ms, p1, strlen(p1));
     TEST_ASSERT_EQUAL_INT32(42, osd.rtt_ms);
 }
 
@@ -129,7 +130,8 @@ void test_process_profile_backward_compat_no_rtt(void) {
     init_ms_for_profile(&ms, &osd, &cfg);
 
     /* Old 10-field format (no rtt_ms) — must not crash, rtt stays at sentinel. */
-    msg_process(&ms, "P:0:LONG:1:10:15:8000:1:50:20:1700000000000");
+    const char *p2 = "P:0:LONG:1:10:15:8000:1:50:20:1700000000000";
+    msg_process(&ms, p2, strlen(p2));
     TEST_ASSERT_EQUAL_INT32(-1, osd.rtt_ms);
 }
 
@@ -141,7 +143,8 @@ void test_process_profile_negative_rtt_leaves_sentinel(void) {
 
     /* -1 from GS means "no sample yet" — drone must leave rtt_ms untouched. */
     osd.rtt_ms = 77;  /* seed with a known good value */
-    msg_process(&ms, "P:0:LONG:1:10:15:8000:1:50:20:1700000000000:-1");
+    const char *p3 = "P:0:LONG:1:10:15:8000:1:50:20:1700000000000:-1";
+    msg_process(&ms, p3, strlen(p3));
     TEST_ASSERT_EQUAL_INT32(77, osd.rtt_ms);
 }
 

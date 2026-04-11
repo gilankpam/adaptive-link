@@ -25,16 +25,4 @@
 int http_get(const char *host, int port, const char *path,
              char *response, size_t resp_size, int timeout_ms);
 
-/**
- * Perform an HTTP GET request and ignore response.
- * Optimized for fire-and-forget requests.
- * 
- * @param host      Target host
- * @param port      Target port
- * @param path      URL path with query string
- * @param timeout_ms Timeout in milliseconds
- * @return 0 on success, non-zero on error
- */
-int http_get_no_response(const char *host, int port, const char *path, int timeout_ms);
-
 #endif /* HTTP_CLIENT_H */

@@ -35,13 +35,12 @@ void *txmon_thread_func(void *arg) {
         long since_xtx_ms = util_elapsed_ms_timespec(&now, &last_xtx_time);
 
         /* Snapshot ps fields under worker_mutex so we don't race the profile
-         * worker updating prevSetBitrate/prevSetGop/bitrate_reduced. The
-         * snapshot is also written back under the same lock.
-         * The actual HTTP call is released from this lock — it's serialized
-         * separately by cmd->exec_mutex. */
+         * worker updating prevApplied/bitrate_reduced. The snapshot is also
+         * written back under the same lock. The actual HTTP call is released
+         * from this lock — it's serialized separately by cmd->exec_mutex. */
         pthread_mutex_lock(&ps->worker_mutex);
-        int snap_prev_bitrate = ps->prevSetBitrate;
-        float snap_prev_gop = ps->prevSetGop;
+        int snap_prev_bitrate = ps->prevApplied.setBitrate;
+        float snap_prev_gop = ps->prevApplied.setGop;
         bool snap_bitrate_reduced = ps->bitrate_reduced;
         pthread_mutex_unlock(&ps->worker_mutex);
 

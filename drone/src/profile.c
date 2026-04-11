@@ -20,17 +20,16 @@ void profile_init(profile_state_t *ps, alink_config_t *cfg,
     ps->currentProfile = -1;
     ps->previousProfile = -2;
     ps->prevTimeStamp = 0;
-    ps->hasAppliedProfile = false;
 
-    ps->prevWfbPower = -1;
-    ps->prevSetGop = -1.0f;
-    ps->prevBandwidth = -20;
-    strncpy(ps->prevSetGI, "-1", sizeof(ps->prevSetGI));
-    ps->prevSetMCS = -1;
-    ps->prevSetFecK = -1;
-    ps->prevSetFecN = -1;
-    ps->prevSetBitrate = -1;
-    ps->prevDivideFpsBy = -1;
+    /* Sentinels: any first real profile will differ in at least one field. */
+    ps->prevApplied.wfbPower  = -1;
+    ps->prevApplied.setGop    = -1.0f;
+    ps->prevApplied.bandwidth = -20;
+    strncpy(ps->prevApplied.setGI, "-1", sizeof(ps->prevApplied.setGI));
+    ps->prevApplied.setMCS    = -1;
+    ps->prevApplied.setFecK   = -1;
+    ps->prevApplied.setFecN   = -1;
+    ps->prevApplied.setBitrate = -1;
     ps->prevFPS = -1;
 
     ps->old_bitrate = -1;
@@ -57,7 +56,7 @@ int profile_apply_fec(profile_state_t *ps, int new_fec_k, int new_fec_n) {
     snprintf(strFecK, sizeof(strFecK), "%d", new_fec_k);
     snprintf(strFecN, sizeof(strFecN), "%d", new_fec_n);
     const char *fecValues[] = { strFecK, strFecN };
-    cmd_format(fecCommand, sizeof(fecCommand), cfg->fecCommandTemplate, 2, fecKeys, fecValues);
+    cmd_format(fecCommand, sizeof(fecCommand), cfg->fecCommandTemplate, 2, fecKeys, fecValues, cfg->log_level);
     int result = cmd_exec_with_timeout(ps->cmd, fecCommand);
     if (result != 0) {
         ERROR_LOG(ps->cfg, "FEC command failed: %s\n", fecCommand);
@@ -113,7 +112,7 @@ int profile_apply_api_batch(const alink_config_t *cfg,
     const char *keys[] = { "bitrate", "gop", "roiQp" };
     const char *values[] = { bitrateStr, gopStr, roiQpStr };
 
-    cmd_format(path, sizeof(path), cfg->apiCommandTemplate, 3, keys, values);
+    cmd_format(path, sizeof(path), cfg->apiCommandTemplate, 3, keys, values, cfg->log_level);
 
     /* Parse the URL to extract host, port, and path */
     char host[64];
@@ -143,7 +142,7 @@ static void apply_fps_step(profile_state_t *ps, int currentFPS) {
     snprintf(strFPS, sizeof(strFPS), "%d", currentFPS);
     const char *keys[] = { "fps" };
     const char *values[] = { strFPS };
-    cmd_format(fpsCommand, sizeof(fpsCommand), cfg->fpsCommandTemplate, 1, keys, values);
+    cmd_format(fpsCommand, sizeof(fpsCommand), cfg->fpsCommandTemplate, 1, keys, values, cfg->log_level);
 
     DEBUG_LOG(cfg, "FPS: %d -> %d\n", ps->prevFPS, currentFPS);
     if (cmd_exec_with_timeout(ps->cmd, fpsCommand) != 0) {
@@ -154,27 +153,27 @@ static void apply_fps_step(profile_state_t *ps, int currentFPS) {
 
 static void apply_power_step(profile_state_t *ps, int finalPower) {
     alink_config_t *cfg = ps->cfg;
-    if (!cfg->allow_set_power || finalPower == ps->prevWfbPower) return;
+    if (!cfg->allow_set_power || finalPower == ps->prevApplied.wfbPower) return;
 
     char powerCommand[MAX_COMMAND_SIZE];
     char strPower[10];
     snprintf(strPower, sizeof(strPower), "%d", finalPower);
     const char *keys[] = { "power" };
     const char *values[] = { strPower };
-    cmd_format(powerCommand, sizeof(powerCommand), cfg->powerCommandTemplate, 1, keys, values);
+    cmd_format(powerCommand, sizeof(powerCommand), cfg->powerCommandTemplate, 1, keys, values, cfg->log_level);
 
-    DEBUG_LOG(cfg, "Power: %d -> %d\n", ps->prevWfbPower, finalPower);
+    DEBUG_LOG(cfg, "Power: %d -> %d\n", ps->prevApplied.wfbPower, finalPower);
     if (cmd_exec_with_timeout(ps->cmd, powerCommand) != 0) {
         ERROR_LOG(cfg, "Power command failed: %s\n", powerCommand);
     }
-    ps->prevWfbPower = finalPower;
+    ps->prevApplied.wfbPower = finalPower;
 }
 
 static void apply_mcs_step(profile_state_t *ps, const char *currentSetGI,
                            int currentSetMCS, int currentBandwidth) {
-    if (strcmp(currentSetGI, ps->prevSetGI) == 0 &&
-        currentSetMCS == ps->prevSetMCS &&
-        currentBandwidth == ps->prevBandwidth) {
+    if (strcmp(currentSetGI, ps->prevApplied.setGI) == 0 &&
+        currentSetMCS == ps->prevApplied.setMCS &&
+        currentBandwidth == ps->prevApplied.bandwidth) {
         return;
     }
 
@@ -189,40 +188,40 @@ static void apply_mcs_step(profile_state_t *ps, const char *currentSetGI,
     snprintf(strMcs, sizeof(strMcs), "%d", currentSetMCS);
     const char *keys[] = { "bandwidth", "gi", "stbc", "ldpc", "mcs" };
     const char *values[] = { strBandwidth, strGI, strStbc, strLdpc, strMcs };
-    cmd_format(mcsCommand, sizeof(mcsCommand), cfg->mcsCommandTemplate, 5, keys, values);
+    cmd_format(mcsCommand, sizeof(mcsCommand), cfg->mcsCommandTemplate, 5, keys, values, cfg->log_level);
 
     DEBUG_LOG(cfg, "MCS: %d -> %d, GI: %s -> %s, BW: %d -> %d\n",
-              ps->prevSetMCS, currentSetMCS, ps->prevSetGI, currentSetGI,
-              ps->prevBandwidth, currentBandwidth);
+              ps->prevApplied.setMCS, currentSetMCS, ps->prevApplied.setGI, currentSetGI,
+              ps->prevApplied.bandwidth, currentBandwidth);
     if (cmd_exec_with_timeout(ps->cmd, mcsCommand) != 0) {
         ERROR_LOG(cfg, "MCS command failed: %s\n", mcsCommand);
     }
-    ps->prevBandwidth = currentBandwidth;
-    strncpy(ps->prevSetGI, currentSetGI, sizeof(ps->prevSetGI) - 1);
-    ps->prevSetGI[sizeof(ps->prevSetGI) - 1] = '\0';
-    ps->prevSetMCS = currentSetMCS;
+    ps->prevApplied.bandwidth = currentBandwidth;
+    strncpy(ps->prevApplied.setGI, currentSetGI, sizeof(ps->prevApplied.setGI) - 1);
+    ps->prevApplied.setGI[sizeof(ps->prevApplied.setGI) - 1] = '\0';
+    ps->prevApplied.setMCS = currentSetMCS;
 }
 
 static void apply_fec_step(profile_state_t *ps, int currentSetFecK, int currentSetFecN) {
-    if (currentSetFecK == ps->prevSetFecK && currentSetFecN == ps->prevSetFecN) return;
+    if (currentSetFecK == ps->prevApplied.setFecK && currentSetFecN == ps->prevApplied.setFecN) return;
 
     DEBUG_LOG(ps->cfg, "FEC: %d/%d -> %d/%d\n",
-              ps->prevSetFecK, ps->prevSetFecN, currentSetFecK, currentSetFecN);
+              ps->prevApplied.setFecK, ps->prevApplied.setFecN, currentSetFecK, currentSetFecN);
     if (profile_apply_fec(ps, currentSetFecK, currentSetFecN) != 0) {
         ERROR_LOG(ps->cfg, "Failed to apply FEC settings\n");
     }
-    ps->prevSetFecK = currentSetFecK;
-    ps->prevSetFecN = currentSetFecN;
+    ps->prevApplied.setFecK = currentSetFecK;
+    ps->prevApplied.setFecN = currentSetFecN;
 }
 
 static void apply_api_step(profile_state_t *ps, int currentSetBitrate, float currentSetGop) {
-    if (currentSetBitrate == ps->prevSetBitrate && currentSetGop == ps->prevSetGop) return;
+    if (currentSetBitrate == ps->prevApplied.setBitrate && currentSetGop == ps->prevApplied.setGop) return;
 
     DEBUG_LOG(ps->cfg, "Bitrate: %d -> %d, GOP: %.1f -> %.1f\n",
-              ps->prevSetBitrate, currentSetBitrate, ps->prevSetGop, currentSetGop);
+              ps->prevApplied.setBitrate, currentSetBitrate, ps->prevApplied.setGop, currentSetGop);
     if (profile_apply_api_batch(ps->cfg, currentSetBitrate, currentSetGop, ps->cmd) == 0) {
-        ps->prevSetBitrate = currentSetBitrate;
-        ps->prevSetGop = currentSetGop;
+        ps->prevApplied.setBitrate = currentSetBitrate;
+        ps->prevApplied.setGop = currentSetGop;
     } else {
         ERROR_LOG(ps->cfg, "API batch command failed\n");
     }
@@ -327,10 +326,6 @@ void profile_apply(profile_state_t *ps, Profile *profile, void *osd_ptr) {
  */
 void profile_apply_direct(profile_state_t *ps, const Profile *profile,
                           int profile_index, void *osd_ptr) {
-    /* Store latest profile for re-application (cmd_server power changes) */
-    ps->lastAppliedProfile = *profile;
-    ps->hasAppliedProfile = true;
-
     /* Skip dispatch if the same profile is already active — the GS sends
      * the current profile on every tick for UDP reliability, so most
      * messages are duplicates. */

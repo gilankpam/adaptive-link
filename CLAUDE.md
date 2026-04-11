@@ -67,7 +67,9 @@ Module structure:
 - **Channel caching**: WiFi channel cached for 5 seconds (reduces `iw` calls)
 - **Latest-job-wins**: Profile worker picks up new job immediately if one arrives during execution
 - **Native HTTP client**: Socket-based HTTP replaces curl subprocess for camera API
-- **Jitter measurement**: Inter-arrival jitter computed without clock sync requirement
+- **Jitter measurement**: Inter-arrival jitter computed without clock sync requirement (uses `CLOCK_MONOTONIC` so wall-clock steps can't poison the delta)
+- **O(1) RSSI rolling average**: `rssi_monitor.c` keeps a running sum per antenna and updates it incrementally (subtract evicted sample, add new) instead of re-summing the 20-entry ring on every received `RX_ANT` line
+- **Edge-triggered weak-antenna log**: The on-screen warning still renders every OSD tick, but the stdout `INFO_LOG` fires only on rising/falling edges — no more 5 lines/sec while the condition holds
 
 ### Profile System
 
@@ -100,6 +102,8 @@ Settings are applied via shell commands with placeholder substitution (`{mcs}`, 
 **API batching:** The `apiCommandTemplate` batches multiple camera parameters (qpDelta, bitrate, gop, roiQp) into a single HTTP request for efficiency.
 
 **Timeout execution:** All commands use `cmd_exec_with_timeout()` with millisecond-precision timeout via fork/exec. The legacy `cmd_exec()` and `cmd_exec_noquote()` functions have been removed.
+
+**Trust model:** Substituted values flow unescaped into `/bin/sh -c`. The GS is trusted; placeholder values originate from `_compute_profile()` and reference tables, not user input. Templates must come from operator-controlled `/etc/alink.conf` — a malicious config file is equivalent to shell access. The `customOSD` field is the one exception: it feeds a runtime `snprintf`, so `customosd_format_is_safe()` in `config.c` rejects anything but `%d`/`%i`/`%%` and caps the spec count at 2, closing format-string injection. `replace_placeholder()` checks its post-substitution length against `MAX_COMMAND_SIZE` and logs + aborts on overflow instead of silently truncating.
 
 ### Ground Station Algorithm
 
@@ -146,6 +150,10 @@ The `TelemetryLogger` class provides ML-ready data collection:
 - System commands executed via `cmd_exec_with_timeout()` (fork/exec with timeout) after template placeholder substitution
 - Legacy `cmd_exec()` and `cmd_exec_noquote()` removed in favor of timeout-based execution
 - HTTP requests use native socket-based client (`http_client.c`) instead of curl
+- Config parsing is **table-driven** in `config.c`: `CONFIG_KEYS[]` maps key name → struct offset → type tag (`CT_INT`/`CT_BOOL`/`CT_FLOAT`/`CT_STR`/`CT_LOGLEVEL`/`CT_OSDFMT`), dispatched through `apply_config_entry()`. Adding a new config field is a one-line table insert, not a new `else if` arm
+- `profile_state_t.prevApplied` is a full `Profile` struct — delta-detection code in `apply_*_step` compares against `ps->prevApplied.field` directly, and adding a new profile field automatically gets a "previous" slot
+- Thread-called tokenizers use `strtok_r` (never `strtok`) to stay reentrant — `config_load`, `message.c` parsers, and URL parsing are all reentrant-safe
+- Cross-thread flags are declared `volatile` (not `_Atomic` — C99 doesn't have it); all compound state transitions are serialized under a mutex
 - Compiled with `-Wall -Wextra -Werror`
 - Unity test framework for C unit tests in `drone/test/`
 - Python test suite for GS in `ground-station/test/`
@@ -189,7 +197,7 @@ Sanity bounds: sub-millisecond on wired loopback, single-digit ms on a healthy w
 
 ### Frame bound check (drone parser)
 
-The drone recv loop in `main.c` validates the 4-byte length prefix before dereferencing: rejects datagrams shorter than the prefix, rejects `msg_length == 0` or `msg_length > received - 4`, and null-terminates at `buffer[sizeof(uint32_t) + msg_length]` so downstream `strtok`/`strncmp` can't run past the declared payload. Defensive only — wfb-ng is trusted — but catches truncation and buggy senders cleanly.
+The drone recv loop in `main.c` validates the 4-byte length prefix before dereferencing: rejects datagrams shorter than the prefix, rejects `msg_length == 0` or `msg_length > received - 4`, and null-terminates at `buffer[sizeof(uint32_t) + msg_length]` so downstream `strtok_r`/`strncmp` can't run past the declared payload. `msg_process_profile` also takes an explicit `msg_len` and uses `strndup(msg, msg_len)` rather than `strdup`, so a malformed payload with no interior NUL can't over-read. Defensive only — wfb-ng is trusted — but catches truncation and buggy senders cleanly.
 
 ### RTT echoed on `P:` for drone-side display
 

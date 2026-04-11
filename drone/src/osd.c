@@ -97,6 +97,11 @@ void *osd_thread_func(void *arg) {
         }
     }
 
+    /* Edge-triggered weak-antenna logging: the on-screen warning fires every
+     * tick (correct), but the stdout line only fires when the boolean flips,
+     * so the log isn't flooded with 5 lines/sec while the condition holds. */
+    bool prev_weak_antenna = false;
+
     while (true) {
         usleep(OSD_REFRESH_INTERVAL_US);
 
@@ -109,12 +114,18 @@ void *osd_thread_func(void *arg) {
              ks->total_requests,
              wfb_ch);
 
-        if (rssi_get_weak_antenna(rs)) {
+        bool weak_antenna = rssi_get_weak_antenna(rs);
+        if (weak_antenna) {
             strncat(os->extra_stats,
                     "\nPersistent VTX antenna mismatch >= 20dB detected! Check antennas...",
                     sizeof(os->extra_stats) - strlen(os->extra_stats) - 1);
-            INFO_LOG(cfg, "Weak drone antenna detected!\n");
         }
+        if (weak_antenna && !prev_weak_antenna) {
+            INFO_LOG(cfg, "Weak drone antenna detected!\n");
+        } else if (!weak_antenna && prev_weak_antenna) {
+            INFO_LOG(cfg, "Drone antenna recovered.\n");
+        }
+        prev_weak_antenna = weak_antenna;
 
         os->set_osd_colour = (ps->currentProfile == -1) ? 2 : 3;
 

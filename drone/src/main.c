@@ -17,6 +17,7 @@
 #include "tx_monitor.h"
 #include "message.h"
 #include "fallback.h"
+#include <signal.h>
 
 typedef struct {
     alink_config_t cfg;
@@ -51,6 +52,10 @@ static void print_usage(void) {
 int main(int argc, char *argv[]) {
     static alink_daemon_t daemon;
 
+    /* A closing HTTP peer (majestic restart, OOM) would otherwise deliver
+     * SIGPIPE on the next send() and kill the daemon. Convert to EPIPE. */
+    signal(SIGPIPE, SIG_IGN);
+
     /* Initialize subsystems with defaults */
     config_set_defaults(&daemon.cfg);
     hw_init(&daemon.hw);
@@ -81,7 +86,8 @@ int main(int argc, char *argv[]) {
         if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
             port = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--ip") == 0 && i + 1 < argc) {
-            strncpy(ip, argv[++i], INET_ADDRSTRLEN);
+            strncpy(ip, argv[++i], INET_ADDRSTRLEN - 1);
+            ip[INET_ADDRSTRLEN - 1] = '\0';
         } else if (strcmp(argv[i], "--log-level") == 0 && i + 1 < argc) {
             const char* level = argv[++i];
             if (strcmp(level, "debug") == 0) daemon.cfg.log_level = LOG_LEVEL_DEBUG;
@@ -290,7 +296,7 @@ int main(int argc, char *argv[]) {
                                  &daemon.hw, daemon.sockfd, &client_addr);
                 continue;   /* handshake is NOT a heartbeat — do not touch message_count */
             }
-            msg_process(&daemon.ms, message);
+            msg_process(&daemon.ms, message, msg_length);
         } else if (activity < 0) {
             ERROR_LOG(&daemon.cfg, "select failed\n");
             break;

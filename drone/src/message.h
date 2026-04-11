@@ -38,7 +38,7 @@ void msg_init(msg_state_t *ms, profile_state_t *ps, keyframe_state_t *ks,
               osd_state_t *osd, alink_config_t *cfg,
               const cmd_ctx_t *cmd);
 
-void msg_process(msg_state_t *ms, const char *msg);
+void msg_process(msg_state_t *ms, const char *msg, size_t msg_len);
 
 int msg_handle_hello(const char *payload, size_t payload_len,
                      hw_state_t *hw, int sockfd,

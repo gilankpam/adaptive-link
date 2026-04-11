@@ -35,8 +35,6 @@
 
 /* ─── File paths ─── */
 #define CONFIG_FILE              "/etc/alink.conf"
-#define WFB_YAML                 "/etc/wfb.yaml"
-#define WIFI_ADAPTERS_YAML       "/etc/wlan_adapters.yaml"
 
 /* ─── Timing defaults ─── */
 #define DEFAULT_PACE_EXEC_MS  20

@@ -255,13 +255,29 @@ int main(int argc, char *argv[]) {
             daemon.message_count++;
             pthread_mutex_unlock(&daemon.count_mutex);
 
-            /* Null-terminate the received data */
-            buffer[n] = '\0';
+            /* Reject any datagram too short to contain even the length prefix. */
+            if ((size_t)n < sizeof(uint32_t)) {
+                ERROR_LOG(&daemon.cfg, "bad frame: short datagram (%d bytes)\n", n);
+                continue;
+            }
 
             /* Extract the length of the message (first 4 bytes) */
             uint32_t msg_length;
             memcpy(&msg_length, buffer, sizeof(msg_length));
             msg_length = ntohl(msg_length);
+
+            /* Bound-check declared length against bytes actually received.
+             * Catches truncation and buggy/malformed senders before downstream
+             * strncmp/strtok can run past the real payload. */
+            if (msg_length == 0 ||
+                msg_length > (uint32_t)(n - (int)sizeof(uint32_t))) {
+                ERROR_LOG(&daemon.cfg, "bad frame: declared=%u recv=%d\n", msg_length, n);
+                continue;
+            }
+
+            /* Null-terminate at the end of the declared payload, not the end
+             * of the recv buffer — keeps downstream parsers inside the frame. */
+            buffer[sizeof(uint32_t) + msg_length] = '\0';
 
             if (daemon.cfg.log_level >= LOG_LEVEL_DEBUG) {
                 INFO_LOG(&daemon.cfg, "Received message (%u bytes): %s\n", msg_length, buffer + sizeof(msg_length));

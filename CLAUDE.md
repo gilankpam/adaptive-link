@@ -153,16 +153,53 @@ The `TelemetryLogger` class provides ML-ready data collection:
 
 ## Handshake Mechanism
 
-The GS and drone exchange handshake messages to synchronize state:
+The GS and drone exchange handshake messages to obtain current video parameters (fps/res) and measure link RTT without needing clock sync:
 
-- **`H:<t1>`** (GS → drone): GS sends timestamp `t1` (milliseconds since epoch)
+- **`H:<t1>`** (GS → drone): GS sends timestamp `t1` (milliseconds since its own clock).
 - **`I:<t1>:<t2>:<t3>:<fps>:<x_res>:<y_res>`** (drone → GS): Drone replies with:
-  - `t1`: Echo of GS timestamp
-  - `t2`: Drone receive timestamp
-  - `t3`: Drone send timestamp  
-  - `fps`, `x_res`, `y_res`: Camera video parameters
+  - `t1`: Echo of GS timestamp (freshness check — must match the outstanding hello).
+  - `t2`: Drone receive timestamp (stamped first thing in `msg_handle_hello`).
+  - `t3`: Drone send timestamp (stamped just before `sendto`).
+  - `fps`, `x_res`, `y_res`: Camera video parameters, refreshed on every hello (see below).
 
-The handshake resyncs every 30 seconds (configurable via `resync_interval_s`). The GS uses the handshake to obtain the current video FPS for accurate FEC calculation.
+### Two-stage timer (fast retry + long resync)
+
+`HandshakeClient` in `alink_gs` runs a two-stage timer:
+- **Long resync** (default `resync_interval_s = 30`): the happy-path cadence between full successful handshakes.
+- **Fast retry** (`fast_retry_ms`, default 500 ms): if the expected `I:` doesn't arrive within the short window, retry up to `max_fast_retries` (default 3) before backing off to the long interval.
+
+The client tracks `_pending_t1` for the outstanding hello. Only replies whose echoed `t1` matches the latest pending hello are accepted; anything else bumps `unmatched_replies` and is dropped (catches duplicates/stale datagrams). Result: a single lost hello/reply recovers in <1 s instead of 30 s. `_drain_handshake_replies` runs unconditionally from the main loop (not gated on `receiving_video`) so replies don't rot in the kernel buffer during a video stall.
+
+### Camera info refreshed on every hello
+
+The drone re-queries camera FPS/resolution via `hw_refresh_camera_info()` inside `msg_handle_hello` (between the `t2` and `t3` stamps). A 2-second TTL cache coalesces bursts during fast retries. This fixes the silent-staleness bug where a runtime camera reconfig would leave the GS sizing FEC for the boot-time FPS forever.
+
+### RTT (clock-offset-cancelling)
+
+The drone clock is **never** synchronized with the GS clock (no NTP, independent boots). Any naive form like `t2 - t1` mixes clocks and leaks the unbounded offset. Instead the GS computes:
+
+```
+rtt_ms = (gs_recv_ms - t1) - (t3 - t2)
+          └── GS clock ──┘    └─ drone clock ─┘
+```
+
+Each subtraction stays on a single clock, so the clock offset cancels. `(t3 - t2)` accounts for drone-side work (including the camera re-query) and is subtracted from the wall round trip, leaving the on-wire RTT. `HandshakeClient._update_rtt()` keeps `last_rtt_ms` and an EMA `avg_rtt_ms` (alpha 0.2), drops negative samples (`rtt_invalid_count`), and surfaces the number on both the GS console and the drone OSD.
+
+Sanity bounds: sub-millisecond on wired loopback, single-digit ms on a healthy wfb-ng link. Hundreds of ms on a working link means clocks got mixed somewhere — treat as a bug, not a measurement.
+
+### Frame bound check (drone parser)
+
+The drone recv loop in `main.c` validates the 4-byte length prefix before dereferencing: rejects datagrams shorter than the prefix, rejects `msg_length == 0` or `msg_length > received - 4`, and null-terminates at `buffer[sizeof(uint32_t) + msg_length]` so downstream `strtok`/`strncmp` can't run past the declared payload. Defensive only — wfb-ng is trusted — but catches truncation and buggy senders cleanly.
+
+### RTT echoed on `P:` for drone-side display
+
+`P:` profile messages are append-only; the final field is now `rtt_ms`:
+
+```
+P:<idx>:<gi>:<mcs>:<fec_k>:<fec_n>:<bitrate>:<gop>:<power>:<bandwidth>:<gs_timestamp_ms>:<rtt_ms>
+```
+
+`-1` is the "no sample yet" sentinel. The drone parser's existing `default: break;` makes this fully backward-compatible. The drone OSD renders `jit:Xms rtt:Yms res:Zp` on line 6 when `rtt_ms >= 0`, otherwise falls back to the old `jit:Xms res:Zp`. RTT is **not** used for drone-side decisions — display only.
 
 ## Testing
 

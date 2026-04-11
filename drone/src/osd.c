@@ -25,6 +25,7 @@ void osd_init(osd_state_t *os) {
     strncpy(os->extra_stats, "initializing...", sizeof(os->extra_stats));
     strncpy(os->score_related, "initializing...", sizeof(os->score_related));
     os->jitter_ms = 0;
+    os->rtt_ms = -1;
     os->set_osd_font_size = 20;
     os->set_osd_colour = 7;
 
@@ -145,9 +146,16 @@ void *osd_thread_func(void *arg) {
             /* Line 5: extra stats */
             osd_off += snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off, "\n%s%s",
                     pos_prefix, os->extra_stats);
-            /* Line 6: jitter + resolution */
-            osd_off += snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off, "\n%sjit:%ums res:%dp",
-                    pos_prefix, os->jitter_ms, hw->y_res);
+            /* Line 6: jitter + rtt (if available) + resolution */
+            if (os->rtt_ms >= 0) {
+                osd_off += snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off,
+                        "\n%sjit:%ums rtt:%dms res:%dp",
+                        pos_prefix, os->jitter_ms, os->rtt_ms, hw->y_res);
+            } else {
+                osd_off += snprintf(full_osd_string + osd_off, sizeof(full_osd_string) - osd_off,
+                        "\n%sjit:%ums res:%dp",
+                        pos_prefix, os->jitter_ms, hw->y_res);
+            }
         } else if (cfg->osd_level == 4) {
             snprintf(full_osd_string, sizeof(full_osd_string), "%s%s %s | %s | %s | %s | %s",
                     pos_prefix, os->profile, os->profile_fec, local_regular_osd, os->score_related, os->gs_stats, os->extra_stats);

@@ -48,6 +48,7 @@ bool keyframe_fire_request(keyframe_state_t *ks, const alink_config_t *cfg, cons
     (void)ks; (void)cfg; (void)cmd;
     return false;
 }
+void hw_refresh_camera_info(hw_state_t *hw) { (void)hw; }
 
 void setUp(void) {
     mock_sendto_called = 0;
@@ -98,10 +99,59 @@ void test_handle_hello_forward_compat(void) {
     TEST_ASSERT_EQUAL(0, ret);
 }
 
+/* Build a minimal msg_state_t pointing at a local osd for msg_process tests. */
+static void init_ms_for_profile(msg_state_t *ms, osd_state_t *osd, alink_config_t *cfg) {
+    memset(ms, 0, sizeof(*ms));
+    memset(osd, 0, sizeof(*osd));
+    memset(cfg, 0, sizeof(*cfg));
+    osd->rtt_ms = -1;
+    ms->osd = osd;
+    ms->cfg = cfg;
+    ms->jitter_first_sample = true;
+    ms->gs_connected = true;
+}
+
+void test_process_profile_parses_rtt_field(void) {
+    msg_state_t ms;
+    osd_state_t osd;
+    alink_config_t cfg;
+    init_ms_for_profile(&ms, &osd, &cfg);
+
+    /* P:<idx>:<GI>:<MCS>:<FecK>:<FecN>:<Bitrate>:<GOP>:<Power>:<BW>:<ts>:<rtt> */
+    msg_process(&ms, "P:0:LONG:1:10:15:8000:1:50:20:1700000000000:42");
+    TEST_ASSERT_EQUAL_INT32(42, osd.rtt_ms);
+}
+
+void test_process_profile_backward_compat_no_rtt(void) {
+    msg_state_t ms;
+    osd_state_t osd;
+    alink_config_t cfg;
+    init_ms_for_profile(&ms, &osd, &cfg);
+
+    /* Old 10-field format (no rtt_ms) — must not crash, rtt stays at sentinel. */
+    msg_process(&ms, "P:0:LONG:1:10:15:8000:1:50:20:1700000000000");
+    TEST_ASSERT_EQUAL_INT32(-1, osd.rtt_ms);
+}
+
+void test_process_profile_negative_rtt_leaves_sentinel(void) {
+    msg_state_t ms;
+    osd_state_t osd;
+    alink_config_t cfg;
+    init_ms_for_profile(&ms, &osd, &cfg);
+
+    /* -1 from GS means "no sample yet" — drone must leave rtt_ms untouched. */
+    osd.rtt_ms = 77;  /* seed with a known good value */
+    msg_process(&ms, "P:0:LONG:1:10:15:8000:1:50:20:1700000000000:-1");
+    TEST_ASSERT_EQUAL_INT32(77, osd.rtt_ms);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_handle_hello_valid);
     RUN_TEST(test_handle_hello_malformed);
     RUN_TEST(test_handle_hello_forward_compat);
+    RUN_TEST(test_process_profile_parses_rtt_field);
+    RUN_TEST(test_process_profile_backward_compat_no_rtt);
+    RUN_TEST(test_process_profile_negative_rtt_leaves_sentinel);
     return UNITY_END();
 }

@@ -9,6 +9,7 @@
 #include "message.h"
 #include "util.h"
 #include "command.h"
+#include "hardware.h"
 #include <time.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -34,8 +35,14 @@ void msg_init(msg_state_t *ms, profile_state_t *ps, keyframe_state_t *ks,
 }
 
 int msg_handle_hello(const char *payload, size_t payload_len,
-                     const hw_state_t *hw, int sockfd,
+                     hw_state_t *hw, int sockfd,
                      const struct sockaddr_in *client_addr) {
+    /* Stamp t2 first thing — both t2 and t3 must be on the drone clock so
+     * (t3 - t2) measures drone-side processing only. The GS subtracts that
+     * from its own (gs_recv - t1) to recover the on-wire RTT, regardless of
+     * how far the GS and drone wall clocks differ. */
+    long t2 = util_now_ms();
+
     /* Copy to a NUL-terminated local buffer so strtoll works cleanly. */
     char buf[64];
     if (payload_len == 0 || payload_len >= sizeof(buf)) {
@@ -51,11 +58,18 @@ int msg_handle_hello(const char *payload, size_t payload_len,
         return -1;
     }
 
-    long t2 = util_now_ms();
+    /* Pick up runtime camera reconfigs (FPS/resolution) within the cache TTL.
+     * Any latency this introduces is captured between t2 and t3 and removed
+     * from the GS's RTT calculation. */
+    hw_refresh_camera_info(hw);
 
-    /* Build the reply. T3 is stamped just before sendto. */
-    char reply_payload[128];
+    /* Stamp t3 as late as possible while still embeddable in the payload.
+     * Snprintf/memcpy/frame-build cost is ~µs and falls outside (t3 - t2);
+     * the GS will see it as part of the on-wire RTT, which is fine — it's
+     * far below the noise floor of a wireless link. */
     long t3 = util_now_ms();
+
+    char reply_payload[128];
     int n = snprintf(reply_payload, sizeof(reply_payload),
                      "I:%lld:%ld:%ld:%d:%d:%d",
                      t1, t2, t3,
@@ -64,7 +78,6 @@ int msg_handle_hello(const char *payload, size_t payload_len,
         return -1;
     }
 
-    /* Frame with 4-byte BE length prefix. */
     uint8_t frame[4 + sizeof(reply_payload)];
     uint32_t plen_be = htonl((uint32_t)n);
     memcpy(frame, &plen_be, 4);
@@ -133,6 +146,7 @@ static void msg_process_profile(msg_state_t *ms, const char *msg) {
 
     int profile_index = 0;
     uint64_t gs_timestamp_ms = 0;
+    int32_t rtt_ms = -1;
 
     char *msgCopy = strdup(msg);
     if (msgCopy == NULL) {
@@ -176,6 +190,9 @@ static void msg_process_profile(msg_state_t *ms, const char *msg) {
             case 9:
                 gs_timestamp_ms = strtoull(token, NULL, 10);
                 break;
+            case 10:
+                rtt_ms = (int32_t)atoi(token);
+                break;
             default:
                 break;
         }
@@ -187,6 +204,14 @@ static void msg_process_profile(msg_state_t *ms, const char *msg) {
 
     /* Update inter-arrival jitter display from GS/drone timestamps */
     msg_update_jitter(ms, gs_timestamp_ms);
+
+    /* RTT is computed on the GS (from H:/I: handshake t2/t3 deltas) and
+     * echoed back here purely for display. -1 is the "no sample yet"
+     * sentinel; leave the OSD field untouched in that case so the render
+     * path can suppress the suffix. */
+    if (rtt_ms >= 0) {
+        ms->osd->rtt_ms = rtt_ms;
+    }
 
     /* Clear init placeholder text on first profile message */
     if (!ms->gs_connected) {

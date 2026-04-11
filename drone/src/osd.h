@@ -25,6 +25,7 @@ typedef struct {
     char extra_stats[256];
     char score_related[64];
     uint32_t jitter_ms;           /* Jitter in milliseconds */
+    int32_t rtt_ms;               /* GS-computed handshake RTT in ms (-1 = no sample yet) */
     int set_osd_font_size;
     int set_osd_colour;
     

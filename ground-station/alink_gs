@@ -128,7 +128,7 @@ class TelemetryLogger:
             all_packets, lost_packets, fec_rec_packets, fec_k, fec_n,
             loss_rate, fec_pressure, snr_ema, snr_slope,
             margin_current, margin_target, emergency,
-            profile, profile_changed, adapter_id='default'):
+            profile, profile_changed, adapter_id='default', rtt_ms=None):
         record = {
             'ts': timestamp_ms,
             'rssi': best_rssi,
@@ -150,6 +150,8 @@ class TelemetryLogger:
             'changed': profile_changed,
             'adapter': adapter_id,
         }
+        if rtt_ms is not None:
+            record['rtt_ms'] = round(rtt_ms, 2)
         if profile is not None:
             record['mcs'] = profile['mcs']
             record['gi'] = profile['gi']
@@ -229,11 +231,21 @@ class TelemetryLogger:
 
 class HandshakeClient:
     """Handshake client for obtaining drone FPS and resolution.
-    
-    Simplified version that only tracks FPS/resolution for FEC calculation,
-    without latency/clock-sync functionality.
+
+    Two-stage timer:
+      - On the happy path, one H: probe per long_resync_ms (~30s).
+      - On reply loss, retry every fast_retry_ms (~500ms) up to
+        max_fast_retries times before giving up and waiting for the next
+        long resync.
+
+    Replies are matched against the t1 of the most recent in-flight hello;
+    stale or duplicate replies (e.g. drained from the kernel buffer after a
+    stall) are dropped without touching FPS/resolution state. The match is a
+    freshness gate, not authentication — the wfb-ng tunnel is trusted.
     """
-    def __init__(self, udp_socket, drone_ip, drone_port, default_fps=90, retry_interval_ms=500):
+    def __init__(self, udp_socket, drone_ip, drone_port, default_fps=90,
+                 long_resync_ms=30000, fast_retry_ms=500, max_fast_retries=3,
+                 rtt_ema_alpha=0.2):
         self.sock = udp_socket
         self.drone_ip = drone_ip
         self.drone_port = drone_port
@@ -241,29 +253,83 @@ class HandshakeClient:
         self.drone_fps = None
         self.drone_xres = None
         self.drone_yres = None
-        self._last_hello_ms = 0
-        self._retry_interval_ms = retry_interval_ms
+
+        self._long_resync_ms = long_resync_ms
+        self._fast_retry_ms = fast_retry_ms
+        self._max_fast_retries = max_fast_retries
+
+        # Two-stage timer state
+        self._pending_t1 = None         # t1 of in-flight hello, or None
+        self._pending_sent_at_ms = 0    # when the in-flight hello was sent
+        self._fast_retry_count = 0      # retries used in current burst
+        self._next_hello_due_ms = 0     # next hello scheduled for (when idle)
+
+        # Visibility counter — replies that didn't match a pending hello.
+        self.unmatched_replies = 0
+
+        # RTT measurement (clock-offset-cancelling).
+        # rtt = (gs_recv_ms - t1) - (t3 - t2). Both subtractions stay on a
+        # single clock, so the unbounded GS↔drone clock offset never enters.
+        self.last_rtt_ms = None
+        self.avg_rtt_ms = None
+        self._rtt_ema_alpha = rtt_ema_alpha
+        self.rtt_invalid_count = 0  # negative/oversized RTT (clock anomaly)
+
+    def force_resync(self):
+        """Reset the timer so the next tick() sends a hello immediately.
+
+        Used by callers (e.g. on video-stream return) to short-circuit the
+        long resync interval and re-handshake right away.
+        """
+        self._pending_t1 = None
+        self._fast_retry_count = 0
+        self._next_hello_due_ms = 0
 
     def tick(self, now_ms):
-        """Call once per main-loop iteration. Sends handshake requests periodically."""
-        if now_ms - self._last_hello_ms > self._retry_interval_ms:
+        """Call once per main-loop iteration. Drives both stages of the timer."""
+        if self._pending_t1 is not None:
+            # Awaiting a reply — fire fast retry if window expired.
+            if now_ms - self._pending_sent_at_ms >= self._fast_retry_ms:
+                if self._fast_retry_count < self._max_fast_retries:
+                    self._fast_retry_count += 1
+                    self._send_hello(now_ms)
+                else:
+                    # Burst exhausted; back off until the next long resync.
+                    if verbose_mode:
+                        print(f"[HANDSHAKE] No reply after {self._max_fast_retries} retries, backing off")
+                    self._pending_t1 = None
+                    self._fast_retry_count = 0
+                    self._next_hello_due_ms = now_ms + self._long_resync_ms
+            return
+
+        if now_ms >= self._next_hello_due_ms:
+            self._fast_retry_count = 0
             self._send_hello(now_ms)
 
     def _send_hello(self, now_ms):
-        """Send an H: hello message to the drone."""
+        """Send an H: hello message to the drone and arm the pending state."""
         payload = f"H:{now_ms}".encode("ascii")
         frame = struct.pack("!I", len(payload)) + payload
         try:
             self.sock.sendto(frame, (self.drone_ip, self.drone_port))
-            self._last_hello_ms = now_ms
+            self._pending_t1 = now_ms
+            self._pending_sent_at_ms = now_ms
             if verbose_mode:
                 print(f"[HANDSHAKE] Sent H:{now_ms} to {self.drone_ip}:{self.drone_port}")
         except OSError as e:
             if verbose_mode:
                 print(f"[HANDSHAKE] Failed to send hello: {e}")
 
-    def handle_reply(self, payload_str):
-        """Feed an 'I:' payload to extract FPS and resolution."""
+    def handle_reply(self, payload_str, gs_recv_ms=None):
+        """Feed an 'I:' payload. Updates FPS/resolution iff t1 matches the
+        most recent in-flight hello; otherwise drops the reply silently and
+        bumps `unmatched_replies` for visibility.
+
+        If gs_recv_ms is provided, also computes the clock-offset-cancelling
+        RTT: (gs_recv_ms - t1) - (t3 - t2). Both terms subtract values on a
+        single clock, so the (unbounded) GS↔drone clock offset never appears
+        in the result.
+        """
         if not payload_str.startswith("I:"):
             if verbose_mode:
                 print(f"[HANDSHAKE] Invalid reply (not I:): {payload_str[:20]}")
@@ -275,6 +341,9 @@ class HandshakeClient:
             return False
         try:
             # t1, t2, t3, fps, xres, yres
+            t1 = int(parts[0])
+            t2 = int(parts[1])
+            t3 = int(parts[2])
             fps = int(parts[3])
             xres = int(parts[4])
             yres = int(parts[5])
@@ -282,15 +351,63 @@ class HandshakeClient:
             if verbose_mode:
                 print(f"[HANDSHAKE] Invalid reply (parse error): {payload_str}")
             return False
+
+        # Freshness gate: only accept the reply for the hello we're waiting on.
+        if self._pending_t1 is None or t1 != self._pending_t1:
+            self.unmatched_replies += 1
+            if verbose_mode:
+                print(f"[HANDSHAKE] Unmatched reply t1={t1} pending={self._pending_t1}")
+            return False
+
+        # Match — clear pending and schedule next hello at the long interval,
+        # measured from when we sent (not from now), to keep cadence stable.
+        self._next_hello_due_ms = self._pending_sent_at_ms + self._long_resync_ms
+        self._pending_t1 = None
+        self._fast_retry_count = 0
+
         self.drone_fps = fps
         self.drone_xres = xres
         self.drone_yres = yres
+
+        if gs_recv_ms is not None:
+            self._update_rtt(t1, t2, t3, gs_recv_ms)
+
         if verbose_mode:
-            print(f"[HANDSHAKE] Got drone info: fps={fps} res={xres}x{yres}")
+            print(f"[HANDSHAKE] Got drone info: fps={fps} res={xres}x{yres}"
+                  + (f" rtt={self.last_rtt_ms}ms" if self.last_rtt_ms is not None else ""))
         return True
+
+    def _update_rtt(self, t1, t2, t3, gs_recv_ms):
+        """Compute (gs_recv - t1) - (t3 - t2) and update last/avg RTT.
+
+        Drops obviously broken samples (negative RTT, drone-side processing
+        time longer than the round trip) — those indicate a clock anomaly
+        or a bug in the stamping path, not a real measurement.
+        """
+        rtt = (gs_recv_ms - t1) - (t3 - t2)
+        if rtt < 0 or t3 < t2:
+            self.rtt_invalid_count += 1
+            if verbose_mode:
+                print(f"[HANDSHAKE] Bogus RTT sample: rtt={rtt} "
+                      f"gs_recv-t1={gs_recv_ms - t1} t3-t2={t3 - t2}")
+            return
+        self.last_rtt_ms = rtt
+        if self.avg_rtt_ms is None:
+            self.avg_rtt_ms = float(rtt)
+        else:
+            a = self._rtt_ema_alpha
+            self.avg_rtt_ms = a * rtt + (1.0 - a) * self.avg_rtt_ms
 
     def get_fps(self):
         return self.drone_fps if self.drone_fps is not None else self._default_fps
+
+    def get_rtt_ms(self):
+        """Latest measured RTT in milliseconds, or None if never measured."""
+        return self.last_rtt_ms
+
+    def get_avg_rtt_ms(self):
+        """EMA-smoothed RTT in milliseconds, or None if never measured."""
+        return self.avg_rtt_ms
 
 
 class ProfileSelector:
@@ -662,12 +779,18 @@ class ProfileSelector:
 # ─── Message generation ──────────────────────────────────────────────────────
 
 def _drain_handshake_replies(sock, handshake):
-    """Drain all pending datagrams and feed 'I:' payloads to handshake."""
+    """Drain all pending datagrams and feed 'I:' payloads to handshake.
+
+    Stamps gs_recv_ms per-datagram (not once for the whole drain) so the RTT
+    calculation in handle_reply is anchored to the actual receive time of
+    each reply, not the start of the drain pass.
+    """
     while True:
         try:
             data, _addr = sock.recvfrom(1024)
         except BlockingIOError:
             return
+        gs_recv_ms = int(time.time() * 1000)
         if len(data) < 4:
             continue
         plen = struct.unpack("!I", data[:4])[0]
@@ -677,7 +800,7 @@ def _drain_handshake_replies(sock, handshake):
             payload = data[4:4 + plen].decode("utf-8")
         except UnicodeDecodeError:
             continue
-        handshake.handle_reply(payload)
+        handshake.handle_reply(payload, gs_recv_ms=gs_recv_ms)
 
 def send_udp(message):
     message_bytes = message.encode('utf-8')
@@ -697,6 +820,9 @@ def generate_profile_message(profile_idx, profile):
     """Generate a P: profile change message."""
     timestamp = int(time.time() * 1000)
 
+    avg_rtt = profile_selector.handshake.get_avg_rtt_ms()
+    rtt_field = str(int(round(avg_rtt))) if avg_rtt is not None else "-1"
+
     parts = [
         "P",
         str(profile_idx),
@@ -709,6 +835,7 @@ def generate_profile_message(profile_idx, profile):
         str(profile['power']),
         str(profile['bandwidth']),
         str(timestamp),
+        rtt_field,
     ]
 
     send_udp(":".join(parts))
@@ -763,12 +890,15 @@ def calculate_link():
     emergency = profile_selector._emergency_active()
 
     if verbose_mode:
+        rtt_ms = profile_selector.handshake.get_avg_rtt_ms()
+        rtt_str = f" | rtt:{rtt_ms:.0f}ms" if rtt_ms is not None else ""
         msg = (f"SNR_EMA: {profile_selector.snr_ema:.1f} | "
                f"margin[cur]: {margin_cur:+.1f}dB | "
                f"slope: {profile_selector._snr_slope:+.2f} | "
                f"RSSI: {best_rssi} | "
                f"loss: {profile_selector._current_loss_rate:.3f} | "
                f"fec_p: {profile_selector._current_fec_pressure:.2f}"
+               f"{rtt_str}"
                f"{' [EMERGENCY]' if emergency else ''}")
         print(msg)
 
@@ -800,6 +930,7 @@ def calculate_link():
             profile=profile,
             profile_changed=changed,
             adapter_id=telemetry_adapter_id,
+            rtt_ms=profile_selector.handshake.get_avg_rtt_ms(),
         )
 
     # Always send current profile — UDP is lossy, so repeating ensures
@@ -858,20 +989,25 @@ def handle_video_rx_stats(data):
     if receiving_video:
         if not video_rx_initial_message_printed:
             # Video stream just came back - force immediate handshake
-            handshake._last_hello_ms = 0
+            handshake.force_resync()
             print("\nReceiving video_rx stats\nWorking...")
             video_rx_initial_message_printed = True
-
         waiting_for_video_printed = False
-        now_ms = int(time.time() * 1000)
-        _drain_handshake_replies(udp_socket, handshake)
-        handshake.tick(now_ms)
-        calculate_link()
     else:
         video_rx_initial_message_printed = False
         if not waiting_for_video_printed:
             print("\nWaiting for video_rx stats...")
             waiting_for_video_printed = True
+
+    # Always drain handshake replies and tick, even during a video stall —
+    # otherwise replies rot in the kernel RX buffer and we lose fresh FPS
+    # data exactly when recovery would need it.
+    now_ms = int(time.time() * 1000)
+    _drain_handshake_replies(udp_socket, handshake)
+    handshake.tick(now_ms)
+
+    if receiving_video:
+        calculate_link()
 
 
 def process_data_line(line):
@@ -967,7 +1103,9 @@ if __name__ == "__main__":
     handshake = HandshakeClient(
         udp_socket, udp_ip, udp_port,
         default_fps=config.getint('dynamic', 'video_fps_default', fallback=90),
-        retry_interval_ms=config.getint('handshake', 'resync_interval_s', fallback=30) * 1000,
+        long_resync_ms=config.getint('handshake', 'resync_interval_s', fallback=30) * 1000,
+        fast_retry_ms=config.getint('handshake', 'fast_retry_ms', fallback=500),
+        max_fast_retries=config.getint('handshake', 'max_fast_retries', fallback=3),
     )
 
     # Initialize profile selector

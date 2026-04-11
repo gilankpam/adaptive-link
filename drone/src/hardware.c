@@ -7,6 +7,11 @@
 #include "util.h"
 #include "command.h"
 
+/* TTL for cached camera FPS/resolution (milliseconds).
+ * Coalesces handshake bursts so the camera CLI isn't hit per probe,
+ * while still picking up runtime camera reconfigs within ~2s. */
+#define CAMERA_INFO_CACHE_INTERVAL_MS 2000
+
 static int get_resolution_inner(hw_state_t *hw) {
     char resolution[32];
 
@@ -44,6 +49,7 @@ void hw_init(hw_state_t *hw) {
     hw->camera_bin[0] = '\0';
     hw->tx_dropped_initialized = false;
     hw->global_total_tx_dropped = 0;
+    hw->camera_info_cache_time = 0;
 }
 
 void hw_load_vtx_info(hw_state_t *hw) {
@@ -134,6 +140,22 @@ int hw_get_video_fps(hw_state_t *hw) {
 
     pclose(pipe);
     return fps;
+}
+
+void hw_refresh_camera_info(hw_state_t *hw) {
+    uint64_t now = util_now_ms();
+    if (hw->camera_info_cache_time != 0 &&
+        (now - hw->camera_info_cache_time) < CAMERA_INFO_CACHE_INTERVAL_MS) {
+        return;
+    }
+
+    int fps = hw_get_video_fps(hw);
+    if (fps >= 0) {
+        hw->global_fps = fps;
+    }
+    hw_get_resolution(hw);
+
+    hw->camera_info_cache_time = now;
 }
 
 void hw_read_wfb_status(int *k, int *n, int *stbc_val, int *ldpc, int *short_gi,

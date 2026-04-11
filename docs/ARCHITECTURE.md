@@ -427,7 +427,7 @@ The `ProfileSelector.select()` method runs the two-channel gate:
 The drone receives `P:` messages and applies profiles via `profile_apply_direct()`:
 
 ```
-1. Parse P: message (profile_idx, gi, mcs, fec_k, fec_n, bitrate, gop, power, roi_qp, bandwidth, qp_delta, timestamp, keyframe_code)
+1. Parse P: message (profile_idx, gi, mcs, fec_k, fec_n, bitrate, gop, power, bandwidth, gs_ts_ms, rtt_ms)
 
 2. Store as lastAppliedProfile (for re-application via command)
 
@@ -452,27 +452,26 @@ The drone receives `P:` messages and applies profiles via `profile_apply_direct(
 
 ### Jitter Measurement
 
-The drone measures **inter-arrival jitter** between GS messages without requiring clock synchronization. This is distinct from one-way latency - it measures the variation in message delivery intervals rather than absolute timing.
+The drone measures **inter-arrival jitter** between GS messages without requiring clock synchronization. This is distinct from RTT (see [Handshake Mechanism](#handshake-mechanism)) — jitter captures delivery-interval variability, RTT captures on-wire round-trip time.
 
 ```
-1. On each message arrival, record arrival timestamp (drone's CLOCK_MONOTONIC)
+1. For each P: message, extract the GS-side timestamp from the trailing field.
 
-2. For consecutive messages:
-   inter_arrival[i] = arrival_time[i] - arrival_time[i-1]
+2. Compute paired deltas on independent clocks so the GS↔drone offset cancels:
+   drone_delta = drone_recv_ms[i] - drone_recv_ms[i-1]    (drone clock)
+   gs_delta    = gs_send_ms[i]    - gs_send_ms[i-1]       (GS clock)
+   jitter      = |drone_delta - gs_delta|
 
-3. Compute jitter as average deviation from expected interval:
-   expected_interval = average(inter_arrival[])
-   jitter = average(|inter_arrival[i] - expected_interval|)
+3. Smooth with an EMA (alpha = 0.1) into avg_jitter_ms.
 
-4. Display jitter in OSD: "Jit: Xms"
+4. Display on OSD line 6 as "jit:Xms" alongside rtt (if available) and resolution.
 
 Benefits:
-- No clock sync required between GS and drone
-- Detects network congestion or GS CPU spikes
-- Helps diagnose timing issues in profile delivery
-
-Note: One-way latency measurement is not implemented. The inter-arrival jitter metric provides sufficient insight into link timing stability without the complexity of clock synchronization.
+- No clock sync required between GS and drone (only a same-clock delta from each side)
+- Detects network congestion, GS CPU spikes, radio retries
 ```
+
+**One-way latency** is mathematically impossible without a shared time source. Instead the handshake carries a clock-offset-cancelling RTT (see [Handshake Mechanism](#handshake-mechanism)) which is the only honest latency number available between unsynchronized clocks.
 
 ---
 
@@ -484,37 +483,73 @@ Note: One-way latency measurement is not implemented. The inter-arrival jitter m
 Wire format: <4-byte length (network byte order)><payload string>
 
 Profile message (P:):
-P:<profile_idx>:<gi>:<mcs>:<fec_k>:<fec_n>:<bitrate>:<gop>:<power>:<bandwidth>:<timestamp>
+P:<profile_idx>:<gi>:<mcs>:<fec_k>:<fec_n>:<bitrate>:<gop>:<power>:<bandwidth>:<gs_ts_ms>:<rtt_ms>
 
-Example: P:5:long:5:8:12:6000:10:3000:20:1700000000
+Example: P:5:long:5:8:12:6000:10:3000:20:1700000000:8
+
+  - gs_ts_ms: GS wall-clock timestamp in ms, used by the drone for paired-delta jitter
+  - rtt_ms:   GS-computed handshake RTT echoed back for drone OSD display; -1 = no sample yet.
+              Added as a trailing field; the drone parser's default: case makes this
+              backward-compatible with older GS builds.
 
 Handshake (H:):
-H:<timestamp_ms>                    # GS → drone: timestamp in milliseconds since epoch
+H:<t1>                              # GS → drone: t1 on GS clock (ms)
 
 Handshake reply (I:):
-I:<t1>:<t2>:<t3>:<fps>:<x_res>:<y_res>  # drone → GS: echo + timestamps + video params
+I:<t1>:<t2>:<t3>:<fps>:<x_res>:<y_res>  # drone → GS: echo + drone-clock t2/t3 + video params
 
 Keyframe request (K:):
-K:                                     # drone → GS: trigger keyframe request
+K:                                     # GS → drone: trigger keyframe request
+
+Frame bound check:
+The drone main.c recv loop rejects datagrams shorter than the 4-byte prefix,
+rejects msg_length==0 or msg_length > (received - 4), and null-terminates the
+buffer at the end of the DECLARED payload so downstream strtok/strncmp can't
+run past a truncated frame. Defensive only — wfb-ng is trusted — but catches
+buggy senders cleanly.
 ```
 
 The GS sends the current profile on every tick for UDP reliability. The drone skips application if the profile index matches the current profile.
 
 ### Handshake Mechanism
 
-The GS and drone exchange handshake messages to synchronize state and obtain video parameters:
+The handshake is a thin probe that fetches current camera parameters and measures on-wire RTT without requiring clock sync.
 
-1. **GS sends `H:<t1>`**: Timestamp `t1` in milliseconds since epoch
+**Flow:**
+
+1. **GS sends `H:<t1>`**: `t1` is the GS clock at send time.
 2. **Drone replies `I:<t1>:<t2>:<t3>:<fps>:<x_res>:<y_res>`**:
-   - `t1`: Echo of GS timestamp
-   - `t2`: Drone receive timestamp
-   - `t3`: Drone send timestamp
-   - `fps`, `x_res`, `y_res`: Camera video parameters from Majestic API
+   - `t1`: echoed back for freshness matching on the GS side
+   - `t2`: stamped *first* in `msg_handle_hello` (before any parsing work)
+   - `t3`: stamped *just before* `sendto` (after `hw_refresh_camera_info`)
+   - `fps`, `x_res`, `y_res`: re-queried from the camera API on each hello (via `hw_refresh_camera_info()` with a 2-second TTL cache to coalesce fast-retry bursts)
 
-The handshake resyncs every 30 seconds (configurable via `resync_interval_s`). The GS uses the handshake to:
-- Obtain current video FPS for accurate FEC calculation
-- Verify bidirectional UDP connectivity
-- Measure round-trip time (optional)
+**Two-stage timer (`HandshakeClient` in `alink_gs`):**
+
+- Happy path fires one hello every `resync_interval_s` (default 30 s).
+- On send, the client stores `_pending_t1` and starts a `fast_retry_ms` timer (default 500 ms). If the timer expires without a matching reply, it retries up to `max_fast_retries` times at the short interval, then backs off to the next long-resync slot.
+- Replies are matched by echoed `t1`; mismatched/duplicate replies bump `unmatched_replies` and are dropped — this catches stale datagrams drained from the kernel buffer that correspond to an earlier hello in the same burst.
+- `_drain_handshake_replies` runs unconditionally from the main loop (not gated on `receiving_video`), so replies don't rot in the kernel buffer during a video stall.
+
+A single lost hello or reply now recovers in <1 s instead of 30 s.
+
+**Clock-offset-cancelling RTT:**
+
+The drone and GS clocks are **never** synchronized (no NTP, independent field boots). Any naive difference like `t2 - t1` leaks the unbounded offset. RTT is instead computed on the GS using only same-clock subtractions:
+
+```
+rtt_ms = (gs_recv_ms - t1) - (t3 - t2)
+          └── GS clock ──┘    └─ drone clock ─┘
+```
+
+`(gs_recv_ms - t1)` is the wall round trip on the GS clock. `(t3 - t2)` is drone-side processing on the drone clock. Subtracting leaves the on-wire RTT with no offset term. `HandshakeClient._update_rtt()` keeps `last_rtt_ms` and an EMA `avg_rtt_ms` (alpha 0.2); negative samples are dropped into `rtt_invalid_count`.
+
+RTT is surfaced three ways:
+- `rtt_ms` field in the JSONL telemetry record (per tick).
+- Verbose GS console line suffix `| rtt:Xms`.
+- Echoed on the trailing field of every `P:` profile message so the **drone** can render `rtt:Xms` on OSD line 6 (alongside jitter and resolution). The drone does **not** use RTT for any decisions — display only.
+
+Sanity: sub-millisecond on wired loopback, single-digit ms on a healthy wfb-ng link. Hundreds of ms on a working link means clocks got mixed somewhere; treat as a bug.
 
 **Note:** Handshake messages are NOT counted as heartbeats for fallback detection.
 
@@ -644,7 +679,9 @@ The first three mutexes are allocated in `alink_daemon_t` (main.c) and passed by
 | **dynamic** | `max_fec_n` | 50 | Maximum FEC block size |
 | **dynamic** | `max_mcs_step_up` | 1 | Maximum MCS steps per upgrade |
 | **dynamic** | `video_fps_default` | 90 | Default FPS when handshake not synced |
-| **handshake** | `resync_interval_s` | 30 | Seconds between handshake resyncs |
+| **handshake** | `resync_interval_s` | 30 | Seconds between successful handshake probes (long cadence) |
+| **handshake** | `fast_retry_ms` | 500 | Fast-retry timer when a hello has no matching reply |
+| **handshake** | `max_fast_retries` | 3 | Max fast retries before backing off to long cadence |
 | **telemetry** | `log_enabled` | True | Enable telemetry logging |
 | **telemetry** | `log_dir` | /var/log/alink | Log directory path |
 | **telemetry** | `log_rotate_mb` | 50 | Rotate logs at size (MB) |

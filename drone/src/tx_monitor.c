@@ -70,14 +70,26 @@ void *txmon_thread_func(void *arg) {
                    since_xtx_ms);
         }
 
+        /* Check and claim the keyframe rate-limit slot under ks->mutex so
+         * GS-initiated and tx-drop-initiated paths can't race. */
+        pthread_mutex_lock(&ks->mutex);
         long elapsed_kf_ms = util_elapsed_ms_timespec(&now, &ks->last_request_time);
+        bool fire_kf = latest_tx_dropped > 0
+                       && elapsed_kf_ms >= cfg->request_keyframe_interval_ms
+                       && cfg->allow_rq_kf_by_tx_d
+                       && snap_prev_gop > 0.5f;
+        if (fire_kf) {
+            ks->last_request_time = now;
+            ks->total_requests_xtx++;
+        }
+        pthread_mutex_unlock(&ks->mutex);
 
-        if (latest_tx_dropped > 0 && elapsed_kf_ms >= cfg->request_keyframe_interval_ms && cfg->allow_rq_kf_by_tx_d && snap_prev_gop > 0.5f) {
+        if (fire_kf) {
             /* Parse the IDR command URL and use native HTTP client */
             char host[64];
             int port = 80;
             char url_path[BUFFER_SIZE];
-            
+
             if (util_parse_url(idrCommand, host, sizeof(host), &port, url_path, sizeof(url_path)) != 0) {
                 ERROR_LOG(cfg, "Failed to parse IDR URL: %s\n", idrCommand);
             } else {
@@ -85,9 +97,7 @@ void *txmon_thread_func(void *arg) {
                     ERROR_LOG(cfg, "IDR request failed: %s:%d%s\n", host, port, url_path);
                 }
             }
-            
-            ks->last_request_time = now;
-            ks->total_requests_xtx++;
+
             INFO_LOG(cfg, "Requesting keyframe for locally dropped tx packet\n");
         }
 

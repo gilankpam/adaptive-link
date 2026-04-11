@@ -54,11 +54,6 @@
 #define MAX_RSSI_QUEUE  64
 #define MAX_RSSI_LINE   256
 
-/* ─── Keyframe constants ─── */
-#define MAX_CODES        5
-#define CODE_LENGTH      8
-#define EXPIRY_TIME_MS   1000
-
 /* ─── Named magic numbers ─── */
 #define ANTENNA_SPREAD_THRESHOLD_DB   20
 #define HIGH_RES_PIXEL_THRESHOLD      1300000
@@ -98,11 +93,5 @@ typedef struct {
     char udp_out_ip[INET_ADDRSTRLEN];
     int udp_out_port;
 } osd_udp_config_t;
-
-/* ─── Keyframe request tracking ─── */
-typedef struct {
-    char code[CODE_LENGTH];
-    struct timespec timestamp;
-} KeyframeRequest;
 
 #endif /* ALINK_TYPES_H */

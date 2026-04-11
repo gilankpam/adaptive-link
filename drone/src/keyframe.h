@@ -1,9 +1,10 @@
 /**
  * @file keyframe.h
- * @brief Keyframe request deduplication and special command handling.
+ * @brief Keyframe request rate limiting.
  *
- * Manages keyframe IDR request codes with deduplication and expiry.
- * Also handles pause/resume special commands. Owns its own mutex
+ * Gates keyframe IDR HTTP requests to the camera API behind a single
+ * rate limit (request_keyframe_interval_ms) shared by GS-initiated K
+ * messages and drone-initiated tx-drop triggers. Owns its own mutex
  * (fully encapsulated).
  */
 #ifndef ALINK_KEYFRAME_H
@@ -14,8 +15,6 @@
 #include "command.h"
 
 typedef struct {
-    KeyframeRequest codes[MAX_CODES];
-    int num_requests;
     int total_requests;
     int total_requests_xtx;
     struct timespec last_request_time;
@@ -26,15 +25,12 @@ typedef struct {
 void keyframe_init(keyframe_state_t *ks);
 
 /**
- * Process a special command message (keyframe request, pause, resume).
- * The msg parameter should include the "special:" prefix.
+ * Request a keyframe from the camera API, rate-limited by
+ * cfg->request_keyframe_interval_ms against ks->last_request_time.
+ * Returns true if the HTTP call was issued, false if throttled.
  */
-void keyframe_handle_special(keyframe_state_t *ks, const char *msg,
-                             const alink_config_t *cfg,
-                             float prevSetGop,
-                             volatile bool *paused,
-                             pthread_mutex_t *pause_mutex,
-                             const cmd_ctx_t *cmd);
+bool keyframe_fire_request(keyframe_state_t *ks, const alink_config_t *cfg,
+                           const cmd_ctx_t *cmd);
 
 int keyframe_get_total(const keyframe_state_t *ks);
 int keyframe_get_total_xtx(const keyframe_state_t *ks);

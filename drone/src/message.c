@@ -19,15 +19,12 @@
 
 void msg_init(msg_state_t *ms, profile_state_t *ps, keyframe_state_t *ks,
               osd_state_t *osd, alink_config_t *cfg,
-              pthread_mutex_t *pause_mutex, volatile bool *paused,
               const cmd_ctx_t *cmd) {
     memset(ms, 0, sizeof(*ms));
     ms->ps = ps;
     ms->ks = ks;
     ms->osd = osd;
     ms->cfg = cfg;
-    ms->pause_mutex = pause_mutex;
-    ms->paused = paused;
     ms->cmd = cmd;
     ms->jitter_first_sample = true;
     ms->prev_gs_ts_ms = 0;
@@ -128,22 +125,7 @@ static void msg_update_jitter(msg_state_t *ms, uint64_t gs_send_time_ms) {
 }
 
 /**
- * Handle an optional IDR code from the message.
- */
-static void msg_handle_idr(msg_state_t *ms, const char *idr_code) {
-    if (idr_code[0] != '\0') {
-        char keyframe_request[64];
-        snprintf(keyframe_request, sizeof(keyframe_request),
-                 "special:request_keyframe:%s", idr_code);
-        keyframe_handle_special(ms->ks, keyframe_request, ms->cfg,
-                                ms->ps->prevSetGop,
-                                ms->paused, ms->pause_mutex,
-                                ms->cmd);
-    }
-}
-
-/**
- * Process a profile message: P:<index>:<GI>:<MCS>:<FecK>:<FecN>:<Bitrate>:<GOP>:<Power>:<Bandwidth>:<timestamp>[:<idr_code>]
+ * Process a profile message: P:<index>:<GI>:<MCS>:<FecK>:<FecN>:<Bitrate>:<GOP>:<Power>:<Bandwidth>:<timestamp>
  */
 static void msg_process_profile(msg_state_t *ms, const char *msg) {
     Profile profile;
@@ -151,7 +133,6 @@ static void msg_process_profile(msg_state_t *ms, const char *msg) {
 
     int profile_index = 0;
     uint64_t gs_timestamp_ms = 0;
-    char idr_code[16] = "";
 
     char *msgCopy = strdup(msg);
     if (msgCopy == NULL) {
@@ -195,10 +176,6 @@ static void msg_process_profile(msg_state_t *ms, const char *msg) {
             case 9:
                 gs_timestamp_ms = strtoull(token, NULL, 10);
                 break;
-            case 10:
-                strncpy(idr_code, token, sizeof(idr_code) - 1);
-                idr_code[sizeof(idr_code) - 1] = '\0';
-                break;
             default:
                 break;
         }
@@ -207,8 +184,6 @@ static void msg_process_profile(msg_state_t *ms, const char *msg) {
     }
 
     free(msgCopy);
-
-    msg_handle_idr(ms, idr_code);
 
     /* Update inter-arrival jitter display from GS/drone timestamps */
     msg_update_jitter(ms, gs_timestamp_ms);
@@ -220,19 +195,14 @@ static void msg_process_profile(msg_state_t *ms, const char *msg) {
         ms->osd->score_related[0] = '\0';
     }
 
-    /* Apply profile if not paused */
-    pthread_mutex_lock(ms->pause_mutex);
-    if (!*(ms->paused)) {
-        profile_apply_direct(ms->ps, &profile, profile_index, ms->osd);
-    } else {
-        INFO_LOG(ms->cfg, "Adaptive mode paused, waiting for resume command...\n");
-    }
-    pthread_mutex_unlock(ms->pause_mutex);
+    profile_apply_direct(ms->ps, &profile, profile_index, ms->osd);
 }
 
 void msg_process(msg_state_t *ms, const char *msg) {
     if (msg[0] == 'P' && msg[1] == ':') {
         msg_process_profile(ms, msg + 2);
+    } else if (msg[0] == 'K' && msg[1] == '\0') {
+        keyframe_fire_request(ms->ks, ms->cfg, ms->cmd);
     } else {
         ERROR_LOG(ms->cfg, "Unknown message format: %.20s...\n", msg);
     }

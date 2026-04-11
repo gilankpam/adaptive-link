@@ -44,8 +44,9 @@ int mock_clock_gettime(clockid_t clk_id, struct timespec *tp) {
 void profile_apply_direct(profile_state_t *ps, const Profile *profile, int profile_index, void *osd) {
     (void)ps; (void)profile; (void)profile_index; (void)osd;
 }
-void keyframe_handle_special(keyframe_state_t *ks, const char *msg, const alink_config_t *cfg, float prev_gop, volatile bool *paused, pthread_mutex_t *mut, const cmd_ctx_t *cmd) {
-    (void)ks; (void)msg; (void)cfg; (void)prev_gop; (void)paused; (void)mut; (void)cmd;
+bool keyframe_fire_request(keyframe_state_t *ks, const alink_config_t *cfg, const cmd_ctx_t *cmd) {
+    (void)ks; (void)cfg; (void)cmd;
+    return false;
 }
 
 void setUp(void) {

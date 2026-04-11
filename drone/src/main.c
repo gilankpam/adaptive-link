@@ -31,9 +31,7 @@ typedef struct {
 
     /* Shared synchronization */
     pthread_mutex_t count_mutex;
-    pthread_mutex_t pause_mutex;
     pthread_mutex_t tx_power_mutex;
-    volatile bool paused;
     volatile bool initialized;
     volatile int message_count;
 
@@ -60,9 +58,7 @@ int main(int argc, char *argv[]) {
     osd_init(&daemon.osd);
 
     daemon.count_mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
-    daemon.pause_mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
     daemon.tx_power_mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
-    daemon.paused = false;
     daemon.initialized = false;
     daemon.message_count = 0;
 
@@ -135,7 +131,7 @@ int main(int argc, char *argv[]) {
 
     /* Initialize message processor */
     msg_init(&daemon.ms, &daemon.ps, &daemon.ks, &daemon.osd, &daemon.cfg,
-             &daemon.pause_mutex, &daemon.paused, &daemon.cmd);
+             &daemon.cmd);
 
     /* Create UDP socket for incoming messages */
     if ((daemon.sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
@@ -198,9 +194,7 @@ int main(int argc, char *argv[]) {
         .osd = &daemon.osd,
         .cfg = &daemon.cfg,
         .count_mutex = &daemon.count_mutex,
-        .pause_mutex = &daemon.pause_mutex,
         .message_count = &daemon.message_count,
-        .paused = &daemon.paused,
         .initialized = &daemon.initialized
     };
     pthread_t count_thread;
@@ -280,15 +274,7 @@ int main(int argc, char *argv[]) {
                                  &daemon.hw, daemon.sockfd, &client_addr);
                 continue;   /* handshake is NOT a heartbeat — do not touch message_count */
             }
-            /* See if it's a special command, otherwise process it */
-            if (strncmp(message, "special:", 8) == 0) {
-                keyframe_handle_special(&daemon.ks, message, &daemon.cfg,
-                                        daemon.ps.prevSetGop,
-                                        &daemon.paused, &daemon.pause_mutex,
-                                        &daemon.cmd);
-            } else {
-                msg_process(&daemon.ms, message);
-            }
+            msg_process(&daemon.ms, message);
         } else if (activity < 0) {
             ERROR_LOG(&daemon.cfg, "select failed\n");
             break;

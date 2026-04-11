@@ -19,9 +19,7 @@ typedef struct {
     osd_state_t *osd;
     alink_config_t *cfg;
     pthread_mutex_t *count_mutex;
-    pthread_mutex_t *pause_mutex;
     volatile int *message_count;
-    volatile bool *paused;
     volatile bool *initialized;
 } fallback_thread_arg_t;
 

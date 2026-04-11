@@ -20,8 +20,7 @@ void *fallback_thread_func(void *arg) {
         *(ta->message_count) = 0;
         pthread_mutex_unlock(ta->count_mutex);
 
-        pthread_mutex_lock(ta->pause_mutex);
-        if (*(ta->initialized) && local_count == 0 && !*(ta->paused)) {
+        if (*(ta->initialized) && local_count == 0) {
             INFO_LOG(ta->cfg, "No messages received in %dms, applying fallback profile\n", ta->cfg->fallback_ms);
             /* Bypass profile_apply_direct's duplicate check — fallback must
              * always dispatch so that commands which failed on a previous
@@ -40,7 +39,6 @@ void *fallback_thread_func(void *arg) {
         } else {
             INFO_LOG(ta->cfg, "Messages per %dms: %d\n", ta->cfg->fallback_ms, local_count);
         }
-        pthread_mutex_unlock(ta->pause_mutex);
     }
     return NULL;
 }

@@ -8,12 +8,11 @@ diversity), and sends finalized profile parameters to the drone.
 """
 import os
 import socket
+import select
 import json
 import time
 import argparse
 import struct
-import random
-import string
 import configparser
 import math
 
@@ -696,7 +695,6 @@ def send_udp(message):
 
 def generate_profile_message(profile_idx, profile):
     """Generate a P: profile change message."""
-    global keyframe_request_code, keyframe_request_remaining
     timestamp = int(time.time() * 1000)
 
     parts = [
@@ -713,13 +711,27 @@ def generate_profile_message(profile_idx, profile):
         str(timestamp),
     ]
 
-    if keyframe_request_code is not None and keyframe_request_remaining > 0:
-        parts.append(keyframe_request_code)
-        keyframe_request_remaining -= 1
-        if keyframe_request_remaining == 0:
-            keyframe_request_code = None
-
     send_udp(":".join(parts))
+
+
+def pump_keyframe_sender():
+    """Send pending K keyframe request repeats on a fixed interval.
+
+    Called from the main listen loop on every select() wakeup. Decoupled from
+    the wfb-ng stats cadence so the first IDR repeat lands within
+    idr_send_interval_ms of the loss event instead of waiting for the next
+    stats line. The drone rate-limits HTTP calls to the camera API by wall
+    clock, so repeats collapse to a single request without per-code dedup.
+    """
+    global keyframe_request_remaining, last_keyframe_send_ms
+    if keyframe_request_remaining <= 0:
+        return
+    now_ms = time.monotonic() * 1000
+    if now_ms - last_keyframe_send_ms < idr_send_interval_ms:
+        return
+    send_udp("K")
+    last_keyframe_send_ms = now_ms
+    keyframe_request_remaining -= 1
 
 
 
@@ -727,14 +739,13 @@ def generate_profile_message(profile_idx, profile):
 
 def calculate_link():
     global best_rssi, best_snr, min_rssi, lost_packets, fec_rec_packets
-    global keyframe_request_code, keyframe_request_remaining
+    global keyframe_request_remaining
 
     # Keyframe request on packet loss
     if lost_packets > 0 and allow_idr:
-        keyframe_request_code = ''.join(random.choices(string.ascii_lowercase, k=4))
         keyframe_request_remaining = idr_max_messages
         if verbose_mode:
-            print(f"Generated new keyframe request code: {keyframe_request_code}")
+            print("Queued keyframe request burst")
 
     # Update link state from this tick's metrics
     profile_selector.evaluate_link(
@@ -871,21 +882,40 @@ def process_data_line(line):
 
 
 def listen_for_data(sock):
-    global waiting_for_video_printed
+    global waiting_for_video_printed, receiving_video
     waiting_for_video_printed = False
+    sock.setblocking(False)
+    buffer = bytearray()
+    timeout_s = idr_send_interval_ms / 1000.0
     try:
-        with sock.makefile() as f:
-            for line in f:
-                if not line:
+        while True:
+            ready, _, _ = select.select([sock], [], [], timeout_s)
+            if sock in ready:
+                try:
+                    chunk = sock.recv(4096)
+                except BlockingIOError:
+                    chunk = b""
+                if not chunk:
+                    # Peer closed
                     break
-                data = process_data_line(line)
-                if data is None:
-                    continue
-                if data.get("type") == "rx" and data.get("id") == "video rx":
-                    handle_video_rx_stats(data)
-                else:
-                    global receiving_video
-                    receiving_video = False
+                buffer.extend(chunk)
+                while True:
+                    nl = buffer.find(b"\n")
+                    if nl < 0:
+                        break
+                    line = buffer[:nl].decode("utf-8", errors="replace")
+                    del buffer[:nl + 1]
+                    if not line:
+                        continue
+                    data = process_data_line(line)
+                    if data is None:
+                        continue
+                    if data.get("type") == "rx" and data.get("id") == "video rx":
+                        handle_video_rx_stats(data)
+                    else:
+                        receiving_video = False
+            # Pace IDR repeats independent of wfb-ng cadence
+            pump_keyframe_sender()
     except Exception as e:
         if verbose_mode:
             print(f"Error processing data: {e}")
@@ -928,6 +958,7 @@ if __name__ == "__main__":
     # Keyframe settings
     allow_idr = config.getboolean('keyframe', 'allow_idr')
     idr_max_messages = config.getint('keyframe', 'idr_max_messages')
+    idr_send_interval_ms = config.getint('keyframe', 'idr_send_interval_ms', fallback=20)
 
     udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     udp_socket.bind(("", 0))
@@ -967,7 +998,7 @@ if __name__ == "__main__":
     video_rx_initial_message_printed = False
 
     # Keyframe request globals
-    keyframe_request_code = None
     keyframe_request_remaining = 0
+    last_keyframe_send_ms = 0
 
     connect_to_wfb_stats()

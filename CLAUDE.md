@@ -151,6 +151,19 @@ The `TelemetryLogger` class provides ML-ready data collection:
 - Python test suite for GS in `ground-station/test/`
 - ML offline analysis tools in `ground-station/ml/` (requires numpy, pandas, matplotlib)
 
+## Handshake Mechanism
+
+The GS and drone exchange handshake messages to synchronize state:
+
+- **`H:<t1>`** (GS → drone): GS sends timestamp `t1` (milliseconds since epoch)
+- **`I:<t1>:<t2>:<t3>:<fps>:<x_res>:<y_res>`** (drone → GS): Drone replies with:
+  - `t1`: Echo of GS timestamp
+  - `t2`: Drone receive timestamp
+  - `t3`: Drone send timestamp  
+  - `fps`, `x_res`, `y_res`: Camera video parameters
+
+The handshake resyncs every 30 seconds (configurable via `resync_interval_s`). The GS uses the handshake to obtain the current video FPS for accurate FEC calculation.
+
 ## Testing
 
 ### C Unit Tests
@@ -159,7 +172,9 @@ make test         # Run all Unity tests
 make clean        # Clean test artifacts
 ```
 
-Tests are in `drone/test/test_util.c` covering URL parsing, command formatting, and utility functions.
+Tests are in `drone/test/`:
+- `test_util.c`: URL parsing, command formatting, utility functions
+- `test_message.c`: UDP message parsing, handshake handling, jitter measurement
 
 ### Python Tests
 ```bash
@@ -172,3 +187,4 @@ Tests cover:
 - `test_telemetry_logger.py`: Telemetry logging, rotation, outcome tracking
 - `test_replay_simulator.py`: Offline profile selection simulation
 - `test_optimize_params.py`: Bayesian parameter optimization
+- `test_handshake.py`: Handshake message encoding/decoding

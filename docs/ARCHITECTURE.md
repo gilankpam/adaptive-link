@@ -484,12 +484,39 @@ Note: One-way latency measurement is not implemented. The inter-arrival jitter m
 Wire format: <4-byte length (network byte order)><payload string>
 
 Profile message (P:):
-P:<profile_idx>:<gi>:<mcs>:<fec_k>:<fec_n>:<bitrate>:<gop>:<power>:<roi_qp>:<bandwidth>:<qp_delta>:<timestamp>[:<keyframe_code>]
+P:<profile_idx>:<gi>:<mcs>:<fec_k>:<fec_n>:<bitrate>:<gop>:<power>:<bandwidth>:<timestamp>
 
-Example: P:5:long:5:8:12:6000:10:58:0,0,0,0:20:0:1700000000:abcd
+Example: P:5:long:5:8:12:6000:10:3000:20:1700000000
+
+Handshake (H:):
+H:<timestamp_ms>                    # GS → drone: timestamp in milliseconds since epoch
+
+Handshake reply (I:):
+I:<t1>:<t2>:<t3>:<fps>:<x_res>:<y_res>  # drone → GS: echo + timestamps + video params
+
+Keyframe request (K:):
+K:                                     # drone → GS: trigger keyframe request
 ```
 
 The GS sends the current profile on every tick for UDP reliability. The drone skips application if the profile index matches the current profile.
+
+### Handshake Mechanism
+
+The GS and drone exchange handshake messages to synchronize state and obtain video parameters:
+
+1. **GS sends `H:<t1>`**: Timestamp `t1` in milliseconds since epoch
+2. **Drone replies `I:<t1>:<t2>:<t3>:<fps>:<x_res>:<y_res>`**:
+   - `t1`: Echo of GS timestamp
+   - `t2`: Drone receive timestamp
+   - `t3`: Drone send timestamp
+   - `fps`, `x_res`, `y_res`: Camera video parameters from Majestic API
+
+The handshake resyncs every 30 seconds (configurable via `resync_interval_s`). The GS uses the handshake to:
+- Obtain current video FPS for accurate FEC calculation
+- Verify bidirectional UDP connectivity
+- Measure round-trip time (optional)
+
+**Note:** Handshake messages are NOT counted as heartbeats for fallback detection.
 
 ### OSD Output
 
@@ -583,7 +610,8 @@ The first three mutexes are allocated in `alink_daemon_t` (main.c) and passed by
 | json | `HOST` | 127.0.0.1 | wfb-ng stats host |
 | json | `PORT` | 8103 | wfb-ng stats port |
 | keyframe | `allow_idr` | True | Generate keyframe request codes |
-| keyframe | `idr_max_messages` | 20 | Messages to include keyframe code |
+| keyframe | `idr_max_messages` | 4 | Messages to include keyframe code |
+| keyframe | `idr_send_interval_ms` | 20 | Interval between keyframe messages |
 | profile selection | `hold_fallback_mode_ms` | 1000 | Hold time after leaving fallback |
 | profile selection | `hold_modes_down_ms` | 3000 | Hold time before upgrades |
 | profile selection | `min_between_changes_ms` | 200 | Minimum interval between changes |
@@ -615,11 +643,14 @@ The first three mutexes are allocated in `alink_daemon_t` (main.c) and passed by
 | **dynamic** | `max_fec_redundancy` | 0.5 | Maximum allowed FEC redundancy |
 | **dynamic** | `max_fec_n` | 50 | Maximum FEC block size |
 | **dynamic** | `max_mcs_step_up` | 1 | Maximum MCS steps per upgrade |
+| **dynamic** | `video_fps_default` | 90 | Default FPS when handshake not synced |
+| **handshake** | `resync_interval_s` | 30 | Seconds between handshake resyncs |
 | **telemetry** | `log_enabled` | True | Enable telemetry logging |
 | **telemetry** | `log_dir` | /var/log/alink | Log directory path |
 | **telemetry** | `log_rotate_mb` | 50 | Rotate logs at size (MB) |
 | **telemetry** | `outcome_window_ticks` | 10 | Ticks to observe after profile change |
 | **telemetry** | `adapter_id` | default | Adapter identifier for multi-adapter support |
+| **optimizer** | `skip_optimize_params` | (empty) | Comma-separated params to freeze during optimization |
 
 ---
 

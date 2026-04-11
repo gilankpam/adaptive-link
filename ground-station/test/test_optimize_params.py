@@ -12,9 +12,15 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from ml.optimize_params import (
+    ALL_PARAM_NAMES,
+    PARAM_REGISTRY,
+    PARAM_SECTION,
     AdapterOptimizer,
     ParameterSpace,
+    _expand_param_tokens,
     _load_adapter_constraints,
+    _read_skip_set,
+    _resolve_selection,
     write_optimized_config,
 )
 from ml.replay_simulator import load_config_from_file
@@ -178,17 +184,19 @@ class TestAdapterOptimizer:
 # Tests for config output
 # =============================================================
 
+_BASELINE_LINES = _BASE_CONFIG_STR.splitlines(keepends=True)
+
+
 class TestConfigOutput:
 
     def test_write_valid_ini(self, tmp_path):
         """Written config should be valid INI parseable by configparser."""
-        config = configparser.ConfigParser()
-        config.read_string(_BASE_CONFIG_STR)
-
         output_path = str(tmp_path / 'test.conf')
-        write_optimized_config(config, output_path, 'test', 10, 0.3, 0.5)
+        write_optimized_config(
+            _BASELINE_LINES, {}, output_path, 'test', 10, 0.3, 0.5,
+            [], [],
+        )
 
-        # Should parse without error
         loaded = configparser.ConfigParser()
         loaded.read(output_path)
         assert loaded.has_section('gate')
@@ -196,11 +204,11 @@ class TestConfigOutput:
 
     def test_metadata_header(self, tmp_path):
         """Output should contain metadata in header comments."""
-        config = configparser.ConfigParser()
-        config.read_string(_BASE_CONFIG_STR)
-
         output_path = str(tmp_path / 'test.conf')
-        write_optimized_config(config, output_path, 'my-adapter', 100, 0.3, 0.5)
+        write_optimized_config(
+            _BASELINE_LINES, {}, output_path, 'my-adapter', 100, 0.3, 0.5,
+            ['hysteresis_up_db'], [],
+        )
 
         with open(output_path) as f:
             content = f.read()
@@ -213,11 +221,224 @@ class TestConfigOutput:
     def test_creates_output_directory(self, tmp_path):
         """Should create output directory if it doesn't exist."""
         output_path = str(tmp_path / 'subdir' / 'test.conf')
-        config = configparser.ConfigParser()
-        config.read_string(_BASE_CONFIG_STR)
-
-        write_optimized_config(config, output_path, 'test', 5, 0.3, 0.4)
+        write_optimized_config(
+            _BASELINE_LINES, {}, output_path, 'test', 5, 0.3, 0.4,
+            [], [],
+        )
         assert os.path.exists(output_path)
+
+
+# =============================================================
+# Tests for selected_params in ParameterSpace
+# =============================================================
+
+class TestSelectedParams:
+
+    def test_selected_params_only_samples_subset(self):
+        """Unselected params must keep their baseline values across trials."""
+        baseline = configparser.ConfigParser()
+        baseline.read_string(_BASE_CONFIG_STR)
+        base_hyst_down = baseline.getfloat('gate', 'hysteresis_down_db')
+        base_max_mcs = baseline.getint('dynamic', 'max_mcs')
+
+        space = ParameterSpace(
+            _BASE_CONFIG_STR, selected_params={'hysteresis_up_db'}
+        )
+        study = optuna.create_study()
+        for _ in range(5):
+            trial = study.ask()
+            config = space.define_trial(trial)
+            study.tell(trial, 0.0)
+            # Selected param should be inside its bounds.
+            assert 0.5 <= config.getfloat('gate', 'hysteresis_up_db') <= 6.0
+            # Unselected params should equal the baseline, not sampled values.
+            assert config.getfloat('gate', 'hysteresis_down_db') == base_hyst_down
+            assert config.getint('dynamic', 'max_mcs') == base_max_mcs
+
+    def test_none_selected_samples_everything(self):
+        """selected_params=None preserves legacy 'sample every param' behavior."""
+        space = ParameterSpace(_BASE_CONFIG_STR, selected_params=None)
+        study = optuna.create_study()
+        trial = study.ask()
+        space.define_trial(trial)
+        study.tell(trial, 0.0)
+        # Every registry param should have been suggested on this trial.
+        assert set(trial.params.keys()) == ALL_PARAM_NAMES
+
+
+# =============================================================
+# Tests for skip_optimize_params ([optimizer] section)
+# =============================================================
+
+class TestSkipOptimizeParams:
+
+    def test_read_skip_set_empty_when_missing(self):
+        cfg = "[gate]\nhysteresis_up_db = 2.5\n"
+        assert _read_skip_set(cfg) == set()
+
+    def test_read_skip_set_parses_list(self):
+        cfg = (
+            "[optimizer]\n"
+            "skip_optimize_params = hysteresis_up_db, max_mcs\n"
+        )
+        assert _read_skip_set(cfg) == {'hysteresis_up_db', 'max_mcs'}
+
+    def test_read_skip_set_drops_unknown(self, capsys):
+        cfg = (
+            "[optimizer]\n"
+            "skip_optimize_params = hysteresis_up_db, bogus_param\n"
+        )
+        result = _read_skip_set(cfg)
+        assert result == {'hysteresis_up_db'}
+        captured = capsys.readouterr()
+        assert 'bogus_param' in captured.out
+
+    def test_read_skip_set_empty_string(self):
+        cfg = "[optimizer]\nskip_optimize_params =\n"
+        assert _read_skip_set(cfg) == set()
+
+
+# =============================================================
+# Tests for _expand_param_tokens and _resolve_selection
+# =============================================================
+
+class TestSelectionResolution:
+
+    def test_expand_individual_names(self):
+        result = _expand_param_tokens('hysteresis_up_db,max_mcs')
+        assert result == {'hysteresis_up_db', 'max_mcs'}
+
+    def test_expand_section_shorthand(self):
+        gate_names = {p[0] for p in PARAM_REGISTRY if p[1] == 'gate'}
+        assert _expand_param_tokens('gate') == gate_names
+
+    def test_expand_mixed(self):
+        gate_names = {p[0] for p in PARAM_REGISTRY if p[1] == 'gate'}
+        result = _expand_param_tokens('gate,max_mcs')
+        assert result == gate_names | {'max_mcs'}
+
+    def test_expand_profile_selection_alias(self):
+        ps_names = {p[0] for p in PARAM_REGISTRY if p[1] == 'profile selection'}
+        assert _expand_param_tokens('profile_selection') == ps_names
+        assert _expand_param_tokens('profile-selection') == ps_names
+
+    def test_expand_unknown_raises(self):
+        with pytest.raises(SystemExit, match='Unknown parameter'):
+            _expand_param_tokens('not_a_param')
+
+    def test_resolve_default_is_all(self):
+        assert _resolve_selection(None, None, set()) == ALL_PARAM_NAMES
+
+    def test_resolve_params_flag(self):
+        result = _resolve_selection('hysteresis_up_db', None, set())
+        assert result == {'hysteresis_up_db'}
+
+    def test_resolve_exclude_flag(self):
+        gate_names = {p[0] for p in PARAM_REGISTRY if p[1] == 'gate'}
+        result = _resolve_selection(None, 'gate', set())
+        assert result == ALL_PARAM_NAMES - gate_names
+
+    def test_resolve_skip_wins_over_params(self):
+        """skip_set strips out names even if the user passed them via --params."""
+        result = _resolve_selection(
+            'hysteresis_up_db,max_mcs', None, {'hysteresis_up_db'}
+        )
+        assert result == {'max_mcs'}
+
+    def test_resolve_empty_raises(self):
+        """If selection is empty after applying the skip set, exit loudly."""
+        with pytest.raises(SystemExit, match='No parameters left'):
+            _resolve_selection('hysteresis_up_db', None, {'hysteresis_up_db'})
+
+
+# =============================================================
+# Tests for comment-preserving config output
+# =============================================================
+
+class TestConfigOutputPreservation:
+
+    def test_tuned_only_lines_change(self, tmp_path):
+        """Output differs from baseline only on tuned value lines + header."""
+        output_path = str(tmp_path / 'out.conf')
+        optimized_values = {('gate', 'hysteresis_up_db'): '3.7'}
+        write_optimized_config(
+            _BASELINE_LINES, optimized_values, output_path,
+            'test', 10, 0.3, 0.5,
+            ['hysteresis_up_db'], [],
+        )
+
+        with open(output_path) as f:
+            out_lines = f.readlines()
+
+        # Strip header (starts with '#', ends at first blank line).
+        header_end = out_lines.index('\n') + 1
+        body = out_lines[header_end:]
+
+        # Baseline length must match body length (line-for-line preservation).
+        assert len(body) == len(_BASELINE_LINES)
+
+        # Exactly one line changed: the hysteresis_up_db value line.
+        diffs = [
+            (i, a, b)
+            for i, (a, b) in enumerate(zip(_BASELINE_LINES, body))
+            if a != b
+        ]
+        assert len(diffs) == 1
+        _, base_line, new_line = diffs[0]
+        assert 'hysteresis_up_db' in base_line
+        assert new_line.strip() == 'hysteresis_up_db = 3.7'
+
+    def test_doc_comments_preserved(self, tmp_path):
+        """The [gate] documentation block survives byte-for-byte."""
+        output_path = str(tmp_path / 'out.conf')
+        write_optimized_config(
+            _BASELINE_LINES, {}, output_path, 'test', 1, 0.0, 0.0, [], [],
+        )
+        with open(output_path) as f:
+            content = f.read()
+        # Lines from the gate doc block in config/alink_gs.conf.
+        assert '# Two-channel gate tuning (physical units, dB of SNR margin).' in content
+        assert '# Channel A (SNR margin, slow/symmetric):' in content
+        assert '#   emergency_loss_rate' in content
+
+    def test_optimizer_section_round_trips(self, tmp_path):
+        """A baseline with skip_optimize_params preserves that line verbatim."""
+        baseline_with_skip = _BASE_CONFIG_STR.replace(
+            'skip_optimize_params =',
+            'skip_optimize_params = hysteresis_up_db, max_mcs',
+        )
+        lines = baseline_with_skip.splitlines(keepends=True)
+        output_path = str(tmp_path / 'out.conf')
+        write_optimized_config(
+            lines, {}, output_path, 'test', 1, 0.0, 0.0, [], [],
+        )
+        with open(output_path) as f:
+            content = f.read()
+        assert 'skip_optimize_params = hysteresis_up_db, max_mcs' in content
+
+    def test_metadata_lists_tuned_and_skipped(self, tmp_path):
+        output_path = str(tmp_path / 'out.conf')
+        write_optimized_config(
+            _BASELINE_LINES, {}, output_path, 'test', 1, 0.0, 0.0,
+            ['hysteresis_up_db', 'max_mcs'],
+            ['fec_redundancy_ratio'],
+        )
+        with open(output_path) as f:
+            content = f.read()
+        assert '# Tuned parameters: hysteresis_up_db, max_mcs' in content
+        assert '# Skipped (skip_optimize_params): fec_redundancy_ratio' in content
+
+    def test_missing_tuned_key_raises(self, tmp_path):
+        """If an optimized key is absent from the baseline, surface the error."""
+        output_path = str(tmp_path / 'out.conf')
+        # Use a key that exists in PARAM_REGISTRY but strip it from the baseline.
+        stripped = [l for l in _BASELINE_LINES if not l.startswith('hysteresis_up_db')]
+        with pytest.raises(RuntimeError, match='Could not locate tuned keys'):
+            write_optimized_config(
+                stripped, {('gate', 'hysteresis_up_db'): '3.0'},
+                output_path, 'test', 1, 0.0, 0.0,
+                ['hysteresis_up_db'], [],
+            )
 
 
 # =============================================================

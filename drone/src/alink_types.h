@@ -28,10 +28,6 @@
 /* ─── Buffer and size constants ─── */
 #define MAX_COMMAND_SIZE  256
 #define BUFFER_SIZE       1024
-#define MAX_PROFILES      20
-#define MAX_OUTPUT        512
-#define MAX_CMD           1024
-#define RAW_BUF           2048
 
 /* ─── Network defaults ─── */
 #define DEFAULT_PORT      9999
@@ -39,16 +35,11 @@
 
 /* ─── File paths ─── */
 #define CONFIG_FILE              "/etc/alink.conf"
-#define PROFILE_FILE             "/etc/txprofiles.conf"
 #define WFB_YAML                 "/etc/wfb.yaml"
 #define WIFI_ADAPTERS_YAML       "/etc/wlan_adapters.yaml"
 
 /* ─── Timing defaults ─── */
 #define DEFAULT_PACE_EXEC_MS  20
-
-/* ─── Hardware constants ─── */
-#define MCS_COUNT      8
-#define POWER_LEVELS   11
 
 /* ─── RSSI queue constants ─── */
 #define MAX_RSSI_QUEUE  64
@@ -57,14 +48,8 @@
 /* ─── Named magic numbers ─── */
 #define ANTENNA_SPREAD_THRESHOLD_DB   20
 #define HIGH_RES_PIXEL_THRESHOLD      1300000
-#define FALLBACK_SCORE                999
-#define SCORE_RANGE_BASE              1000
-#define SCORE_RANGE_MAX               2000
 #define NUM_ANTENNA_SLOTS             4
 #define RSSI_HISTORY_SIZE             20
-
-/* ─── Utility macros ─── */
-#define min(a, b) ((a) < (b) ? (a) : (b))
 
 /* ─── Log Level Enum ─── */
 typedef enum {

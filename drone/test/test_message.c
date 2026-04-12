@@ -65,18 +65,18 @@ void test_handle_hello_valid(void) {
     hw.y_res = 1080;
     struct sockaddr_in addr = {0};
 
-    int ret = msg_handle_hello("12345", 5, &hw, 0, &addr);
+    int ret = msg_handle_hello("12345", 5, &hw, 0, &addr, 99999);
     TEST_ASSERT_EQUAL(0, ret);
     TEST_ASSERT_EQUAL(1, mock_sendto_called);
-    
+
     uint32_t len_be;
     memcpy(&len_be, mock_sendto_buf, 4);
     uint32_t payload_len = ntohl(len_be);
-    
+
     char payload[128] = {0};
     memcpy(payload, mock_sendto_buf + 4, payload_len);
-    
-    TEST_ASSERT_EQUAL_STRING("I:12345:10000:10010:90:1920:1080", payload);
+
+    TEST_ASSERT_EQUAL_STRING("I:12345:10000:10010:90:1920:1080:99999", payload);
 }
 
 void test_handle_hello_malformed(void) {
@@ -84,19 +84,41 @@ void test_handle_hello_malformed(void) {
     struct sockaddr_in addr = {0};
 
     // Neg
-    TEST_ASSERT_NOT_EQUAL(0, msg_handle_hello("-100", 4, &hw, 0, &addr));
+    TEST_ASSERT_NOT_EQUAL(0, msg_handle_hello("-100", 4, &hw, 0, &addr, 1));
     // Zero
-    TEST_ASSERT_NOT_EQUAL(0, msg_handle_hello("0", 1, &hw, 0, &addr));
+    TEST_ASSERT_NOT_EQUAL(0, msg_handle_hello("0", 1, &hw, 0, &addr, 1));
     // Non-numeric
-    TEST_ASSERT_NOT_EQUAL(0, msg_handle_hello("abc", 3, &hw, 0, &addr));
+    TEST_ASSERT_NOT_EQUAL(0, msg_handle_hello("abc", 3, &hw, 0, &addr, 1));
 }
 
 void test_handle_hello_forward_compat(void) {
     hw_state_t hw = {0};
     struct sockaddr_in addr = {0};
 
-    int ret = msg_handle_hello("555:extra:stuff", 15, &hw, 0, &addr);
+    int ret = msg_handle_hello("555:extra:stuff", 15, &hw, 0, &addr, 1);
     TEST_ASSERT_EQUAL(0, ret);
+}
+
+void test_handle_hello_session_id_in_reply(void) {
+    hw_state_t hw = {0};
+    hw.global_fps = 60;
+    hw.x_res = 1280;
+    hw.y_res = 720;
+    struct sockaddr_in addr = {0};
+
+    uint32_t sid = 3141592653u;
+    int ret = msg_handle_hello("100", 3, &hw, 0, &addr, sid);
+    TEST_ASSERT_EQUAL(0, ret);
+
+    uint32_t len_be;
+    memcpy(&len_be, mock_sendto_buf, 4);
+    uint32_t payload_len = ntohl(len_be);
+
+    char payload[128] = {0};
+    memcpy(payload, mock_sendto_buf + 4, payload_len);
+
+    /* Session ID is the 7th colon-delimited field (index 6). */
+    TEST_ASSERT_EQUAL_STRING("I:100:10000:10010:60:1280:720:3141592653", payload);
 }
 
 /* Build a minimal msg_state_t pointing at a local osd for msg_process tests. */
@@ -153,6 +175,7 @@ int main(void) {
     RUN_TEST(test_handle_hello_valid);
     RUN_TEST(test_handle_hello_malformed);
     RUN_TEST(test_handle_hello_forward_compat);
+    RUN_TEST(test_handle_hello_session_id_in_reply);
     RUN_TEST(test_process_profile_parses_rtt_field);
     RUN_TEST(test_process_profile_backward_compat_no_rtt);
     RUN_TEST(test_process_profile_negative_rtt_leaves_sentinel);

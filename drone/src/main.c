@@ -30,6 +30,10 @@ typedef struct {
     osd_state_t osd;
     osd_udp_config_t osd_udp;
 
+    /* Session — random ID generated once at startup; lets the GS detect
+     * daemon restarts and rotate telemetry logs accordingly. */
+    uint32_t session_id;
+
     /* Shared synchronization */
     pthread_mutex_t count_mutex;
     pthread_mutex_t tx_power_mutex;
@@ -55,6 +59,18 @@ int main(int argc, char *argv[]) {
     /* A closing HTTP peer (majestic restart, OOM) would otherwise deliver
      * SIGPIPE on the next send() and kill the daemon. Convert to EPIPE. */
     signal(SIGPIPE, SIG_IGN);
+
+    /* Generate a random session ID so the GS can detect daemon restarts. */
+    {
+        FILE *urand = fopen("/dev/urandom", "r");
+        if (urand) {
+            if (fread(&daemon.session_id, sizeof(daemon.session_id), 1, urand) != 1)
+                daemon.session_id = (uint32_t)(getpid() ^ time(NULL));
+            fclose(urand);
+        } else {
+            daemon.session_id = (uint32_t)(getpid() ^ time(NULL));
+        }
+    }
 
     /* Initialize subsystems with defaults */
     config_set_defaults(&daemon.cfg);
@@ -293,7 +309,8 @@ int main(int argc, char *argv[]) {
             char *message = buffer + sizeof(uint32_t);
             if (msg_length >= 2 && strncmp(message, "H:", 2) == 0) {
                 msg_handle_hello(message + 2, msg_length - 2,
-                                 &daemon.hw, daemon.sockfd, &client_addr);
+                                 &daemon.hw, daemon.sockfd, &client_addr,
+                                 daemon.session_id);
                 continue;   /* handshake is NOT a heartbeat — do not touch message_count */
             }
             msg_process(&daemon.ms, message, msg_length);

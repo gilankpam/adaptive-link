@@ -383,3 +383,72 @@ def test_force_resync_sends_immediately_on_next_tick():
     hs.force_resync()
     hs.tick(1001)
     assert len(hs.sock.sent) == 2
+
+
+# ─── Session ID tracking ──────────────────────────────────────────────────
+
+
+def test_session_id_parsed_from_reply():
+    """A 7-field I: reply should populate drone_session_id."""
+    hs = _make_hs()
+    hs.tick(1000)
+    assert hs.handle_reply("I:1000:5:10:60:1920:1080:42") is True
+    assert hs.drone_session_id == 42
+
+
+def test_session_id_backward_compat():
+    """A 6-field I: reply (no session_id) must still work and leave
+    drone_session_id as None."""
+    hs = _make_hs()
+    hs.tick(1000)
+    assert hs.handle_reply("I:1000:5:10:60:1920:1080") is True
+    assert hs.drone_session_id is None
+    assert hs.session_changed is False
+
+
+def test_first_session_no_change():
+    """First-ever session_id should NOT trigger session_changed — there is
+    no previous session to compare against."""
+    hs = _make_hs()
+    hs.tick(1000)
+    hs.handle_reply("I:1000:5:10:60:1920:1080:100")
+    assert hs.session_changed is False
+    assert hs.drone_session_id == 100
+
+
+def test_session_change_detected():
+    """A different session_id should set session_changed; pop_session_changed()
+    should consume it exactly once."""
+    hs = _make_hs(long_resync_ms=1000)
+    hs.tick(0)
+    hs.handle_reply("I:0:5:10:60:1920:1080:100")
+    assert hs.session_changed is False
+
+    hs.tick(1000)
+    hs.handle_reply("I:1000:5:10:60:1920:1080:200")
+    assert hs.session_changed is True
+    assert hs.drone_session_id == 200
+    assert hs.pop_session_changed() is True
+    assert hs.pop_session_changed() is False  # consumed
+
+
+def test_same_session_no_change():
+    """Receiving the same session_id again should not trigger a change."""
+    hs = _make_hs(long_resync_ms=1000)
+    hs.tick(0)
+    hs.handle_reply("I:0:5:10:60:1920:1080:100")
+
+    hs.tick(1000)
+    hs.handle_reply("I:1000:5:10:60:1920:1080:100")
+    assert hs.session_changed is False
+    assert hs.drone_session_id == 100
+
+
+def test_session_id_does_not_break_rtt():
+    """RTT calculation must still work with the extra session_id field."""
+    hs = _make_hs()
+    hs.tick(1000)
+    # gs_recv_ms=1010, t1=1000, t2=2000, t3=2003 → rtt = (1010-1000) - (2003-2000) = 7
+    assert hs.handle_reply("I:1000:2000:2003:60:1920:1080:555", gs_recv_ms=1010)
+    assert hs.last_rtt_ms == 7
+    assert hs.drone_session_id == 555

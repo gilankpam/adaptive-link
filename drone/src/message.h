@@ -42,6 +42,7 @@ void msg_process(msg_state_t *ms, const char *msg, size_t msg_len);
 
 int msg_handle_hello(const char *payload, size_t payload_len,
                      hw_state_t *hw, int sockfd,
-                     const struct sockaddr_in *client_addr);
+                     const struct sockaddr_in *client_addr,
+                     uint32_t session_id);
 
 #endif /* ALINK_MESSAGE_H */

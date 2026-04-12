@@ -36,7 +36,8 @@ void msg_init(msg_state_t *ms, profile_state_t *ps, keyframe_state_t *ks,
 
 int msg_handle_hello(const char *payload, size_t payload_len,
                      hw_state_t *hw, int sockfd,
-                     const struct sockaddr_in *client_addr) {
+                     const struct sockaddr_in *client_addr,
+                     uint32_t session_id) {
     /* Stamp t2 first thing — both t2 and t3 must be on the drone clock so
      * (t3 - t2) measures drone-side processing only. The GS subtracts that
      * from its own (gs_recv - t1) to recover the on-wire RTT, regardless of
@@ -71,9 +72,10 @@ int msg_handle_hello(const char *payload, size_t payload_len,
 
     char reply_payload[128];
     int n = snprintf(reply_payload, sizeof(reply_payload),
-                     "I:%lld:%ld:%ld:%d:%d:%d",
+                     "I:%lld:%ld:%ld:%d:%d:%d:%u",
                      t1, t2, t3,
-                     hw->global_fps, hw->x_res, hw->y_res);
+                     hw->global_fps, hw->x_res, hw->y_res,
+                     session_id);
     if (n <= 0 || (size_t)n >= sizeof(reply_payload)) {
         return -1;
     }

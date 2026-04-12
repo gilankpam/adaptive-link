@@ -82,6 +82,7 @@ adaptive-link/
 │   │   └── http_client.c / http_client.h  # Native HTTP GET requests (no curl)
 │   └── test/
 │       ├── test_util.c                  # Unity tests for C utilities
+│       ├── test_message.c               # Unity tests for message parsing, handshake, jitter
 │       └── unity/                       # Unity test framework
 │
 ├── ground-station/
@@ -96,6 +97,7 @@ adaptive-link/
 │       ├── test_dynamic_profile.py      # Python tests for GS dynamic mode
 │       ├── test_feature_engineering.py  # Python tests for ML feature engineering
 │       ├── test_telemetry_logger.py     # Python tests for telemetry logging
+│       ├── test_handshake.py            # Python tests for handshake protocol and session tracking
 │       ├── test_replay_simulator.py     # Python tests for replay simulator
 │       └── test_optimize_params.py      # Python tests for parameter optimization
 │
@@ -496,7 +498,11 @@ Handshake (H:):
 H:<t1>                              # GS → drone: t1 on GS clock (ms)
 
 Handshake reply (I:):
-I:<t1>:<t2>:<t3>:<fps>:<x_res>:<y_res>  # drone → GS: echo + drone-clock t2/t3 + video params
+I:<t1>:<t2>:<t3>:<fps>:<x_res>:<y_res>:<session_id>
+                                    # drone → GS: echo + drone-clock t2/t3 + video params + session ID
+  - session_id: Random uint32 generated once at daemon startup. Lets the GS detect
+                drone restarts and rotate telemetry logs. Backward-compatible trailing
+                field — old GS versions ignore it.
 
 Keyframe request (K:):
 K:                                     # GS → drone: trigger keyframe request
@@ -515,16 +521,17 @@ The GS sends the current profile on every tick for UDP reliability. The drone sk
 
 ### Handshake Mechanism
 
-The handshake is a thin probe that fetches current camera parameters and measures on-wire RTT without requiring clock sync.
+The handshake is a thin probe that fetches current camera parameters, measures on-wire RTT without requiring clock sync, and carries a session ID for drone restart detection.
 
 **Flow:**
 
 1. **GS sends `H:<t1>`**: `t1` is the GS clock at send time.
-2. **Drone replies `I:<t1>:<t2>:<t3>:<fps>:<x_res>:<y_res>`**:
+2. **Drone replies `I:<t1>:<t2>:<t3>:<fps>:<x_res>:<y_res>:<session_id>`**:
    - `t1`: echoed back for freshness matching on the GS side
    - `t2`: stamped *first* in `msg_handle_hello` (before any parsing work)
    - `t3`: stamped *just before* `sendto` (after `hw_refresh_camera_info`)
    - `fps`, `x_res`, `y_res`: re-queried from the camera API on each hello (via `hw_refresh_camera_info()` with a 2-second TTL cache to coalesce fast-retry bursts)
+   - `session_id`: random `uint32_t` generated once at daemon startup from `/dev/urandom` (fallback: `getpid() ^ time(NULL)`). When `HandshakeClient` sees a different session_id than the previous handshake, it sets a `session_changed` flag. The main loop consumes this via `pop_session_changed()` and calls `TelemetryLogger.new_session()` to rotate the telemetry log, giving each drone session its own clean file for ML training. Backward-compatible: old GS versions ignore the extra field; new GS with old drone gets no session_id and never triggers rotation.
 
 **Two-stage timer (`HandshakeClient` in `alink_gs`):**
 

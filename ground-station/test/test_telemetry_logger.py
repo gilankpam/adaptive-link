@@ -446,5 +446,88 @@ class TestTelemetryLoggerEdgeCases(unittest.TestCase):
         self.assertEqual(len(outcomes), 0)
 
 
+class TestTelemetryLoggerNewSession(unittest.TestCase):
+    """Test session-based log rotation triggered by drone restarts."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def _log_tick(self, logger, ts=1000, changed=False, loss_rate=0.0,
+                  profile=None, fec_k=8, fec_n=12):
+        if profile is None:
+            profile = {'mcs': 3, 'gi': 'long', 'fec_k': 6, 'fec_n': 9,
+                       'bitrate': 8000, 'power': 40}
+        logger.log(
+            timestamp_ms=ts, best_rssi=-50, best_snr=20, min_rssi=-55,
+            num_antennas=2, all_packets=1000, lost_packets=0,
+            fec_rec_packets=0, fec_k=fec_k, fec_n=fec_n,
+            loss_rate=loss_rate, fec_pressure=0.0,
+            snr_ema=20.0, snr_slope=0.0,
+            margin_current=4.0, margin_target=4.0, emergency=False,
+            profile=profile, profile_changed=changed,
+        )
+
+    def test_new_session_rotates_file(self):
+        logger = TelemetryLogger(self.tmpdir, rotate_mb=50, outcome_window=10)
+        self._log_tick(logger, ts=1000)
+        logger.new_session()
+        self._log_tick(logger, ts=2000)
+        logger.close()
+
+        self.assertTrue(os.path.exists(os.path.join(self.tmpdir, 'telemetry_0.jsonl')))
+        self.assertTrue(os.path.exists(os.path.join(self.tmpdir, 'telemetry_1.jsonl')))
+
+        with open(os.path.join(self.tmpdir, 'telemetry_0.jsonl')) as f:
+            records_0 = [json.loads(line) for line in f]
+        with open(os.path.join(self.tmpdir, 'telemetry_1.jsonl')) as f:
+            records_1 = [json.loads(line) for line in f]
+
+        self.assertEqual(len(records_0), 1)
+        self.assertEqual(records_0[0]['ts'], 1000)
+        self.assertEqual(len(records_1), 1)
+        self.assertEqual(records_1[0]['ts'], 2000)
+
+    def test_multiple_sessions(self):
+        logger = TelemetryLogger(self.tmpdir, rotate_mb=50, outcome_window=10)
+        self._log_tick(logger, ts=1000)
+        logger.new_session()
+        self._log_tick(logger, ts=2000)
+        logger.new_session()
+        self._log_tick(logger, ts=3000)
+        logger.close()
+
+        for i in range(3):
+            self.assertTrue(os.path.exists(
+                os.path.join(self.tmpdir, f'telemetry_{i}.jsonl')))
+
+    def test_new_session_finalizes_pending_outcome(self):
+        """Outcome tracking window should be finalized into the old file
+        before the session rotation."""
+        profile = {'mcs': 5, 'gi': 'short', 'fec_k': 8, 'fec_n': 12,
+                   'bitrate': 12000, 'power': 30}
+        logger = TelemetryLogger(self.tmpdir, rotate_mb=50, outcome_window=10)
+
+        # Trigger a profile change and let FEC confirm immediately
+        self._log_tick(logger, ts=1000, changed=True, profile=profile,
+                       fec_k=8, fec_n=12)
+        # Feed a few outcome ticks
+        for i in range(3):
+            self._log_tick(logger, ts=1100 + i * 100, loss_rate=0.01,
+                           profile=profile, fec_k=8, fec_n=12)
+
+        # Rotate — should finalize the partial outcome into telemetry_0
+        logger.new_session()
+        logger.close()
+
+        with open(os.path.join(self.tmpdir, 'telemetry_0.jsonl')) as f:
+            records = [json.loads(line) for line in f]
+        outcomes = [r for r in records if r.get('type') == 'outcome']
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(outcomes[0]['label'], 'good')
+
+
 if __name__ == '__main__':
     unittest.main()

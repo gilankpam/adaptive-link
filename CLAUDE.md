@@ -124,6 +124,7 @@ The `TelemetryLogger` class provides ML-ready data collection:
 - **Outcome tracking:** Tracks link quality in ticks following profile changes (good/marginal/bad labels)
 - **FEC confirmation:** Waits for FEC parameters to be confirmed before starting outcome window
 - **Auto-rotation:** Rotates log files at configurable size (default 50MB)
+- **Session-based rotation:** When the GS detects a drone restart (session_id change in handshake), `new_session()` finalizes pending outcomes and rotates to a new file, giving each drone session its own clean telemetry file for ML training
 - **Adapter tagging:** Supports multiple adapters with per-adapter log files
 
 ### Hardware Abstraction
@@ -161,14 +162,15 @@ The `TelemetryLogger` class provides ML-ready data collection:
 
 ## Handshake Mechanism
 
-The GS and drone exchange handshake messages to obtain current video parameters (fps/res) and measure link RTT without needing clock sync:
+The GS and drone exchange handshake messages to obtain current video parameters (fps/res), measure link RTT without needing clock sync, and detect drone daemon restarts via a session ID:
 
 - **`H:<t1>`** (GS → drone): GS sends timestamp `t1` (milliseconds since its own clock).
-- **`I:<t1>:<t2>:<t3>:<fps>:<x_res>:<y_res>`** (drone → GS): Drone replies with:
+- **`I:<t1>:<t2>:<t3>:<fps>:<x_res>:<y_res>:<session_id>`** (drone → GS): Drone replies with:
   - `t1`: Echo of GS timestamp (freshness check — must match the outstanding hello).
   - `t2`: Drone receive timestamp (stamped first thing in `msg_handle_hello`).
   - `t3`: Drone send timestamp (stamped just before `sendto`).
   - `fps`, `x_res`, `y_res`: Camera video parameters, refreshed on every hello (see below).
+  - `session_id`: Random `uint32_t` generated once at daemon startup from `/dev/urandom`. When the GS sees a different session_id than the previous handshake, it knows the drone restarted and rotates the telemetry log to a new file. Backward-compatible: old GS versions ignore the extra field.
 
 ### Two-stage timer (fast retry + long resync)
 

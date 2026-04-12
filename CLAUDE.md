@@ -14,15 +14,19 @@ Two-component system:
 
 ```bash
 make              # Build alink_drone binary
-make test         # Run Unity tests
+make test         # Run all tests (C + Python)
+make test-c       # Run C Unity tests only
+make test-python  # Run Python pytest tests only
 make clean        # Remove build artifacts
 ```
 
 The build compiles 12 C source files into a single binary (in `drone/src/`). No external library dependencies beyond libc, pthreads, and libm. Cross-compilation for OpenIPC targets uses `CC` and `OPT` variables passed to make. Compiler flags include `-Wall -Wextra -Werror`.
 
+The Makefile auto-detects `.venv/bin/python3` for Python targets, falling back to system `python3`.
+
 The project includes:
-- **Unity test framework** for C unit tests (`make test`)
-- **Python test suite** for ground station (`ground-station/test/`)
+- **Unity test framework** for C unit tests (`make test-c`)
+- **pytest test suite** for ground station (`make test-python`)
 - **ML offline analysis tools** (`ground-station/ml/`)
 
 ## Architecture
@@ -224,8 +228,12 @@ Tests are in `drone/test/`:
 - `test_message.c`: UDP message parsing, handshake handling, jitter measurement
 
 ### Python Tests
+
+All Python tests use **pytest** (not `unittest`). New test files must use pytest conventions: plain classes (no `unittest.TestCase` inheritance), bare `assert` statements, and pytest fixtures.
+
 ```bash
-python3 -m pytest ground-station/test/ -v
+make test-python                                      # Run via Makefile (auto-detects venv)
+.venv/bin/python3 -m pytest ground-station/test/ -v   # Run directly
 ```
 
 Tests cover:
@@ -235,3 +243,12 @@ Tests cover:
 - `test_replay_simulator.py`: Offline profile selection simulation
 - `test_optimize_params.py`: Bayesian parameter optimization
 - `test_handshake.py`: Handshake message encoding/decoding
+
+## Documentation Maintenance
+
+When making changes to the codebase, update the relevant documentation:
+
+- **`CLAUDE.md`**: Update when changes affect build commands, architecture, module structure, code conventions, configuration, or testing. This is the primary reference for AI agents working on this repo.
+- **`docs/`**: Update any affected docs (e.g. `FEC_CALCULATION.md`) when the feature they describe is modified.
+
+Keep documentation in sync with code — stale docs are worse than no docs.

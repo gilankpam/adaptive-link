@@ -5,7 +5,7 @@ import os
 import json
 import tempfile
 import shutil
-import unittest
+import pytest
 
 # Import module-level constants and classes by executing the script up to __main__
 _gs_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'ground-station', 'alink_gs')
@@ -14,13 +14,13 @@ with open(_gs_path) as _f:
 exec(_code)
 
 
-class TestTelemetryLoggerBasic(unittest.TestCase):
+class TestTelemetryLoggerBasic:
     """Test basic logging, file creation, and JSONL format."""
 
-    def setUp(self):
+    def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()
 
-    def tearDown(self):
+    def teardown_method(self):
         shutil.rmtree(self.tmpdir)
 
     def _make_logger(self, rotate_mb=50, outcome_window=10):
@@ -46,7 +46,7 @@ class TestTelemetryLoggerBasic(unittest.TestCase):
         logger = self._make_logger()
         self._log_tick(logger)
         logger.close()
-        self.assertTrue(os.path.exists(os.path.join(self.tmpdir, 'telemetry_0.jsonl')))
+        assert os.path.exists(os.path.join(self.tmpdir, 'telemetry_0.jsonl'))
 
     def test_jsonl_format_parseable(self):
         logger = self._make_logger()
@@ -57,11 +57,11 @@ class TestTelemetryLoggerBasic(unittest.TestCase):
         path = os.path.join(self.tmpdir, 'telemetry_0.jsonl')
         with open(path) as f:
             lines = f.readlines()
-        self.assertEqual(len(lines), 5)
+        assert len(lines) == 5
         for line in lines:
             record = json.loads(line)
-            self.assertIn('ts', record)
-            self.assertIn('snr', record)
+            assert 'ts' in record
+            assert 'snr' in record
 
     def test_record_contains_all_fields(self):
         logger = self._make_logger()
@@ -81,7 +81,7 @@ class TestTelemetryLoggerBasic(unittest.TestCase):
             'mcs', 'gi', 'sel_fec_k', 'sel_fec_n', 'bitrate', 'power',
         ]
         for field in expected_fields:
-            self.assertIn(field, record, f"Missing field: {field}")
+            assert field in record, f"Missing field: {field}"
 
     def test_none_profile_omits_profile_fields(self):
         logger = self._make_logger()
@@ -99,16 +99,16 @@ class TestTelemetryLoggerBasic(unittest.TestCase):
         path = os.path.join(self.tmpdir, 'telemetry_0.jsonl')
         with open(path) as f:
             record = json.loads(f.readline())
-        self.assertNotIn('mcs', record)
+        assert 'mcs' not in record
 
 
-class TestTelemetryLoggerRotation(unittest.TestCase):
+class TestTelemetryLoggerRotation:
     """Test file rotation by size."""
 
-    def setUp(self):
+    def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()
 
-    def tearDown(self):
+    def teardown_method(self):
         shutil.rmtree(self.tmpdir)
 
     def test_rotates_when_size_exceeded(self):
@@ -131,16 +131,16 @@ class TestTelemetryLoggerRotation(unittest.TestCase):
 
         # Should have created multiple files
         files = [f for f in os.listdir(self.tmpdir) if f.endswith('.jsonl')]
-        self.assertGreater(len(files), 1)
+        assert len(files) > 1
 
 
-class TestTelemetryLoggerOutcome(unittest.TestCase):
+class TestTelemetryLoggerOutcome:
     """Test outcome labeling after profile changes."""
 
-    def setUp(self):
+    def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()
 
-    def tearDown(self):
+    def teardown_method(self):
         shutil.rmtree(self.tmpdir)
 
     def _read_records(self):
@@ -179,9 +179,9 @@ class TestTelemetryLoggerOutcome(unittest.TestCase):
 
         records = self._read_records()
         outcomes = [r for r in records if r.get('type') == 'outcome']
-        self.assertEqual(len(outcomes), 1)
-        self.assertEqual(outcomes[0]['label'], 'good')
-        self.assertEqual(outcomes[0]['change_ts'], 1000)
+        assert len(outcomes) == 1
+        assert outcomes[0]['label'] == 'good'
+        assert outcomes[0]['change_ts'] == 1000
 
     def test_bad_outcome(self):
         logger = TelemetryLogger(self.tmpdir, outcome_window=3)
@@ -214,8 +214,8 @@ class TestTelemetryLoggerOutcome(unittest.TestCase):
 
         records = self._read_records()
         outcomes = [r for r in records if r.get('type') == 'outcome']
-        self.assertEqual(len(outcomes), 1)
-        self.assertEqual(outcomes[0]['label'], 'bad')
+        assert len(outcomes) == 1
+        assert outcomes[0]['label'] == 'bad'
 
     def test_marginal_outcome(self):
         logger = TelemetryLogger(self.tmpdir, outcome_window=3)
@@ -248,8 +248,8 @@ class TestTelemetryLoggerOutcome(unittest.TestCase):
 
         records = self._read_records()
         outcomes = [r for r in records if r.get('type') == 'outcome']
-        self.assertEqual(len(outcomes), 1)
-        self.assertEqual(outcomes[0]['label'], 'marginal')
+        assert len(outcomes) == 1
+        assert outcomes[0]['label'] == 'marginal'
 
     def test_outcome_finalized_on_next_change(self):
         """Outcome window is finalized early when a new profile change occurs."""
@@ -299,18 +299,18 @@ class TestTelemetryLoggerOutcome(unittest.TestCase):
         outcomes = [r for r in records if r.get('type') == 'outcome']
         # First outcome finalized early (2 confirmed ticks)
         # Second outcome: FEC matches immediately, finalized on close (1 tick)
-        self.assertEqual(len(outcomes), 2)
-        self.assertEqual(outcomes[0]['change_ts'], 1000)
-        self.assertEqual(outcomes[0]['ticks'], 2)
+        assert len(outcomes) == 2
+        assert outcomes[0]['change_ts'] == 1000
+        assert outcomes[0]['ticks'] == 2
 
 
-class TestTelemetryLoggerFecConfirmation(unittest.TestCase):
+class TestTelemetryLoggerFecConfirmation:
     """Test FEC-confirmed outcome tracking."""
 
-    def setUp(self):
+    def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()
 
-    def tearDown(self):
+    def teardown_method(self):
         shutil.rmtree(self.tmpdir)
 
     def _read_records(self):
@@ -356,10 +356,10 @@ class TestTelemetryLoggerFecConfirmation(unittest.TestCase):
 
         records = self._read_records()
         outcomes = [r for r in records if r.get('type') == 'outcome']
-        self.assertEqual(len(outcomes), 1)
-        self.assertEqual(outcomes[0]['label'], 'good')
-        self.assertEqual(outcomes[0]['ticks'], 3)  # only confirmed ticks
-        self.assertEqual(outcomes[0]['change_ts'], 1000)
+        assert len(outcomes) == 1
+        assert outcomes[0]['label'] == 'good'
+        assert outcomes[0]['ticks'] == 3  # only confirmed ticks
+        assert outcomes[0]['change_ts'] == 1000
 
     def test_outcome_discarded_on_confirm_timeout(self):
         """If FEC never matches within timeout, no outcome is recorded."""
@@ -379,7 +379,7 @@ class TestTelemetryLoggerFecConfirmation(unittest.TestCase):
 
         records = self._read_records()
         outcomes = [r for r in records if r.get('type') == 'outcome']
-        self.assertEqual(len(outcomes), 0)
+        assert len(outcomes) == 0
 
     def test_immediate_confirmation_when_fec_matches(self):
         """When reported FEC matches profile on change tick, confirm immediately."""
@@ -399,18 +399,18 @@ class TestTelemetryLoggerFecConfirmation(unittest.TestCase):
 
         records = self._read_records()
         outcomes = [r for r in records if r.get('type') == 'outcome']
-        self.assertEqual(len(outcomes), 1)
-        self.assertEqual(outcomes[0]['label'], 'good')
-        self.assertEqual(outcomes[0]['ticks'], 3)
+        assert len(outcomes) == 1
+        assert outcomes[0]['label'] == 'good'
+        assert outcomes[0]['ticks'] == 3
 
 
-class TestTelemetryLoggerEdgeCases(unittest.TestCase):
+class TestTelemetryLoggerEdgeCases:
     """Test edge cases and robustness."""
 
-    def setUp(self):
+    def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()
 
-    def tearDown(self):
+    def teardown_method(self):
         shutil.rmtree(self.tmpdir)
 
     def test_close_without_logging(self):
@@ -420,7 +420,7 @@ class TestTelemetryLoggerEdgeCases(unittest.TestCase):
     def test_creates_log_dir_if_missing(self):
         nested = os.path.join(self.tmpdir, 'sub', 'dir')
         logger = TelemetryLogger(nested)
-        self.assertTrue(os.path.isdir(nested))
+        assert os.path.isdir(nested)
         logger.close()
 
     def test_no_outcome_without_change(self):
@@ -443,16 +443,16 @@ class TestTelemetryLoggerEdgeCases(unittest.TestCase):
         with open(path) as f:
             records = [json.loads(line) for line in f]
         outcomes = [r for r in records if r.get('type') == 'outcome']
-        self.assertEqual(len(outcomes), 0)
+        assert len(outcomes) == 0
 
 
-class TestTelemetryLoggerNewSession(unittest.TestCase):
+class TestTelemetryLoggerNewSession:
     """Test session-based log rotation triggered by drone restarts."""
 
-    def setUp(self):
+    def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()
 
-    def tearDown(self):
+    def teardown_method(self):
         shutil.rmtree(self.tmpdir)
 
     def _log_tick(self, logger, ts=1000, changed=False, loss_rate=0.0,
@@ -477,18 +477,18 @@ class TestTelemetryLoggerNewSession(unittest.TestCase):
         self._log_tick(logger, ts=2000)
         logger.close()
 
-        self.assertTrue(os.path.exists(os.path.join(self.tmpdir, 'telemetry_0.jsonl')))
-        self.assertTrue(os.path.exists(os.path.join(self.tmpdir, 'telemetry_1.jsonl')))
+        assert os.path.exists(os.path.join(self.tmpdir, 'telemetry_0.jsonl'))
+        assert os.path.exists(os.path.join(self.tmpdir, 'telemetry_1.jsonl'))
 
         with open(os.path.join(self.tmpdir, 'telemetry_0.jsonl')) as f:
             records_0 = [json.loads(line) for line in f]
         with open(os.path.join(self.tmpdir, 'telemetry_1.jsonl')) as f:
             records_1 = [json.loads(line) for line in f]
 
-        self.assertEqual(len(records_0), 1)
-        self.assertEqual(records_0[0]['ts'], 1000)
-        self.assertEqual(len(records_1), 1)
-        self.assertEqual(records_1[0]['ts'], 2000)
+        assert len(records_0) == 1
+        assert records_0[0]['ts'] == 1000
+        assert len(records_1) == 1
+        assert records_1[0]['ts'] == 2000
 
     def test_multiple_sessions(self):
         logger = TelemetryLogger(self.tmpdir, rotate_mb=50, outcome_window=10)
@@ -500,8 +500,8 @@ class TestTelemetryLoggerNewSession(unittest.TestCase):
         logger.close()
 
         for i in range(3):
-            self.assertTrue(os.path.exists(
-                os.path.join(self.tmpdir, f'telemetry_{i}.jsonl')))
+            assert os.path.exists(
+                os.path.join(self.tmpdir, f'telemetry_{i}.jsonl'))
 
     def test_new_session_finalizes_pending_outcome(self):
         """Outcome tracking window should be finalized into the old file
@@ -525,9 +525,5 @@ class TestTelemetryLoggerNewSession(unittest.TestCase):
         with open(os.path.join(self.tmpdir, 'telemetry_0.jsonl')) as f:
             records = [json.loads(line) for line in f]
         outcomes = [r for r in records if r.get('type') == 'outcome']
-        self.assertEqual(len(outcomes), 1)
-        self.assertEqual(outcomes[0]['label'], 'good')
-
-
-if __name__ == '__main__':
-    unittest.main()
+        assert len(outcomes) == 1
+        assert outcomes[0]['label'] == 'good'

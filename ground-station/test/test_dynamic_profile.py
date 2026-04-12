@@ -2,8 +2,8 @@
 """Unit tests for dynamic profile calculation in alink_gs."""
 import sys
 import os
-import unittest
 import configparser
+import pytest
 
 # Add parent directory to path so we can import from alink_gs
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -107,48 +107,48 @@ def _feed_tick(ps, best_snr, loss_rate=0.0, fec_pressure=0.0,
 _feed_score = _feed_tick
 
 
-class TestMCSSelection(unittest.TestCase):
+class TestMCSSelection:
     """Test that MCS is selected correctly based on SNR thresholds."""
 
     def test_mcs0_at_low_snr(self):
         ps = _make_selector()
         _feed_score(ps, best_snr=7)
         profile = ps._compute_profile()
-        self.assertEqual(profile['mcs'], 0)
+        assert profile['mcs'] == 0
 
     def test_mcs0_when_snr_below_all_thresholds(self):
         ps = _make_selector()
         _feed_score(ps, best_snr=3)
         profile = ps._compute_profile()
-        self.assertEqual(profile['mcs'], 0)
+        assert profile['mcs'] == 0
 
     def test_mcs1_at_snr_12(self):
         """SNR=12, margin=3 → MCS1 threshold=8+3=11 < 12 → MCS1."""
         ps = _make_selector()
         _feed_score(ps, best_snr=12)
         profile = ps._compute_profile()
-        self.assertEqual(profile['mcs'], 1)
+        assert profile['mcs'] == 1
 
     def test_mcs3_at_snr_18(self):
         """SNR=18, margin=3 → MCS3 threshold=14+3=17 < 18 → MCS3."""
         ps = _make_selector()
         _feed_score(ps, best_snr=18)
         profile = ps._compute_profile()
-        self.assertEqual(profile['mcs'], 3)
+        assert profile['mcs'] == 3
 
     def test_mcs7_at_high_snr(self):
         """SNR=32, margin=3 → MCS7 threshold=26+3=29 < 32 → MCS7."""
         ps = _make_selector()
         _feed_score(ps, best_snr=32)
         profile = ps._compute_profile()
-        self.assertEqual(profile['mcs'], 7)
+        assert profile['mcs'] == 7
 
     def test_max_mcs_cap(self):
         """Even with high SNR, respect max_mcs config."""
         ps = _make_selector({'dynamic': {'max_mcs': '4'}})
         _feed_score(ps, best_snr=32)
         profile = ps._compute_profile()
-        self.assertEqual(profile['mcs'], 4)
+        assert profile['mcs'] == 4
 
     def test_margin_increases_with_loss(self):
         """High loss widens margin, may push MCS down."""
@@ -158,7 +158,7 @@ class TestMCSSelection(unittest.TestCase):
         _feed_score(ps, best_snr=18)
         ps._current_loss_rate = 0.1
         profile = ps._compute_profile()
-        self.assertEqual(profile['mcs'], 2)
+        assert profile['mcs'] == 2
 
     def test_margin_increases_with_fec_pressure(self):
         """High FEC pressure widens margin."""
@@ -169,10 +169,10 @@ class TestMCSSelection(unittest.TestCase):
         # MCS2 threshold = 11+8 = 19 > 18
         # MCS1 threshold = 8+8 = 16 < 18 → MCS1
         profile = ps._compute_profile()
-        self.assertEqual(profile['mcs'], 1)
+        assert profile['mcs'] == 1
 
 
-class TestGuardInterval(unittest.TestCase):
+class TestGuardInterval:
     """Test guard interval selection."""
 
     def test_long_gi_when_margin_small(self):
@@ -180,14 +180,14 @@ class TestGuardInterval(unittest.TestCase):
         ps = _make_selector()
         _feed_score(ps, best_snr=18)  # MCS3, margin above threshold = 18-14=4 < 5
         profile = ps._compute_profile()
-        self.assertEqual(profile['gi'], 'long')
+        assert profile['gi'] == 'long'
 
     def test_short_gi_when_margin_large(self):
         """SNR well above threshold → short GI."""
         ps = _make_selector()
         _feed_score(ps, best_snr=22)  # MCS3 (14+3=17<22), margin above = 22-14=8 >= 5
         profile = ps._compute_profile()
-        self.assertEqual(profile['gi'], 'short')
+        assert profile['gi'] == 'short'
 
     def test_long_gi_when_loss_high(self):
         """Even with good margin, high loss forces long GI."""
@@ -195,7 +195,7 @@ class TestGuardInterval(unittest.TestCase):
         _feed_score(ps, best_snr=22)
         ps._current_loss_rate = 0.05  # > 0.02 threshold
         profile = ps._compute_profile()
-        self.assertEqual(profile['gi'], 'long')
+        assert profile['gi'] == 'long'
 
     def test_long_gi_when_fec_pressure_high(self):
         """High FEC pressure forces long GI."""
@@ -203,10 +203,10 @@ class TestGuardInterval(unittest.TestCase):
         _feed_score(ps, best_snr=22)
         ps._current_fec_pressure = 0.5  # > 0.3 threshold
         profile = ps._compute_profile()
-        self.assertEqual(profile['gi'], 'long')
+        assert profile['gi'] == 'long'
 
 
-class TestFEC(unittest.TestCase):
+class TestFEC:
     """Test bitrate-aware FEC block sizing using frame-aligned algorithm."""
 
     def test_small_blocks_at_low_bitrate(self):
@@ -215,8 +215,8 @@ class TestFEC(unittest.TestCase):
         ps = _make_selector()
         _feed_score(ps, best_snr=7)
         profile = ps._compute_profile()
-        self.assertEqual(profile['fec_n'], 6)
-        self.assertEqual(profile['fec_k'], 4)
+        assert profile['fec_n'] == 6
+        assert profile['fec_k'] == 4
 
     def test_medium_blocks_at_mid_bitrate(self):
         """MCS4 LGI: PHY=39 Mbps, raw=17550 kbps, target=13163 kbps.
@@ -224,8 +224,8 @@ class TestFEC(unittest.TestCase):
         ps = _make_selector()
         _feed_score(ps, best_snr=21)  # MCS4: 17+3=20 < 21
         profile = ps._compute_profile()
-        self.assertEqual(profile['fec_n'], 26)
-        self.assertEqual(profile['fec_k'], 19)
+        assert profile['fec_n'] == 26
+        assert profile['fec_k'] == 19
 
     def test_large_blocks_at_high_bitrate(self):
         """MCS7 SGI: PHY=72.2 Mbps, raw=32490 kbps, target=24368 kbps.
@@ -233,8 +233,8 @@ class TestFEC(unittest.TestCase):
         ps = _make_selector()
         _feed_score(ps, best_snr=32)
         profile = ps._compute_profile()
-        self.assertEqual(profile['fec_n'], 48)
-        self.assertEqual(profile['fec_k'], 36)
+        assert profile['fec_n'] == 48
+        assert profile['fec_k'] == 36
 
     def test_fec_downgrade_on_high_loss(self):
         """Loss > threshold reduces fec_k by 1, keeping fec_n constant (increases redundancy).
@@ -247,9 +247,9 @@ class TestFEC(unittest.TestCase):
         _feed_score(ps, best_snr=21)
         ps._current_loss_rate = 0.06  # > 0.05 threshold
         profile = ps._compute_profile()
-        self.assertEqual(profile['mcs'], 3)  # Margin pushed MCS down
-        self.assertEqual(profile['fec_k'], 12)
-        self.assertEqual(profile['fec_n'], 18)  # N stays constant after loss downgrade
+        assert profile['mcs'] == 3  # Margin pushed MCS down
+        assert profile['fec_k'] == 12
+        assert profile['fec_n'] == 18  # N stays constant after loss downgrade
 
     def test_fec_downgrade_floor(self):
         """fec_k has minimum of 2, but max_fec_redundancy may raise it.
@@ -259,8 +259,8 @@ class TestFEC(unittest.TestCase):
         _feed_score(ps, best_snr=7)  # MCS0, K=4, N=6
         ps._current_loss_rate = 0.06  # Triggers downgrade
         profile = ps._compute_profile()
-        self.assertEqual(profile['fec_k'], 3)  # 4-1=3, at max_fec_redundancy boundary (50%)
-        self.assertEqual(profile['fec_n'], 6)  # N stays constant
+        assert profile['fec_k'] == 3  # 4-1=3, at max_fec_redundancy boundary (50%)
+        assert profile['fec_n'] == 6  # N stays constant
 
     def test_max_fec_redundancy_enforced(self):
         """max_fec_redundancy should prevent excessive redundancy after loss.
@@ -280,10 +280,10 @@ class TestFEC(unittest.TestCase):
         # (N-K)/N <= 0.5 → K/N >= 0.5 → K >= N/2
         # With K=3, N=4: 3/4 = 0.75 >= 0.5, so it passes
         redundancy = (profile['fec_n'] - profile['fec_k']) / profile['fec_n']
-        self.assertLessEqual(redundancy, 0.5 + 0.01)  # Allow small tolerance
+        assert redundancy <= 0.5 + 0.01  # Allow small tolerance
 
 
-class TestFECFromBitrate(unittest.TestCase):
+class TestFECFromBitrate:
     """Test the new FEC calculation algorithm."""
 
     def test_packets_per_frame_calculation(self):
@@ -292,14 +292,14 @@ class TestFECFromBitrate(unittest.TestCase):
         bitrate = 4000000  # 4 Mbps
         fps = ps.handshake.get_fps()
         packets_per_frame = bitrate / (fps * 8 * MTU_PAYLOAD_BYTES)
-        self.assertAlmostEqual(packets_per_frame, 5.76, places=1)
+        assert packets_per_frame == pytest.approx(5.76, abs=0.1)
 
     def test_fec_k_equals_ceil_packets_per_frame(self):
         """K should be ceiling of packets per frame."""
         ps = _make_selector()
         bitrate = 4000000  # 4 Mbps → 5.76 packets → K=6
         fec_k, fec_n = ps._compute_fec_from_bitrate(bitrate)
-        self.assertEqual(fec_k, 6)
+        assert fec_k == 6
 
     def test_fec_n_uses_config_redundancy_ratio(self):
         """N should use fec_redundancy_ratio config (default 0.25 = 25%)."""
@@ -307,14 +307,14 @@ class TestFECFromBitrate(unittest.TestCase):
         # With 25% redundancy: N = K / 0.75
         # K=6 → N = 6 / 0.75 = 8
         fec_k, fec_n = ps._compute_fec_from_bitrate(4000000)
-        self.assertEqual(fec_n, 8)
+        assert fec_n == 8
 
     def test_fec_k_minimum_is_2(self):
         """K should never be less than 2."""
         ps = _make_selector()
         # Very low bitrate should still give K >= 2
         fec_k, fec_n = ps._compute_fec_from_bitrate(100000)  # 100 kbps
-        self.assertGreaterEqual(fec_k, 2)
+        assert fec_k >= 2
 
     def test_4mbps_example_from_spec(self):
         """Test the exact example from the specification: 4 Mbps at 60 FPS = 6/8."""
@@ -322,8 +322,8 @@ class TestFECFromBitrate(unittest.TestCase):
         # 4 Mbps / (60 * 8 * 1446) = 5.76 packets → K=6
         # N = 6 / 0.75 = 8 (with 25% redundancy)
         fec_k, fec_n = ps._compute_fec_from_bitrate(4000000)
-        self.assertEqual(fec_k, 6)
-        self.assertEqual(fec_n, 8)
+        assert fec_k == 6
+        assert fec_n == 8
 
     def test_different_redundancy_ratio(self):
         """Test that custom redundancy ratio is respected."""
@@ -331,11 +331,11 @@ class TestFECFromBitrate(unittest.TestCase):
         # With 33% redundancy: N = K / 0.67 ≈ K * 1.5
         # K=6 → N = 6 / 0.67 = 9
         fec_k, fec_n = ps._compute_fec_from_bitrate(4000000, redundancy_ratio=0.33)
-        self.assertEqual(fec_k, 6)
-        self.assertEqual(fec_n, 9)
+        assert fec_k == 6
+        assert fec_n == 9
 
 
-class TestBitrate(unittest.TestCase):
+class TestBitrate:
     """Test bitrate computation."""
 
     def test_bitrate_mcs0_long_gi(self):
@@ -344,7 +344,7 @@ class TestBitrate(unittest.TestCase):
         ps = _make_selector()
         _feed_score(ps, best_snr=7)
         profile = ps._compute_profile()
-        self.assertEqual(profile['bitrate'], 2000)
+        assert profile['bitrate'] == 2000
 
     def test_bitrate_mcs7_short_gi(self):
         """SNR=32 → MCS7, snr_above=32-26=6 >= 5 → short GI.
@@ -352,20 +352,20 @@ class TestBitrate(unittest.TestCase):
         ps = _make_selector()
         _feed_score(ps, best_snr=32)
         profile = ps._compute_profile()
-        self.assertEqual(profile['gi'], 'short')
-        self.assertEqual(profile['bitrate'], 24367)
+        assert profile['gi'] == 'short'
+        assert profile['bitrate'] == 24367
 
     def test_bitrate_capped_at_max(self):
         ps = _make_selector({'dynamic': {'max_bitrate': '10000'}})
         _feed_score(ps, best_snr=32)
         profile = ps._compute_profile()
-        self.assertEqual(profile['bitrate'], 10000)
+        assert profile['bitrate'] == 10000
 
     def test_bitrate_floored_at_min(self):
         ps = _make_selector({'dynamic': {'min_bitrate': '3000'}})
         _feed_score(ps, best_snr=7)
         profile = ps._compute_profile()
-        self.assertEqual(profile['bitrate'], 3000)
+        assert profile['bitrate'] == 3000
 
     def test_bitrate_40mhz(self):
         ps = _make_selector({'dynamic': {'bandwidth': '40'}})
@@ -373,7 +373,7 @@ class TestBitrate(unittest.TestCase):
         profile = ps._compute_profile()
         # PHY 13.5 Mbps (40MHz MCS0 long GI), link_bw=6075 kbps
         # K=7, N=10 → bitrate = 6075000 * 7/10 / 1000 = 4252
-        self.assertEqual(profile['bitrate'], 4252)
+        assert profile['bitrate'] == 4252
 
     def test_fec_sized_from_capped_bitrate(self):
         """When max_bitrate constrains encoder below link capacity,
@@ -387,50 +387,50 @@ class TestBitrate(unittest.TestCase):
         _feed_score(ps, best_snr=32)
         profile = ps._compute_profile()
         # K should be sized for 10 Mbps (15), not 24 Mbps (36)
-        self.assertEqual(profile['fec_k'], 15)
-        self.assertEqual(profile['fec_n'], 20)
+        assert profile['fec_k'] == 15
+        assert profile['fec_n'] == 20
 
 
-class TestPower(unittest.TestCase):
+class TestPower:
     """Test power scaling — linear interpolation."""
 
     def test_max_power_at_low_mcs(self):
         ps = _make_selector()
         _feed_score(ps, best_snr=7)  # MCS 0
         profile = ps._compute_profile()
-        self.assertEqual(profile['power'], 2500)
+        assert profile['power'] == 2500
 
     def test_min_power_at_high_mcs(self):
         ps = _make_selector()
         _feed_score(ps, best_snr=32)  # MCS 7
         profile = ps._compute_profile()
-        self.assertEqual(profile['power'], 200)
+        assert profile['power'] == 200
 
     def test_mid_power_at_mid_mcs(self):
         ps = _make_selector()
         _feed_score(ps, best_snr=18)  # MCS 3
         profile = ps._compute_profile()
         # Linear: 2500 - (3/7) * 2300 = 2500 - 985.7 -> round to 1514
-        self.assertEqual(profile['power'], 1514)
+        assert profile['power'] == 1514
 
     def test_power_is_linear_and_monotonic(self):
         """Power decreases monotonically with small per-step delta."""
         ps = _make_selector()
         powers = [ps._compute_power(m) for m in range(8)]
         for i in range(1, len(powers)):
-            self.assertLessEqual(powers[i], powers[i - 1])
+            assert powers[i] <= powers[i - 1]
             # Max per-step delta should be <= 329 (ceil(2300/7))
-            self.assertLessEqual(powers[i - 1] - powers[i], 329)
+            assert powers[i - 1] - powers[i] <= 329
 
 
-class TestFixedParams(unittest.TestCase):
+class TestFixedParams:
     """Test that fixed parameters come from config."""
 
     def test_gop_from_config(self):
         ps = _make_selector({'dynamic': {'gop': '5'}})
         _feed_score(ps, best_snr=20)
         profile = ps._compute_profile()
-        self.assertEqual(profile['gop'], 5.0)
+        assert profile['gop'] == 5.0
 
 
 
@@ -438,10 +438,10 @@ class TestFixedParams(unittest.TestCase):
         ps = _make_selector()
         _feed_score(ps, best_snr=20)
         profile = ps._compute_profile()
-        self.assertEqual(profile['bandwidth'], 20)
+        assert profile['bandwidth'] == 20
 
 
-class TestSelectIntegration(unittest.TestCase):
+class TestSelectIntegration:
     """Test that select() works correctly in dynamic mode."""
 
     def _warm_up(self, ps, best_snr=20, n=5):
@@ -462,9 +462,9 @@ class TestSelectIntegration(unittest.TestCase):
         """After enough ticks (confidence gating), select() produces a change."""
         ps = _make_selector()
         changed, idx, profile = self._warm_up(ps, best_snr=20)
-        self.assertTrue(changed)
-        self.assertIsNotNone(profile)
-        self.assertEqual(idx, profile['mcs'])
+        assert changed
+        assert profile is not None
+        assert idx == profile['mcs']
 
     def test_same_mcs_no_change(self):
         ps = _make_selector()
@@ -473,25 +473,25 @@ class TestSelectIntegration(unittest.TestCase):
         # Feed again with same SNR — should not change
         _feed_tick(ps, best_snr=20, all_packets=10000)
         changed, _, _ = ps.select()
-        self.assertFalse(changed)
+        assert not changed
 
     def test_dynamic_profile_updates_even_without_mcs_change(self):
         """In dynamic mode, current_profile is updated even if MCS stays same."""
         ps = _make_selector()
         self._warm_up(ps, best_snr=20)
-        self.assertIsNotNone(ps.current_profile)
+        assert ps.current_profile is not None
 
         # Feed with higher loss — same MCS but FEC might downgrade
         _feed_tick(ps, best_snr=20, all_packets=20000, lost_packets=2000)
         ps.select()
         # Profile should still exist and be updated
-        self.assertIsNotNone(ps.current_profile)
+        assert ps.current_profile is not None
 
     def test_param_only_change_detected(self):
         """select() returns changed=True when MCS stays same but params differ."""
         ps = _make_selector()
         changed, idx, profile = self._warm_up(ps, best_snr=20)
-        self.assertTrue(changed)
+        assert changed
         old_profile = dict(ps.current_profile)
         old_mcs = ps.current_profile_idx
 
@@ -502,12 +502,12 @@ class TestSelectIntegration(unittest.TestCase):
 
         # MCS should stay the same but params should differ
         if idx == old_mcs and ps._profile_changed(old_profile, profile):
-            self.assertTrue(changed)
+            assert changed
         # If params didn't change (edge case), at least verify no crash
-        self.assertIsNotNone(profile)
+        assert profile is not None
 
 
-class TestMCSStepLimit(unittest.TestCase):
+class TestMCSStepLimit:
     """Test that upward MCS changes are step-limited."""
 
     def _warm_at_mcs(self, ps, target_snr, n=10):
@@ -527,7 +527,7 @@ class TestMCSStepLimit(unittest.TestCase):
         """Starting at MCS 2, even if SNR qualifies for MCS 7, only step to MCS 3."""
         ps = _make_selector()
         self._warm_at_mcs(ps, target_snr=15)
-        self.assertEqual(ps.current_profile_idx, 2)
+        assert ps.current_profile_idx == 2
 
         # Feed enough ticks for SNR EMA to converge and confidence to pass
         first_change_idx = None
@@ -538,14 +538,14 @@ class TestMCSStepLimit(unittest.TestCase):
                 first_change_idx = idx
                 break
         # First upgrade should be capped to +1
-        self.assertEqual(first_change_idx, 3)
+        assert first_change_idx == 3
 
     def test_downgrade_not_limited(self):
         """Downgrades can drop more than 1 MCS step."""
         ps = _make_selector()
         self._warm_at_mcs(ps, target_snr=24)  # MCS 5
         start_mcs = ps.current_profile_idx
-        self.assertEqual(start_mcs, 5)
+        assert start_mcs == 5
 
         # Feed several ticks at very low SNR so EMA drops enough
         for i in range(10):
@@ -553,15 +553,15 @@ class TestMCSStepLimit(unittest.TestCase):
             changed, idx, profile = ps.select()
             if changed:
                 # Downgrade should jump more than 1 step (proves it's unlimited)
-                self.assertLess(idx, start_mcs - 1)
+                assert idx < start_mcs - 1
                 return
-        self.fail("Expected a downgrade but none occurred")
+        pytest.fail("Expected a downgrade but none occurred")
 
     def test_step_limit_disabled_with_zero(self):
         """Setting max_mcs_step_up=0 disables step limiting."""
         ps = _make_selector({'dynamic': {'max_mcs_step_up': '0'}})
         self._warm_at_mcs(ps, target_snr=15)  # MCS 2
-        self.assertEqual(ps.current_profile_idx, 2)
+        assert ps.current_profile_idx == 2
 
         # Feed many ticks so EMA converges and we can jump past +1
         changes = []
@@ -572,11 +572,11 @@ class TestMCSStepLimit(unittest.TestCase):
                 changes.append(idx)
                 break
         # First change should be > +1 step from MCS 2 (proves no limit)
-        self.assertTrue(len(changes) > 0, "Expected a change")
-        self.assertGreater(changes[0], 3)
+        assert len(changes) > 0, "Expected a change"
+        assert changes[0] > 3
 
 
-class TestMaxFECN(unittest.TestCase):
+class TestMaxFECN:
     """Test max_fec_n configuration parameter enforcement."""
 
     def test_max_fec_n_not_exceeded_at_high_bitrate(self):
@@ -589,11 +589,11 @@ class TestMaxFECN(unittest.TestCase):
         ps = _make_selector({'dynamic': {'max_fec_n': '30'}})
         _feed_score(ps, best_snr=32)
         profile = ps._compute_profile()
-        self.assertLessEqual(profile['fec_n'], 30)
+        assert profile['fec_n'] <= 30
 
     def test_max_fec_n_preserves_redundancy_ratio(self):
         """When fec_n is capped, fec_k should be adjusted to preserve redundancy ratio.
-        
+
         Original: K=36, N=48 → redundancy = (48-36)/48 = 25%
         After cap to N=30: K should be ceil(30 * 0.75) = 23
         New redundancy = (30-23)/30 = 23.3% (close to original 25%)
@@ -604,22 +604,22 @@ class TestMaxFECN(unittest.TestCase):
         # Verify redundancy ratio is preserved (within 5% tolerance)
         original_ratio = 0.25  # fec_redundancy_ratio from config
         actual_ratio = (profile['fec_n'] - profile['fec_k']) / profile['fec_n']
-        self.assertLessEqual(abs(actual_ratio - original_ratio), 0.05)
+        assert abs(actual_ratio - original_ratio) <= 0.05
 
     def test_max_fec_n_does_not_affect_low_bitrate(self):
         """At low bitrates where fec_n is already below max, no capping occurs.
-        
+
         MCS0 LGI: K=4, N=6. With max_fec_n=30, no change.
         """
         ps = _make_selector({'dynamic': {'max_fec_n': '30'}})
         _feed_score(ps, best_snr=7)
         profile = ps._compute_profile()
-        self.assertEqual(profile['fec_n'], 6)
-        self.assertEqual(profile['fec_k'], 4)
+        assert profile['fec_n'] == 6
+        assert profile['fec_k'] == 4
 
     def test_max_fec_n_aggressive_cap(self):
         """Test with a very aggressive max_fec_n cap.
-        
+
         MCS7 SGI with max_fec_n=10:
         Original K=36, N=48 → capped to N=10
         K = ceil(10 * 0.75) = 8
@@ -627,13 +627,13 @@ class TestMaxFECN(unittest.TestCase):
         ps = _make_selector({'dynamic': {'max_fec_n': '10'}})
         _feed_score(ps, best_snr=32)
         profile = ps._compute_profile()
-        self.assertEqual(profile['fec_n'], 10)
-        self.assertEqual(profile['fec_k'], 8)
+        assert profile['fec_n'] == 10
+        assert profile['fec_k'] == 8
 
     def test_max_fec_n_default_value(self):
         """Default max_fec_n should be 50."""
         ps = _make_selector()
-        self.assertEqual(ps.max_fec_n, 50)
+        assert ps.max_fec_n == 50
 
     def test_max_fec_n_with_intermediate_mcs(self):
         """Test max_fec_n enforcement at intermediate MCS levels.
@@ -645,11 +645,11 @@ class TestMaxFECN(unittest.TestCase):
         ps = _make_selector({'dynamic': {'max_fec_n': '25'}})
         _feed_score(ps, best_snr=21)  # MCS4: 17+3=20 < 21
         profile = ps._compute_profile()
-        self.assertLessEqual(profile['fec_n'], 25)
+        assert profile['fec_n'] <= 25
 
 
 
-class TestOscillationRegression(unittest.TestCase):
+class TestOscillationRegression:
     """Regression test: MCS/power should not oscillate under stable SNR."""
 
     def test_stable_snr_converges(self):
@@ -671,11 +671,10 @@ class TestOscillationRegression(unittest.TestCase):
         if len(mcs_history) >= 5:
             last_5 = mcs_history[-5:]
             unique = set(last_5)
-            self.assertLessEqual(len(unique), 1,
-                f"MCS oscillating in last 5 ticks: {last_5}")
+            assert len(unique) <= 1, f"MCS oscillating in last 5 ticks: {last_5}"
 
 
-class TestTwoChannelGate(unittest.TestCase):
+class TestTwoChannelGate:
     """Tests for the two-channel gate (SNR margin + emergency triggers)."""
 
     def _open_gates(self, ps):
@@ -700,7 +699,7 @@ class TestTwoChannelGate(unittest.TestCase):
         At snr=21 (margin to MCS4 = 21-17-3=1.0 < 2.0), upgrade must not fire."""
         ps = _make_selector()
         self._settle_at(ps, snr=18)  # MCS3: 14+3=17 <= 18; MCS4 needs 20 > 18
-        self.assertEqual(ps.current_profile_idx, 3)
+        assert ps.current_profile_idx == 3
 
         # Feed snr=21 many times — _compute_profile picks MCS4 (17+3=20<=21),
         # but channel A requires margin(MCS4)=21-17-3=1.0 dB >= hysteresis_up_db=2.0.
@@ -711,7 +710,7 @@ class TestTwoChannelGate(unittest.TestCase):
             if changed and idx > 3:
                 upgraded = True
                 break
-        self.assertFalse(upgraded, "Upgrade should be blocked by hysteresis_up_db")
+        assert not upgraded, "Upgrade should be blocked by hysteresis_up_db"
 
     def test_downgrade_blocked_by_hysteresis_down(self):
         """At SNR slightly below current-MCS threshold (within hysteresis_down_db),
@@ -719,7 +718,7 @@ class TestTwoChannelGate(unittest.TestCase):
         Margin(MCS4) = 20 - 17 - 3 = 0; hysteresis_down_db=1.0 → still blocked."""
         ps = _make_selector()
         self._settle_at(ps, snr=22)  # MCS4: 17+3=20 <= 22
-        self.assertEqual(ps.current_profile_idx, 4)
+        assert ps.current_profile_idx == 4
 
         # Drop to snr=20. Margin = 20-17-3 = 0. Not < -1.0 → no downgrade.
         downgraded = False
@@ -729,13 +728,13 @@ class TestTwoChannelGate(unittest.TestCase):
             if changed and idx < 4:
                 downgraded = True
                 break
-        self.assertFalse(downgraded, "Downgrade within hysteresis_down_db must not fire")
+        assert not downgraded, "Downgrade within hysteresis_down_db must not fire"
 
     def test_downgrade_fires_below_hysteresis_down(self):
         """When SNR drops enough that margin < -hysteresis_down_db, downgrade fires."""
         ps = _make_selector()
         self._settle_at(ps, snr=22)  # MCS4
-        self.assertEqual(ps.current_profile_idx, 4)
+        assert ps.current_profile_idx == 4
 
         # Drop snr far enough: margin(MCS4) = snr-17-3 = snr-20; need < -1 → snr < 19.
         downgraded_to = None
@@ -745,8 +744,8 @@ class TestTwoChannelGate(unittest.TestCase):
             if changed and idx < 4:
                 downgraded_to = idx
                 break
-        self.assertIsNotNone(downgraded_to, "Expected downgrade below hysteresis_down_db")
-        self.assertLess(downgraded_to, 4)
+        assert downgraded_to is not None, "Expected downgrade below hysteresis_down_db"
+        assert downgraded_to < 4
 
     def test_emergency_loss_forces_downgrade(self):
         """High loss rate at healthy SNR forces at-least-one-step downgrade.
@@ -755,28 +754,28 @@ class TestTwoChannelGate(unittest.TestCase):
         idx < start_idx is the correct invariant, not idx == start_idx - 1."""
         ps = _make_selector()
         self._settle_at(ps, snr=24)  # MCS5 (20+3 <= 24)
-        self.assertEqual(ps.current_profile_idx, 5)
+        assert ps.current_profile_idx == 5
         start_idx = ps.current_profile_idx
 
         _feed_tick(ps, best_snr=24, all_packets=500000)
         ps._current_loss_rate = 0.25  # > emergency_loss_rate=0.15
         changed, idx, _ = ps.select()
-        self.assertTrue(changed)
-        self.assertLess(idx, start_idx)
+        assert changed
+        assert idx < start_idx
 
     def test_emergency_fec_forces_downgrade(self):
         """High FEC pressure at healthy SNR forces one-step downgrade."""
         ps = _make_selector()
         self._settle_at(ps, snr=24)
-        self.assertEqual(ps.current_profile_idx, 5)
+        assert ps.current_profile_idx == 5
         start_idx = ps.current_profile_idx
 
         # Directly push fec_pressure above threshold via evaluate_link state.
         _feed_tick(ps, best_snr=24, all_packets=200000)
         ps._current_fec_pressure = 0.90  # > 0.75 threshold
         changed, idx, _ = ps.select()
-        self.assertTrue(changed)
-        self.assertLess(idx, start_idx)
+        assert changed
+        assert idx < start_idx
 
     def test_emergency_bypasses_rate_limit(self):
         """Emergency downgrade fires even within min_between_changes_ms."""
@@ -792,14 +791,14 @@ class TestTwoChannelGate(unittest.TestCase):
         # Normal tick at same SNR — rate limit blocks any update.
         _feed_tick(ps, best_snr=24, all_packets=300000)
         changed, _, _ = ps.select()
-        self.assertFalse(changed)
+        assert not changed
 
         # Now force emergency via high loss — should bypass rate limit.
         _feed_tick(ps, best_snr=24, all_packets=310000)
         ps._current_loss_rate = 0.25  # > emergency_loss_rate=0.15
         changed, idx, _ = ps.select()
-        self.assertTrue(changed, "Emergency should bypass rate limit")
-        self.assertLess(idx, start_idx)
+        assert changed, "Emergency should bypass rate limit"
+        assert idx < start_idx
 
     def test_predictive_blocks_upgrade_on_falling_snr(self):
         """Marginal upgrade must be blocked when SNR slope is sharply negative."""
@@ -814,7 +813,7 @@ class TestTwoChannelGate(unittest.TestCase):
 
         # Now push snr to exactly the upgrade boundary for MCS6 (margin ~2 dB).
         # With negative slope, predicted_margin = margin + slope*horizon should be < 0.
-        self.assertLess(ps._snr_slope, 0.0)
+        assert ps._snr_slope < 0.0
 
         upgraded = False
         for i in range(3):
@@ -825,7 +824,7 @@ class TestTwoChannelGate(unittest.TestCase):
                 if idx > 5:
                     upgraded = True
                     break
-        self.assertFalse(upgraded, "Negative slope prediction should block marginal upgrade")
+        assert not upgraded, "Negative slope prediction should block marginal upgrade"
 
 
     def test_predictive_downgrade_on_falling_snr(self):
@@ -834,7 +833,7 @@ class TestTwoChannelGate(unittest.TestCase):
         predicted ≈ -0.65 + (-0.4)*3 ≈ -1.85 (below -1.0, new gate fires)."""
         ps = _make_selector()
         self._settle_at(ps, snr=22)  # MCS4: 17+3=20 <= 22
-        self.assertEqual(ps.current_profile_idx, 4)
+        assert ps.current_profile_idx == 4
 
         # Simulate falling link: snr_ema just below MCS4 floor, negative slope
         ps.snr_ema = 19.5   # margin(4) = 19.5 - 17 - 3 = -0.5 > -1.0
@@ -845,8 +844,8 @@ class TestTwoChannelGate(unittest.TestCase):
         _feed_tick(ps, best_snr=19, all_packets=500000)
         changed, idx, _ = ps.select()
 
-        self.assertTrue(changed, "Predicted margin should trigger downgrade")
-        self.assertLess(idx, 4)
+        assert changed, "Predicted margin should trigger downgrade"
+        assert idx < 4
 
     def test_no_false_predictive_downgrade_stable_snr(self):
         """Healthy margin with near-zero slope → no false downgrade.
@@ -854,7 +853,7 @@ class TestTwoChannelGate(unittest.TestCase):
         predicted margin ≈ current margin → no trigger."""
         ps = _make_selector()
         self._settle_at(ps, snr=22)  # MCS4
-        self.assertEqual(ps.current_profile_idx, 4)
+        assert ps.current_profile_idx == 4
 
         # Feed stable SNR — slope should be near zero
         self._open_gates(ps)
@@ -865,8 +864,4 @@ class TestTwoChannelGate(unittest.TestCase):
             if changed and idx < 4:
                 false_downgrade = True
                 break
-        self.assertFalse(false_downgrade, "Stable SNR should not cause predictive downgrade")
-
-
-if __name__ == '__main__':
-    unittest.main()
+        assert not false_downgrade, "Stable SNR should not cause predictive downgrade"

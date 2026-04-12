@@ -1,6 +1,13 @@
 # Adaptive-Link Root Makefile
 # Delegates to sub-project Makefiles
 
+# Auto-detect virtualenv
+ifneq ($(wildcard .venv/bin/python3),)
+  PYTHON := .venv/bin/python3
+else
+  PYTHON := python3
+endif
+
 .PHONY: all clean test test-c test-python drone ground-station ssc338q
 
 all: drone
@@ -18,7 +25,7 @@ drone:
 # Ground station is Python - no build needed
 ground-station:
 	@echo "Ground station is Python - no build required"
-	@python3 -m py_compile ground-station/alink_gs
+	@$(PYTHON) -m py_compile ground-station/alink_gs
 
 # Run all tests
 test: test-c test-python
@@ -29,9 +36,8 @@ test-c:
 
 # Run Python tests
 test-python:
-	python3 -m unittest discover -s ground-station/test -v
+	$(PYTHON) -m pytest ground-station/test/ -v
 
 # Clean all
 clean:
 	$(MAKE) -C drone clean
-	rm -f drone/test/test_util

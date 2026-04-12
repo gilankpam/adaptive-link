@@ -2,7 +2,8 @@
 *.o
 *.out
 alink_drone
-test/test_util
+drone/test/test_*
+!drone/test/test_*.c
 
 # Python
 __pycache__/

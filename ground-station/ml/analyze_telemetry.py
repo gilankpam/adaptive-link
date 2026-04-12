@@ -26,55 +26,6 @@ from ml.feature_engineering import (
 )
 
 
-def plot_rssi_snr_relationship(ticks_df, output_dir):
-    """Generate RSSI vs SNR relationship visualizations."""
-    if 'rssi' not in ticks_df.columns or 'snr' not in ticks_df.columns:
-        print("  Skipping RSSI-SNR relationship — missing columns")
-        return
-
-    data = ticks_df[['rssi', 'snr']].dropna()
-    if data.empty:
-        print("  Skipping RSSI-SNR relationship — no valid data")
-        return
-
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-
-    # Plot 1: Scatter plot with color by SNR
-    ax = axes[0]
-    scatter = ax.scatter(data['rssi'], data['snr'], c=data['snr'],
-                         cmap='viridis', alpha=0.5, s=10)
-    ax.set_xlabel('RSSI (dBm)')
-    ax.set_ylabel('SNR (dB)')
-    ax.set_title('RSSI vs SNR Scatter')
-    fig.colorbar(scatter, ax=ax, label='SNR (dB)')
-
-    # Plot 2: 2D histogram (density heatmap)
-    ax = axes[1]
-    h = ax.hist2d(data['rssi'], data['snr'], bins=30, cmap='YlOrRd')
-    ax.set_xlabel('RSSI (dBm)')
-    ax.set_ylabel('SNR (dB)')
-    ax.set_title('RSSI-SNR Density')
-    fig.colorbar(h[3], ax=ax, label='Count')
-
-    # Plot 3: Time series with dual y-axis
-    ax1 = axes[2]
-    ax2 = ax1.twinx()
-    ax1.plot(data.index, data['rssi'], 'b-', alpha=0.7, label='RSSI')
-    ax2.plot(data.index, data['snr'], 'r-', alpha=0.7, label='SNR')
-    ax1.set_xlabel('Tick')
-    ax1.set_ylabel('RSSI (dBm)', color='b')
-    ax2.set_ylabel('SNR (dB)', color='r')
-    ax1.set_title('RSSI and SNR Over Time')
-    ax1.tick_params(axis='y', labelcolor='b')
-    ax2.tick_params(axis='y', labelcolor='r')
-
-    plt.tight_layout()
-    path = os.path.join(output_dir, 'rssi_snr_relationship.png')
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
-    print(f"  Saved {path}")
-
-
 def plot_loss_rate_fec_relationship(ticks_df, output_dir):
     """Generate loss rate vs FEC pressure relationship visualizations."""
     if 'loss_rate' not in ticks_df.columns or 'fec_pressure' not in ticks_df.columns:
@@ -303,32 +254,6 @@ def plot_gate_analysis(ticks_df, output_dir):
     print(f"  Saved {path}")
 
 
-def plot_margin_distributions(ticks_df, output_dir):
-    """Generate SNR margin distribution histograms per adapter."""
-    if 'margin_cur' not in ticks_df.columns:
-        print("  Skipping margin distributions — no 'margin_cur' column")
-        return
-    adapters = ticks_df['adapter'].unique()
-    fig, axes = plt.subplots(1, len(adapters), figsize=(6 * len(adapters), 4),
-                             squeeze=False)
-    for i, adapter in enumerate(adapters):
-        ax = axes[0, i]
-        data = ticks_df[ticks_df['adapter'] == adapter]['margin_cur'].dropna()
-        ax.hist(data, bins=50, edgecolor='black', alpha=0.7)
-        ax.set_title(f'Margin Distribution: {adapter}')
-        ax.set_xlabel('SNR Margin (dB)')
-        ax.set_ylabel('Count')
-        ax.axvline(0, color='black', linestyle='--', linewidth=0.8)
-        ax.axvline(data.mean(), color='red', linestyle='--', label=f'Mean: {data.mean():.1f} dB')
-        ax.legend()
-
-    plt.tight_layout()
-    path = os.path.join(output_dir, 'margin_distributions.png')
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
-    print(f"  Saved {path}")
-
-
 def plot_mcs_transitions(ticks_df, output_dir):
     """Generate MCS transition matrix heatmap and time-series plot."""
     if 'mcs' not in ticks_df.columns:
@@ -377,50 +302,8 @@ def plot_mcs_transitions(ticks_df, output_dir):
     print(f"  Saved {path}")
 
 
-def plot_feature_outcome_correlation(ticks_df, output_dir):
-    """Generate feature-outcome correlation matrix heatmap."""
-    if 'outcome_label' not in ticks_df.columns:
-        print("  Skipping feature-outcome correlation — no outcome labels")
-        return
-
-    labeled = ticks_df[ticks_df['outcome_label'].notna()].copy()
-    if labeled.empty:
-        print("  Skipping feature-outcome correlation — no outcome labels present")
-        return
-
-    # Binary target: 1=good, 0=bad/marginal
-    labeled['outcome_good'] = (labeled['outcome_label'] == 'good').astype(int)
-
-    feature_cols = [
-        'rssi', 'snr', 'snr_ema', 'snr_slope', 'loss_rate', 'fec_pressure',
-        'margin_cur', 'margin_tgt', 'emergency',
-    ]
-    derived_cols = [
-        'snr_roc', 'loss_accel', 'fec_saturation',
-        'snr_margin_volatility', 'link_budget_margin', 'time_since_change',
-    ]
-    all_cols = [c for c in feature_cols + derived_cols if c in labeled.columns]
-    all_cols.append('outcome_good')
-
-    corr = labeled[all_cols].corr()
-
-    fig, ax = plt.subplots(figsize=(10, 8))
-    im = ax.imshow(corr.values, cmap='RdBu_r', vmin=-1, vmax=1, aspect='auto')
-    ax.set_xticks(range(len(all_cols)))
-    ax.set_yticks(range(len(all_cols)))
-    ax.set_xticklabels(all_cols, rotation=45, ha='right', fontsize=7)
-    ax.set_yticklabels(all_cols, fontsize=7)
-    ax.set_title('Feature-Outcome Correlation Matrix')
-    fig.colorbar(im, ax=ax, label='Pearson r')
-    plt.tight_layout()
-    path = os.path.join(output_dir, 'feature_outcome_correlation.png')
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
-    print(f"  Saved {path}")
-
-
 def analyze_failure_modes(ticks_df, output_dir):
-    """Identify and summarize failure patterns (bad outcomes)."""
+    """Identify and summarize failure patterns (bad outcomes) with emergency drill-down."""
     if 'outcome_label' not in ticks_df.columns:
         print("  Skipping failure mode analysis — no outcome labels")
         return
@@ -466,9 +349,145 @@ def analyze_failure_modes(ticks_df, output_dir):
         lines.append(summary.to_string())
     lines.append('\n')
 
+    # --- Emergency drill-down ---
+    has_emergency = ('emergency' in ticks_df.columns and
+                     'loss_rate' in ticks_df.columns and
+                     'fec_pressure' in ticks_df.columns)
+    if has_emergency:
+        emerg = ticks_df[ticks_df['emergency'] == True]
+        n_emerg = len(emerg)
+        lines.append(f'\n## Emergency Drill-down ({n_emerg} ticks)\n')
+
+        if n_emerg > 0:
+            # Classify trigger type using the thresholds from the data:
+            # We infer thresholds from which channel is active
+            loss_triggered = emerg['loss_rate'] >= emerg['loss_rate'].quantile(0.5)
+            fec_triggered = emerg['fec_pressure'] >= emerg['fec_pressure'].quantile(0.5)
+            # More robust: just check which metric is elevated
+            loss_only = (emerg['loss_rate'] > 0) & (emerg['fec_pressure'] == 0)
+            fec_only = (emerg['loss_rate'] == 0) & (emerg['fec_pressure'] > 0)
+            both = (emerg['loss_rate'] > 0) & (emerg['fec_pressure'] > 0)
+            neither = (emerg['loss_rate'] == 0) & (emerg['fec_pressure'] == 0)
+
+            lines.append('### Trigger breakdown\n')
+            lines.append(f'- Loss only: {loss_only.sum()}')
+            lines.append(f'- FEC only: {fec_only.sum()}')
+            lines.append(f'- Both: {both.sum()}')
+            lines.append(f'- Neither (SNR dropout): {neither.sum()}')
+            lines.append('')
+
+            lines.append('### Metrics during emergency\n')
+            lines.append(f'- loss_rate: mean={emerg["loss_rate"].mean():.4f}, '
+                         f'max={emerg["loss_rate"].max():.4f}')
+            lines.append(f'- fec_pressure: mean={emerg["fec_pressure"].mean():.4f}, '
+                         f'max={emerg["fec_pressure"].max():.4f}')
+            lines.append(f'- margin_cur: mean={emerg["margin_cur"].mean():.2f} dB')
+            lines.append('')
+
+            if 'mcs' in emerg.columns:
+                lines.append('### MCS during emergency\n')
+                lines.append(emerg['mcs'].value_counts().sort_index().to_string())
+                lines.append('')
+
+            # Emergency → bad outcome linkage
+            if 'outcome_label' in ticks_df.columns:
+                bad_set = set(bad_indices)
+                # Check 10-tick window after each emergency for bad outcomes
+                emerg_led_to_bad = 0
+                for idx in emerg.index:
+                    pos = ticks_df.index.get_loc(idx)
+                    window = ticks_df.iloc[pos:min(pos + 10, len(ticks_df))]
+                    if window.index.isin(bad_set).any():
+                        emerg_led_to_bad += 1
+                emerg_resolved = n_emerg - emerg_led_to_bad
+                lines.append('### Emergency outcomes\n')
+                lines.append(f'- Resolved (no bad outcome within 10 ticks): {emerg_resolved}')
+                lines.append(f'- Led to bad outcome: {emerg_led_to_bad}')
+                lines.append('')
+
     path = os.path.join(output_dir, 'failure_modes.md')
     with open(path, 'w') as f:
         f.write('\n'.join(lines))
+    print(f"  Saved {path}")
+
+
+def plot_failure_timelines(ticks_df, output_dir):
+    """Plot tick-by-tick metrics for the 20 ticks before each bad outcome."""
+    if 'outcome_label' not in ticks_df.columns:
+        return
+
+    bad_indices = ticks_df.index[ticks_df['outcome_label'] == 'bad'].tolist()
+    if not bad_indices:
+        return
+
+    # Cap at 12 failures to keep the plot readable
+    bad_indices = bad_indices[:12]
+    n_failures = len(bad_indices)
+    window = 20
+
+    fig, axes = plt.subplots(n_failures, 1, figsize=(14, 3 * n_failures),
+                             squeeze=False)
+
+    for i, idx in enumerate(bad_indices):
+        pos = ticks_df.index.get_loc(idx)
+        start = max(0, pos - window)
+        # Include the bad tick itself
+        chunk = ticks_df.iloc[start:pos + 1].copy()
+        ticks = range(len(chunk))
+        ax = axes[i, 0]
+
+        # Margin (left y-axis)
+        if 'margin_cur' in chunk.columns:
+            ax.plot(ticks, chunk['margin_cur'], 'b-', linewidth=1.5,
+                    label='margin', zorder=3)
+            ax.axhline(0, color='black', linestyle='--', linewidth=0.5)
+
+        # MCS (right y-axis)
+        ax2 = ax.twinx()
+        if 'mcs' in chunk.columns:
+            ax2.step(ticks, chunk['mcs'], 'g-', alpha=0.7, linewidth=1.2,
+                     label='MCS', where='post')
+            ax2.set_ylim(-0.5, 7.5)
+            ax2.set_ylabel('MCS', color='g', fontsize=8)
+            ax2.tick_params(axis='y', labelcolor='g', labelsize=7)
+
+        # Loss rate (bar, scaled)
+        if 'loss_rate' in chunk.columns:
+            loss_vals = chunk['loss_rate'].fillna(0)
+            ax.bar(ticks, -loss_vals * 20, width=0.6, color='red', alpha=0.4,
+                   label='loss (scaled)', zorder=2)
+
+        # FEC pressure (bar, scaled)
+        if 'fec_pressure' in chunk.columns:
+            fec_vals = chunk['fec_pressure'].fillna(0)
+            ax.bar(ticks, -fec_vals * 10, width=0.3, color='orange', alpha=0.5,
+                   label='FEC (scaled)', zorder=2)
+
+        # Emergency ticks
+        if 'emergency' in chunk.columns:
+            emerg_ticks = [t for t, e in zip(ticks, chunk['emergency']) if e]
+            for et in emerg_ticks:
+                ax.axvspan(et - 0.4, et + 0.4, color='red', alpha=0.1, zorder=1)
+
+        # Mark the bad-outcome tick
+        ax.axvline(len(chunk) - 1, color='red', linewidth=2, linestyle='-',
+                   zorder=4)
+
+        fail_mcs = chunk['mcs'].iloc[-1] if 'mcs' in chunk.columns else '?'
+        ax.set_title(f'Failure #{i+1}: MCS {fail_mcs:.0f} @ tick {idx}',
+                     fontsize=9, fontweight='bold')
+        ax.set_ylabel('Margin (dB)', fontsize=8)
+        ax.tick_params(axis='both', labelsize=7)
+
+        if i == 0:
+            ax.legend(loc='upper left', fontsize=7)
+        if i == n_failures - 1:
+            ax.set_xlabel('Ticks before failure')
+
+    plt.tight_layout()
+    path = os.path.join(output_dir, 'failure_timelines.png')
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
     print(f"  Saved {path}")
 
 
@@ -564,15 +583,13 @@ def main():
     ticks_df = join_outcomes(ticks_df, outcomes_df)
 
     print("Generating analyses...")
-    plot_rssi_snr_relationship(ticks_df, args.output)
     plot_loss_rate_fec_relationship(ticks_df, args.output)
     plot_mcs_snr_analysis(ticks_df, args.output)
     plot_antenna_diversity_analysis(ticks_df, args.output)
     plot_gate_analysis(ticks_df, args.output)
-    plot_margin_distributions(ticks_df, args.output)
     plot_mcs_transitions(ticks_df, args.output)
-    plot_feature_outcome_correlation(ticks_df, args.output)
     analyze_failure_modes(ticks_df, args.output)
+    plot_failure_timelines(ticks_df, args.output)
     generate_summary_report(ticks_df, outcomes_df, args.output)
 
     print(f"\nDone. Output saved to {args.output}/")

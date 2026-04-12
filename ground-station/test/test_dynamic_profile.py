@@ -375,6 +375,21 @@ class TestBitrate(unittest.TestCase):
         # K=7, N=10 → bitrate = 6075000 * 7/10 / 1000 = 4252
         self.assertEqual(profile['bitrate'], 4252)
 
+    def test_fec_sized_from_capped_bitrate(self):
+        """When max_bitrate constrains encoder below link capacity,
+        FEC K/N should be sized from the capped bitrate, not raw link capacity.
+
+        MCS7 SGI: link_bw=32490 kbps, uncapped target=24367 kbps → K=36, N=48.
+        With max_bitrate=10000: target capped to 10000 kbps.
+        packets_per_frame = 10000000/(60*8*1446) = 14.41 → K=15, N=20.
+        """
+        ps = _make_selector({'dynamic': {'max_bitrate': '10000'}})
+        _feed_score(ps, best_snr=32)
+        profile = ps._compute_profile()
+        # K should be sized for 10 Mbps (15), not 24 Mbps (36)
+        self.assertEqual(profile['fec_k'], 15)
+        self.assertEqual(profile['fec_n'], 20)
+
 
 class TestPower(unittest.TestCase):
     """Test power scaling — linear interpolation."""
@@ -622,7 +637,7 @@ class TestMaxFECN(unittest.TestCase):
 
     def test_max_fec_n_with_intermediate_mcs(self):
         """Test max_fec_n enforcement at intermediate MCS levels.
-        
+
         MCS4 SGI: PHY=43.3 Mbps, raw=19485 kbps, target=14614 kbps.
         Packets per frame: 14614000/(60*8*1446)=21.1 → K=22, N=ceil(22/0.75)=30.
         With max_fec_n=25, N should be capped to 25.
@@ -631,6 +646,7 @@ class TestMaxFECN(unittest.TestCase):
         _feed_score(ps, best_snr=21)  # MCS4: 17+3=20 < 21
         profile = ps._compute_profile()
         self.assertLessEqual(profile['fec_n'], 25)
+
 
 
 class TestOscillationRegression(unittest.TestCase):
@@ -810,6 +826,46 @@ class TestTwoChannelGate(unittest.TestCase):
                     upgraded = True
                     break
         self.assertFalse(upgraded, "Negative slope prediction should block marginal upgrade")
+
+
+    def test_predictive_downgrade_on_falling_snr(self):
+        """Current margin above -hysteresis_down_db but slope predicts breach → downgrade.
+        margin(MCS4) ≈ -0.65 (above -1.0, old gate would block).
+        predicted ≈ -0.65 + (-0.4)*3 ≈ -1.85 (below -1.0, new gate fires)."""
+        ps = _make_selector()
+        self._settle_at(ps, snr=22)  # MCS4: 17+3=20 <= 22
+        self.assertEqual(ps.current_profile_idx, 4)
+
+        # Simulate falling link: snr_ema just below MCS4 floor, negative slope
+        ps.snr_ema = 19.5   # margin(4) = 19.5 - 17 - 3 = -0.5 > -1.0
+        ps._snr_slope = -0.5
+        self._open_gates(ps)
+
+        # evaluate_link updates ema/slope; _compute_profile picks MCS3
+        _feed_tick(ps, best_snr=19, all_packets=500000)
+        changed, idx, _ = ps.select()
+
+        self.assertTrue(changed, "Predicted margin should trigger downgrade")
+        self.assertLess(idx, 4)
+
+    def test_no_false_predictive_downgrade_stable_snr(self):
+        """Healthy margin with near-zero slope → no false downgrade.
+        At MCS4 with snr=22, margin=0 dB. Stable SNR → slope ≈ 0 →
+        predicted margin ≈ current margin → no trigger."""
+        ps = _make_selector()
+        self._settle_at(ps, snr=22)  # MCS4
+        self.assertEqual(ps.current_profile_idx, 4)
+
+        # Feed stable SNR — slope should be near zero
+        self._open_gates(ps)
+        false_downgrade = False
+        for i in range(10):
+            _feed_tick(ps, best_snr=20.5, all_packets=500000 + 1000 * (i + 1))
+            changed, idx, _ = ps.select()
+            if changed and idx < 4:
+                false_downgrade = True
+                break
+        self.assertFalse(false_downgrade, "Stable SNR should not cause predictive downgrade")
 
 
 if __name__ == '__main__':

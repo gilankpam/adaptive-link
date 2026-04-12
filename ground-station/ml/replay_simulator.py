@@ -128,11 +128,12 @@ class ReplaySimulator:
     Time injection ensures hold timers behave based on telemetry timestamps.
     """
 
-    # Fitness weights
-    W_THROUGHPUT = 0.5
-    W_RELIABILITY = 0.4
+    # Fitness: constrained optimization
+    # Below CRASH_CEILING: maximize throughput with mild stability bonus
+    # Above CRASH_CEILING: penalize — push optimizer back into safe region
+    CRASH_CEILING = 0.05
+    W_THROUGHPUT = 0.8
     W_STABILITY = 0.2
-    W_CRASH = 5.0
     CRASH_LOSS_THRESHOLD = 0.5
 
     def __init__(self, ticks_df, config, link_model=None):
@@ -255,18 +256,20 @@ class ReplaySimulator:
         result.mean_bitrate = total_bitrate / n if n > 0 else 0
         result.mean_loss = total_loss / n if n > 0 else 0
 
-        # Compute fitness
+        # Compute fitness — constrained optimization
         max_bitrate = 30000  # Reference max bitrate for normalization
         throughput_score = min(result.mean_bitrate / max_bitrate, 1.0)
-        reliability_score = 1.0 - result.mean_loss
         stability_score = result.stability_score
         crash_rate = result.crash_events / n if n > 0 else 0
 
-        result.total_fitness = (
-            self.W_THROUGHPUT * throughput_score +
-            self.W_RELIABILITY * reliability_score +
-            self.W_STABILITY * stability_score -
-            self.W_CRASH * crash_rate
-        )
+        if crash_rate > self.CRASH_CEILING:
+            # Unsafe — penalize proportionally to push back into safe region
+            result.total_fitness = -crash_rate
+        else:
+            # Safe enough — maximize throughput, mild stability bonus
+            result.total_fitness = (
+                self.W_THROUGHPUT * throughput_score +
+                self.W_STABILITY * stability_score
+            )
 
         return result

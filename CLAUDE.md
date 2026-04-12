@@ -88,7 +88,7 @@ When `dynamic_mode = True` in `alink_gs.conf`, the GS computes profile parameter
 
 - **MCS selection:** Uses 802.11n SNR thresholds with configurable safety margin that widens under link stress
 - **Guard interval:** Short GI selected when SNR margin is comfortable (>5dB default) and loss/FEC pressure are low
-- **FEC adjustment:** Frame-aligned algorithm (`_compute_fec_from_bitrate()`) that sizes FEC blocks to match video frame packet count
+- **FEC adjustment:** Frame-proportional block sizing (`_compute_fec_from_bitrate()`) — K is set to the expected packets per video frame as a block-sizing heuristic. wfb-ng forms blocks sequentially with no frame awareness; larger K gives better burst-loss tolerance. See `docs/FEC_CALCULATION.md`
 - **Bitrate computation:** Derived from PHY rate × utilization factor × FEC efficiency (K/N ratio)
 - **Power scaling:** Linear inverse scaling with MCS level for link stability
 - **MCS step limiting:** Configurable `max_mcs_step_up` prevents rapid upward transitions that cause power-coupling oscillation

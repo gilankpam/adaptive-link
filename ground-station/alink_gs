@@ -496,31 +496,37 @@ class ProfileSelector:
         return round(self.dyn_max_power - t * (self.dyn_max_power - self.dyn_min_power))
 
     def _compute_fec_from_bitrate(self, bitrate_bps, redundancy_ratio=None):
-        """Compute FEC K,N from bitrate using frame-aligned algorithm.
-        
+        """Compute FEC K,N from bitrate using frame-proportional block sizing.
+
+        Sizes K to match the expected number of packets per video frame.
+        This is a block-sizing heuristic — wfb-ng forms FEC blocks purely
+        sequentially, so K does not create actual alignment with video
+        frame boundaries.  Larger K gives better burst-loss tolerance at
+        the cost of higher recovery latency when FEC is needed.
+
         Args:
             bitrate_bps: Target video bitrate in bits per second
             redundancy_ratio: FEC redundancy ratio (default: self.fec_redundancy_ratio)
-        
+
         Returns:
             Tuple of (fec_k, fec_n) integers
         """
         # Use config value if not provided
         if redundancy_ratio is None:
             redundancy_ratio = self.fec_redundancy_ratio
-        
+
         # Step 1: Packets per frame = bitrate / (fps * 8 * mtu)
         video_fps = self.handshake.get_fps()
         packets_per_frame = bitrate_bps / (video_fps * 8 * MTU_PAYLOAD_BYTES)
-        
-        # Step 2: K = ceil(packets_per_frame) for minimal latency
+
+        # Step 2: K = ceil(packets_per_frame) — proportional block sizing
         fec_k = max(2, math.ceil(packets_per_frame))
-        
+
         # Step 3: Apply configurable redundancy ratio
         # N = K / (1 - redundancy_ratio)
         # For 25% redundancy (0.25): N = K / 0.75 = K * 1.333...
         fec_n = math.ceil(fec_k / (1 - redundancy_ratio))
-        
+
         return fec_k, fec_n
 
     def _profile_changed(self, old, new):
@@ -567,12 +573,14 @@ class ProfileSelector:
         # Raw air capacity in bps (PHY rate × utilization factor)
         link_bandwidth_bps = int(1000 * 1000 * phy_rate * self.utilization_factor)
 
-        # Target video bitrate = raw capacity × (1 - redundancy_ratio)
-        # This reserves fec_redundancy_ratio portion of air capacity for FEC overhead
+        # Target video bitrate = raw capacity × (1 - redundancy_ratio),
+        # capped at max_bitrate so FEC blocks are sized for the actual
+        # encoder output, not the theoretical link capacity.
         target_bitrate_bps = int(link_bandwidth_bps * (1 - self.fec_redundancy_ratio))
+        target_bitrate_bps = min(target_bitrate_bps, self.dyn_max_bitrate * 1000)
 
-        # FEC calculation based on target video bitrate and frame rate
-        # This sizes the FEC block to match the video frame packet count
+        # FEC block sizing proportional to video frame packet count
+        # (wfb-ng blocks are sequential, not aligned to frame boundaries)
         fec_k, fec_n = self._compute_fec_from_bitrate(target_bitrate_bps)
 
         # Increase redundancy under loss (reduce K, keep N constant)
@@ -629,7 +637,7 @@ class ProfileSelector:
         fec_capacity = fec_redundancy * (all_packets / max(fec_n, 1)) if fec_n else 1
         fec_pressure = fec_rec / max(fec_capacity, 1)
 
-        self._current_loss_rate = loss_rate
+        self._current_loss_rate = self._clamp(loss_rate, 0, 1)
         self._current_fec_pressure = self._clamp(fec_pressure, 0, 1)
 
         # SNR EMA + slope tracking for predictive gating
@@ -708,8 +716,11 @@ class ProfileSelector:
                     self._try_confidence_feed(new_idx)
                     return False, self.current_profile_idx, self.current_profile
             elif new_idx < cur:
-                # Downgrade: margin must be negative by at least hysteresis_down_db
-                if self._margin(cur) > -self.hysteresis_down_db:
+                # Downgrade: current or predicted margin must breach threshold
+                cur_margin = self._margin(cur)
+                predicted = cur_margin + self._snr_slope * self.snr_predict_horizon_ticks
+                if (cur_margin > -self.hysteresis_down_db and
+                        predicted > -self.hysteresis_down_db):
                     return False, self.current_profile_idx, self.current_profile
 
         # Same-MCS path: may still need to push updated FEC/bitrate/GI/power

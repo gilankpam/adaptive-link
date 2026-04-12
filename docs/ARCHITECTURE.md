@@ -255,7 +255,8 @@ MTU_PAYLOAD_BYTES = 1446    # WFB-NG MTU payload byte size
 
 2. Use short GI when comfortable margin exists:
    use_short_gi = (snr_above >= short_gi_snr_margin and
-                   loss_rate < 0.02 and fec_pressure < 0.3)
+                   loss_rate < short_gi_max_loss and
+                   fec_pressure < short_gi_max_fec_pressure)
 ```
 
 **FEC Calculation (Frame-Aligned Algorithm):**
@@ -657,48 +658,48 @@ The first three mutexes are allocated in `alink_daemon_t` (main.c) and passed by
 
 | Section | Parameter | Default | Description |
 |---------|-----------|---------|-------------|
-| outgoing | `udp_ip` | 10.5.0.10 | Drone IP address |
-| outgoing | `udp_port` | 9999 | Drone listen port |
-| json | `HOST` | 127.0.0.1 | wfb-ng stats host |
-| json | `PORT` | 8103 | wfb-ng stats port |
-| keyframe | `allow_idr` | True | Generate keyframe request codes |
-| keyframe | `idr_max_messages` | 4 | Messages to include keyframe code |
-| keyframe | `idr_send_interval_ms` | 20 | Interval between keyframe messages |
-| profile selection | `hold_fallback_mode_ms` | 1000 | Hold time after leaving fallback |
-| profile selection | `hold_modes_down_ms` | 3000 | Hold time before upgrades |
-| profile selection | `min_between_changes_ms` | 200 | Minimum interval between changes |
-| profile selection | `fast_downgrade` | True | Immediate downgrades |
-| profile selection | `upward_confidence_loops` | 3 | Consecutive ticks required for an upgrade |
-| **gate** | `hysteresis_up_db` | 2.5 | dB headroom above threshold before upgrade fires |
-| **gate** | `hysteresis_down_db` | 1.0 | dB below threshold before downgrade fires |
-| **gate** | `snr_slope_alpha` | 0.3 | EMA α for Δsnr_ema trend tracking |
-| **gate** | `snr_predict_horizon_ticks` | 3 | Lookahead ticks for predictive upgrade gate |
-| **gate** | `emergency_loss_rate` | 0.15 | Loss rate that forces immediate one-step downgrade |
-| **gate** | `emergency_fec_pressure` | 0.75 | FEC pressure that forces immediate one-step downgrade |
-| **dynamic** | `snr_safety_margin` | 3 | SNR safety margin (dB) |
-| **dynamic** | `snr_ema_alpha` | 0.3 | SNR EMA smoothing factor |
-| **dynamic** | `loss_margin_weight` | 20 | Loss rate margin multiplier |
-| **dynamic** | `fec_margin_weight` | 5 | FEC pressure margin multiplier |
-| **dynamic** | `max_mcs` | 7 | Maximum allowed MCS index |
-| **dynamic** | `short_gi_snr_margin` | 5 | SNR margin required for short GI |
-| **dynamic** | `loss_threshold_for_fec_downgrade` | 0.05 | Loss rate threshold for FEC increase |
-| **dynamic** | `utilization_factor` | 0.45 | PHY rate utilization factor |
-| **dynamic** | `max_bitrate` | 30000 | Maximum bitrate (kbps) |
-| **dynamic** | `min_bitrate` | 2000 | Minimum bitrate (kbps) |
-| **dynamic** | `max_power` | 45 | Maximum TX power (dBm) |
-| **dynamic** | `min_power` | 30 | Minimum TX power (dBm) |
-| **dynamic** | `bandwidth` | 20 | Channel bandwidth (MHz) |
-| **dynamic** | `gop` | 10 | Group of pictures |
-| **dynamic** | `qp_delta` | -12 | Quantization parameter delta |
-| **dynamic** | `roi_qp` | 0,0,0,0 | Region of interest QP values |
-| **dynamic** | `fec_redundancy_ratio` | 0.33 | FEC redundancy ratio (N-K)/N |
-| **dynamic** | `max_fec_redundancy` | 0.5 | Maximum allowed FEC redundancy |
-| **dynamic** | `max_fec_n` | 50 | Maximum FEC block size |
-| **dynamic** | `max_mcs_step_up` | 1 | Maximum MCS steps per upgrade |
-| **dynamic** | `video_fps_default` | 90 | Default FPS when handshake not synced |
+| **outgoing** | `udp_ip` | 10.5.0.10 | Drone IP address |
+| **outgoing** | `udp_port` | 9999 | Drone listen port |
+| **wfb-ng** | `host` | 127.0.0.1 | wfb-ng stats host |
+| **wfb-ng** | `port` | 8103 | wfb-ng stats port |
+| **keyframe** | `allow_idr` | True | Generate keyframe request codes |
+| **keyframe** | `idr_max_messages` | 4 | Messages to include keyframe code |
+| **keyframe** | `idr_send_interval_ms` | 20 | Interval between keyframe messages |
 | **handshake** | `resync_interval_s` | 30 | Seconds between successful handshake probes (long cadence) |
+| **handshake** | `video_fps_default` | 90 | Default FPS when handshake not synced |
 | **handshake** | `fast_retry_ms` | 500 | Fast-retry timer when a hello has no matching reply |
 | **handshake** | `max_fast_retries` | 3 | Max fast retries before backing off to long cadence |
+| **hardware** | `bandwidth` | 20 | Channel bandwidth (MHz) |
+| **hardware** | `gop` | 10 | Group of pictures |
+| **hardware** | `max_bitrate` | 24000 | Maximum bitrate (kbps) |
+| **hardware** | `min_bitrate` | 1000 | Minimum bitrate (kbps) |
+| **hardware** | `max_power` | 3000 | Maximum TX power |
+| **hardware** | `min_power` | 200 | Minimum TX power |
+| **hardware** | `max_fec_n` | 30 | Maximum FEC block size |
+| **hardware** | `max_fec_redundancy` | 0.5 | Maximum allowed FEC redundancy |
+| **gate** | `snr_ema_alpha` | 0.3 | SNR EMA smoothing factor |
+| **gate** | `snr_slope_alpha` | 0.3 | EMA α for Δsnr_ema trend tracking |
+| **gate** | `snr_predict_horizon_ticks` | 3 | Lookahead ticks for predictive upgrade gate |
+| **gate** | `snr_safety_margin` | 3 | Base SNR safety margin (dB) |
+| **gate** | `loss_margin_weight` | 20 | Loss rate margin multiplier |
+| **gate** | `fec_margin_weight` | 5 | FEC pressure margin multiplier |
+| **gate** | `hysteresis_up_db` | 2.5 | dB headroom above threshold before upgrade fires |
+| **gate** | `hysteresis_down_db` | 1.0 | dB below threshold before downgrade fires |
+| **gate** | `emergency_loss_rate` | 0.15 | Loss rate that forces immediate one-step downgrade |
+| **gate** | `emergency_fec_pressure` | 0.75 | FEC pressure that forces immediate one-step downgrade |
+| **gate** | `max_mcs` | 5 | Maximum allowed MCS index |
+| **gate** | `max_mcs_step_up` | 1 | Maximum MCS steps per upgrade |
+| **profile selection** | `hold_fallback_mode_ms` | 1000 | Hold time after leaving fallback |
+| **profile selection** | `hold_modes_down_ms` | 3000 | Hold time before upgrades |
+| **profile selection** | `min_between_changes_ms` | 200 | Minimum interval between changes |
+| **profile selection** | `fast_downgrade` | True | Immediate downgrades |
+| **profile selection** | `upward_confidence_loops` | 3 | Consecutive ticks required for an upgrade |
+| **dynamic** | `short_gi_snr_margin` | 5 | SNR margin required for short GI |
+| **dynamic** | `short_gi_max_loss` | 0.02 | Max loss rate for short GI selection |
+| **dynamic** | `short_gi_max_fec_pressure` | 0.3 | Max FEC pressure for short GI selection |
+| **dynamic** | `fec_redundancy_ratio` | 0.25 | FEC redundancy ratio (N-K)/N |
+| **dynamic** | `loss_threshold_for_fec_downgrade` | 0.10 | Loss rate threshold for FEC increase |
+| **dynamic** | `utilization_factor` | 0.8 | PHY rate utilization factor |
 | **telemetry** | `log_enabled` | True | Enable telemetry logging |
 | **telemetry** | `log_dir` | /var/log/alink | Log directory path |
 | **telemetry** | `log_rotate_mb` | 50 | Rotate logs at size (MB) |

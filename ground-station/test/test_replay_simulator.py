@@ -215,8 +215,8 @@ class TestReplaySimulatorDeterminism:
                 'upward_confidence_loops': '1',
             }
         }
-        config1 = _make_config({**overrides, 'dynamic': {'snr_safety_margin': '3'}})
-        config2 = _make_config({**overrides, 'dynamic': {'snr_safety_margin': '12'}})
+        config1 = _make_config({**overrides, 'gate': {'snr_safety_margin': '3'}})
+        config2 = _make_config({**overrides, 'gate': {'snr_safety_margin': '12'}})
 
         r1 = ReplaySimulator(df.copy(), config1).run()
         r2 = ReplaySimulator(df.copy(), config2).run()
@@ -303,11 +303,11 @@ class TestReplaySimulatorFitness:
         df = _ticks_to_df(ticks)
 
         # Conservative: high safety margin
-        config_safe = _make_config({'dynamic': {'snr_safety_margin': '8'}})
+        config_safe = _make_config({'gate': {'snr_safety_margin': '8'}})
         r_safe = ReplaySimulator(df.copy(), config_safe).run()
 
         # Aggressive: no safety margin, may select MCS too high for SNR
-        config_aggr = _make_config({'dynamic': {'snr_safety_margin': '0'}})
+        config_aggr = _make_config({'gate': {'snr_safety_margin': '0'}})
         r_aggr = ReplaySimulator(df.copy(), config_aggr).run()
 
         # If aggressive causes crashes, it should score worse

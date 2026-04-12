@@ -113,7 +113,7 @@ class TestParameterSpace:
             config = space.define_trial(trial)
             study.tell(trial, 0.0)
 
-            max_mcs = config.getint('dynamic', 'max_mcs')
+            max_mcs = config.getint('gate', 'max_mcs')
             assert max_mcs <= 3, f"max_mcs={max_mcs} exceeds bound of 3"
 
     def test_all_sections_present(self):
@@ -124,7 +124,7 @@ class TestParameterSpace:
         config = space.define_trial(trial)
         study.tell(trial, 0.0)
 
-        expected = ['profile selection', 'gate', 'dynamic']
+        expected = ['profile selection', 'gate', 'dynamic', 'hardware']
         for section in expected:
             assert config.has_section(section), f"Missing section: {section}"
 
@@ -200,6 +200,7 @@ class TestConfigOutput:
         loaded.read(output_path)
         assert loaded.has_section('gate')
         assert loaded.has_section('dynamic')
+        assert loaded.has_section('hardware')
 
     def test_metadata_header(self, tmp_path):
         """Output should contain metadata in header comments."""
@@ -238,7 +239,7 @@ class TestSelectedParams:
         baseline = configparser.ConfigParser()
         baseline.read_string(_BASE_CONFIG_STR)
         base_hyst_down = baseline.getfloat('gate', 'hysteresis_down_db')
-        base_max_mcs = baseline.getint('dynamic', 'max_mcs')
+        base_max_mcs = baseline.getint('gate', 'max_mcs')
 
         space = ParameterSpace(
             _BASE_CONFIG_STR, selected_params={'hysteresis_up_db'}
@@ -252,7 +253,7 @@ class TestSelectedParams:
             assert 0.5 <= config.getfloat('gate', 'hysteresis_up_db') <= 6.0
             # Unselected params should equal the baseline, not sampled values.
             assert config.getfloat('gate', 'hysteresis_down_db') == base_hyst_down
-            assert config.getint('dynamic', 'max_mcs') == base_max_mcs
+            assert config.getint('gate', 'max_mcs') == base_max_mcs
 
     def test_none_selected_samples_everything(self):
         """selected_params=None preserves legacy 'sample every param' behavior."""
@@ -466,5 +467,5 @@ class TestMaxMcsBound:
             config = space.define_trial(trial)
             study.tell(trial, 0.0)
 
-            max_mcs = config.getint('dynamic', 'max_mcs')
+            max_mcs = config.getint('gate', 'max_mcs')
             assert 0 <= max_mcs <= 4, f"max_mcs={max_mcs} outside expected range [0, 4]"

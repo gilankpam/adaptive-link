@@ -88,14 +88,14 @@ Lower scores select conservative long-range profiles (low MCS, low bitrate); hig
 
 #### Dynamic Profile Calculation Mode
 
-When `dynamic_mode = True` in `alink_gs.conf`, the GS computes profile parameters from real-time link metrics instead of using a table lookup:
+The GS computes profile parameters from real-time link metrics using `_compute_profile()`:
 
-- **MCS selection:** Uses 802.11n SNR thresholds with configurable safety margin that widens under link stress
-- **Guard interval:** Short GI selected when SNR margin is comfortable (>5dB default) and loss/FEC pressure are low
+- **MCS selection:** Uses 802.11n SNR thresholds with configurable safety margin that widens under link stress (params in `[gate]`: `snr_safety_margin`, `loss_margin_weight`, `fec_margin_weight`, `max_mcs`)
+- **Guard interval:** Short GI selected when SNR margin is comfortable and loss/FEC pressure are below configurable thresholds (params in `[dynamic]`: `short_gi_snr_margin`, `short_gi_max_loss`, `short_gi_max_fec_pressure`)
 - **FEC adjustment:** Frame-proportional block sizing (`_compute_fec_from_bitrate()`) — K is set to the expected packets per video frame as a block-sizing heuristic. wfb-ng forms blocks sequentially with no frame awareness; larger K gives better burst-loss tolerance. See `docs/FEC_CALCULATION.md`
 - **Bitrate computation:** Derived from PHY rate × utilization factor × FEC efficiency (K/N ratio)
-- **Power scaling:** Linear inverse scaling with MCS level for link stability
-- **MCS step limiting:** Configurable `max_mcs_step_up` prevents rapid upward transitions that cause power-coupling oscillation
+- **Power scaling:** Linear inverse scaling with MCS level for link stability (params in `[hardware]`: `max_power`, `min_power`)
+- **MCS step limiting:** Configurable `max_mcs_step_up` (in `[gate]`) prevents rapid upward transitions that cause power-coupling oscillation
 
 This mode makes `profiles/default.conf` optional and provides finer-grained adaptive control.
 
@@ -140,7 +140,7 @@ The `TelemetryLogger` class provides ML-ready data collection:
 | File | Deployed to | Purpose |
 |------|------------|---------|
 | `config/alink.conf` | `/etc/alink.conf` | Drone daemon settings and command templates |
-| `config/alink_gs.conf` | `/etc/alink_gs.conf` | GS two-channel gate params, profile selection timers, dynamic profile config |
+| `config/alink_gs.conf` | `/etc/alink_gs.conf` | GS config: `[gate]` (SNR smoothing, margin, hysteresis, MCS limits), `[profile selection]` (temporal gates), `[dynamic]` (GI/FEC/bitrate tuning), `[hardware]` (adapter limits), `[handshake]`, `[telemetry]` |
 | `profiles/default.conf` | `/etc/txprofiles.conf` | Score-to-profile mapping (multiple presets in `profiles/`) |
 | `config/wlan_adapters.yaml` | `/etc/wlan_adapters.yaml` | WiFi adapter power tables and capabilities |
 

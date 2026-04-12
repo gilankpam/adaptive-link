@@ -51,7 +51,8 @@ _VIDEO_FPS = 90
 MTU_PAYLOAD_BYTES = 1446
 
 REQUIRED_SECTIONS = {
-    'outgoing', 'wfb-ng', 'keyframe', 'profile selection', 'dynamic', 'gate'
+    'outgoing', 'wfb-ng', 'keyframe', 'profile selection', 'dynamic', 'gate',
+    'hardware',
 }
 
 
@@ -467,14 +468,20 @@ class ProfileSelector:
         self.fast_downgrade = config.getboolean(ps, 'fast_downgrade')
         self.upward_confidence_loops = config.getint(ps, 'upward_confidence_loops')
 
-        # Two-channel gate tuning
+        # Two-channel gate tuning (SNR smoothing, margin, hysteresis, MCS limits)
         g = 'gate'
-        self.hysteresis_up_db = config.getfloat(g, 'hysteresis_up_db')
-        self.hysteresis_down_db = config.getfloat(g, 'hysteresis_down_db')
+        self.snr_ema_alpha = config.getfloat(g, 'snr_ema_alpha')
         self.snr_slope_alpha = config.getfloat(g, 'snr_slope_alpha')
         self.snr_predict_horizon_ticks = config.getfloat(g, 'snr_predict_horizon_ticks')
+        self.snr_safety_margin = config.getfloat(g, 'snr_safety_margin')
+        self.loss_margin_weight = config.getfloat(g, 'loss_margin_weight')
+        self.fec_margin_weight = config.getfloat(g, 'fec_margin_weight')
+        self.hysteresis_up_db = config.getfloat(g, 'hysteresis_up_db')
+        self.hysteresis_down_db = config.getfloat(g, 'hysteresis_down_db')
         self.emergency_loss_rate = config.getfloat(g, 'emergency_loss_rate')
         self.emergency_fec_pressure = config.getfloat(g, 'emergency_fec_pressure')
+        self.dyn_max_mcs = config.getint(g, 'max_mcs')
+        self.max_mcs_step_up = config.getint(g, 'max_mcs_step_up', fallback=1)
 
         # State
         self.current_profile_idx = -1
@@ -488,26 +495,28 @@ class ProfileSelector:
         self.up_confidence_count = 0
         self.up_target_profile = -1
 
-        # Dynamic parameters
+        # Dynamic profile computation parameters
         d = 'dynamic'
-        self.snr_safety_margin = config.getfloat(d, 'snr_safety_margin')
-        self.snr_ema_alpha = config.getfloat(d, 'snr_ema_alpha')
-        self.loss_margin_weight = config.getfloat(d, 'loss_margin_weight')
-        self.fec_margin_weight = config.getfloat(d, 'fec_margin_weight')
-        self.dyn_max_mcs = config.getint(d, 'max_mcs')
         self.short_gi_snr_margin = config.getfloat(d, 'short_gi_snr_margin')
+        self.short_gi_max_loss = config.getfloat(
+            d, 'short_gi_max_loss', fallback=0.02)
+        self.short_gi_max_fec_pressure = config.getfloat(
+            d, 'short_gi_max_fec_pressure', fallback=0.3)
         self.loss_threshold_for_fec_downgrade = config.getfloat(d, 'loss_threshold_for_fec_downgrade')
         self.fec_redundancy_ratio = config.getfloat(d, 'fec_redundancy_ratio')
-        self.max_fec_redundancy = config.getfloat(d, 'max_fec_redundancy', fallback=0.5)
-        self.max_fec_n = config.getint(d, 'max_fec_n', fallback=50)
         self.utilization_factor = config.getfloat(d, 'utilization_factor')
-        self.dyn_max_bitrate = config.getint(d, 'max_bitrate')
-        self.dyn_min_bitrate = config.getint(d, 'min_bitrate')
-        self.dyn_max_power = config.getint(d, 'max_power')
-        self.dyn_min_power = config.getint(d, 'min_power')
-        self.dyn_bandwidth = config.getint(d, 'bandwidth')
-        self.dyn_gop = config.getfloat(d, 'gop')
-        self.max_mcs_step_up = config.getint(d, 'max_mcs_step_up', fallback=1)
+
+        # Hardware / adapter limits
+        hw = 'hardware'
+        self.dyn_max_bitrate = config.getint(hw, 'max_bitrate')
+        self.dyn_min_bitrate = config.getint(hw, 'min_bitrate')
+        self.dyn_max_power = config.getint(hw, 'max_power')
+        self.dyn_min_power = config.getint(hw, 'min_power')
+        self.dyn_bandwidth = config.getint(hw, 'bandwidth')
+        self.dyn_gop = config.getfloat(hw, 'gop')
+        self.max_fec_redundancy = config.getfloat(hw, 'max_fec_redundancy',
+                                                  fallback=0.5)
+        self.max_fec_n = config.getint(hw, 'max_fec_n', fallback=50)
 
         # Link state (updated by evaluate_link, consumed by _compute_profile and select)
         self.snr_ema = 0.0
@@ -599,7 +608,8 @@ class ProfileSelector:
         # Guard interval: short only when SNR margin is comfortable
         snr_above = snr - MCS_SNR_THRESHOLDS[mcs]
         use_short_gi = (snr_above >= self.short_gi_snr_margin and
-                        loss_rate < 0.02 and fec_pressure < 0.3)
+                        loss_rate < self.short_gi_max_loss and
+                        fec_pressure < self.short_gi_max_fec_pressure)
 
         # Bitrate & FEC: compute together — FEC block size scales with bitrate
         phy_rates = PHY_RATES_40MHZ if self.dyn_bandwidth == 40 else PHY_RATES_20MHZ
@@ -776,6 +786,12 @@ class ProfileSelector:
 
         if is_profile_downgrade and (emergency or self.fast_downgrade):
             # Fast downgrade — apply immediately
+            self.up_confidence_count = 0
+            self.up_target_profile = -1
+        elif is_profile_downgrade:
+            # Slow downgrade (fast_downgrade=False, non-emergency) — enforce hold timer
+            if elapsed_since_mcs_ms < self.hold_modes_down_ms:
+                return False, self.current_profile_idx, self.current_profile
             self.up_confidence_count = 0
             self.up_target_profile = -1
         elif self.current_profile_idx == 0:
@@ -1152,7 +1168,7 @@ if __name__ == "__main__":
 
     handshake = HandshakeClient(
         udp_socket, udp_ip, udp_port,
-        default_fps=config.getint('dynamic', 'video_fps_default', fallback=90),
+        default_fps=config.getint('handshake', 'video_fps_default', fallback=90),
         long_resync_ms=config.getint('handshake', 'resync_interval_s', fallback=30) * 1000,
         fast_retry_ms=config.getint('handshake', 'fast_retry_ms', fallback=500),
         max_fast_retries=config.getint('handshake', 'max_fast_retries', fallback=3),

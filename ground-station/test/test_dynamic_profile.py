@@ -20,13 +20,41 @@ TEST_CONFIG_STRING = """# adaptive-link VRX settings
 udp_ip = 10.5.0.10
 udp_port = 9999
 
-[json]
-HOST = 127.0.0.1
-PORT = 8103
+[wfb-ng]
+host = 127.0.0.1
+port = 8103
 
 [keyframe]
 allow_idr = True
 idr_max_messages = 20
+
+[handshake]
+resync_interval_s = 30
+video_fps_default = 90
+
+[hardware]
+bandwidth = 20
+gop = 10
+max_bitrate = 30000
+min_bitrate = 2000
+max_power = 2500
+min_power = 200
+max_fec_n = 50
+max_fec_redundancy = 0.5
+
+[gate]
+snr_ema_alpha = 0.3
+snr_slope_alpha = 0.3
+snr_predict_horizon_ticks = 3
+snr_safety_margin = 3
+loss_margin_weight = 20
+fec_margin_weight = 5
+hysteresis_up_db = 2.0
+hysteresis_down_db = 1.0
+emergency_loss_rate = 0.15
+emergency_fec_pressure = 0.75
+max_mcs = 7
+max_mcs_step_up = 1
 
 [profile selection]
 hold_fallback_mode_ms = 1000
@@ -35,31 +63,13 @@ min_between_changes_ms = 200
 fast_downgrade = True
 upward_confidence_loops = 3
 
-[gate]
-hysteresis_up_db = 2.0
-hysteresis_down_db = 1.0
-snr_slope_alpha = 0.3
-snr_predict_horizon_ticks = 3
-emergency_loss_rate = 0.15
-emergency_fec_pressure = 0.75
-
 [dynamic]
-snr_safety_margin = 3
-snr_ema_alpha = 0.3
-loss_margin_weight = 20
-fec_margin_weight = 5
-max_mcs = 7
 short_gi_snr_margin = 5
-loss_threshold_for_fec_downgrade = 0.05
+short_gi_max_loss = 0.02
+short_gi_max_fec_pressure = 0.3
 fec_redundancy_ratio = 0.25
+loss_threshold_for_fec_downgrade = 0.05
 utilization_factor = 0.45
-max_bitrate = 30000
-min_bitrate = 2000
-max_power = 2500
-min_power = 200
-bandwidth = 20
-gop = 10
-max_mcs_step_up = 1
 
 [telemetry]
 log_enabled = False
@@ -145,7 +155,7 @@ class TestMCSSelection:
 
     def test_max_mcs_cap(self):
         """Even with high SNR, respect max_mcs config."""
-        ps = _make_selector({'dynamic': {'max_mcs': '4'}})
+        ps = _make_selector({'gate': {'max_mcs': '4'}})
         _feed_score(ps, best_snr=32)
         profile = ps._compute_profile()
         assert profile['mcs'] == 4
@@ -356,19 +366,19 @@ class TestBitrate:
         assert profile['bitrate'] == 24367
 
     def test_bitrate_capped_at_max(self):
-        ps = _make_selector({'dynamic': {'max_bitrate': '10000'}})
+        ps = _make_selector({'hardware': {'max_bitrate': '10000'}})
         _feed_score(ps, best_snr=32)
         profile = ps._compute_profile()
         assert profile['bitrate'] == 10000
 
     def test_bitrate_floored_at_min(self):
-        ps = _make_selector({'dynamic': {'min_bitrate': '3000'}})
+        ps = _make_selector({'hardware': {'min_bitrate': '3000'}})
         _feed_score(ps, best_snr=7)
         profile = ps._compute_profile()
         assert profile['bitrate'] == 3000
 
     def test_bitrate_40mhz(self):
-        ps = _make_selector({'dynamic': {'bandwidth': '40'}})
+        ps = _make_selector({'hardware': {'bandwidth': '40'}})
         _feed_score(ps, best_snr=7)
         profile = ps._compute_profile()
         # PHY 13.5 Mbps (40MHz MCS0 long GI), link_bw=6075 kbps
@@ -383,7 +393,7 @@ class TestBitrate:
         With max_bitrate=10000: target capped to 10000 kbps.
         packets_per_frame = 10000000/(60*8*1446) = 14.41 → K=15, N=20.
         """
-        ps = _make_selector({'dynamic': {'max_bitrate': '10000'}})
+        ps = _make_selector({'hardware': {'max_bitrate': '10000'}})
         _feed_score(ps, best_snr=32)
         profile = ps._compute_profile()
         # K should be sized for 10 Mbps (15), not 24 Mbps (36)
@@ -427,7 +437,7 @@ class TestFixedParams:
     """Test that fixed parameters come from config."""
 
     def test_gop_from_config(self):
-        ps = _make_selector({'dynamic': {'gop': '5'}})
+        ps = _make_selector({'hardware': {'gop': '5'}})
         _feed_score(ps, best_snr=20)
         profile = ps._compute_profile()
         assert profile['gop'] == 5.0
@@ -559,7 +569,7 @@ class TestMCSStepLimit:
 
     def test_step_limit_disabled_with_zero(self):
         """Setting max_mcs_step_up=0 disables step limiting."""
-        ps = _make_selector({'dynamic': {'max_mcs_step_up': '0'}})
+        ps = _make_selector({'gate': {'max_mcs_step_up': '0'}})
         self._warm_at_mcs(ps, target_snr=15)  # MCS 2
         assert ps.current_profile_idx == 2
 
@@ -586,7 +596,7 @@ class TestMaxFECN:
         Packets per frame: 24368000/(60*8*1446)=35.1 → K=36, N=ceil(36/0.75)=48.
         With max_fec_n=30, N should be capped to 30.
         """
-        ps = _make_selector({'dynamic': {'max_fec_n': '30'}})
+        ps = _make_selector({'hardware': {'max_fec_n': '30'}})
         _feed_score(ps, best_snr=32)
         profile = ps._compute_profile()
         assert profile['fec_n'] <= 30
@@ -598,7 +608,7 @@ class TestMaxFECN:
         After cap to N=30: K should be ceil(30 * 0.75) = 23
         New redundancy = (30-23)/30 = 23.3% (close to original 25%)
         """
-        ps = _make_selector({'dynamic': {'max_fec_n': '30'}})
+        ps = _make_selector({'hardware': {'max_fec_n': '30'}})
         _feed_score(ps, best_snr=32)
         profile = ps._compute_profile()
         # Verify redundancy ratio is preserved (within 5% tolerance)
@@ -611,7 +621,7 @@ class TestMaxFECN:
 
         MCS0 LGI: K=4, N=6. With max_fec_n=30, no change.
         """
-        ps = _make_selector({'dynamic': {'max_fec_n': '30'}})
+        ps = _make_selector({'hardware': {'max_fec_n': '30'}})
         _feed_score(ps, best_snr=7)
         profile = ps._compute_profile()
         assert profile['fec_n'] == 6
@@ -624,7 +634,7 @@ class TestMaxFECN:
         Original K=36, N=48 → capped to N=10
         K = ceil(10 * 0.75) = 8
         """
-        ps = _make_selector({'dynamic': {'max_fec_n': '10'}})
+        ps = _make_selector({'hardware': {'max_fec_n': '10'}})
         _feed_score(ps, best_snr=32)
         profile = ps._compute_profile()
         assert profile['fec_n'] == 10
@@ -642,7 +652,7 @@ class TestMaxFECN:
         Packets per frame: 14614000/(60*8*1446)=21.1 → K=22, N=ceil(22/0.75)=30.
         With max_fec_n=25, N should be capped to 25.
         """
-        ps = _make_selector({'dynamic': {'max_fec_n': '25'}})
+        ps = _make_selector({'hardware': {'max_fec_n': '25'}})
         _feed_score(ps, best_snr=21)  # MCS4: 17+3=20 < 21
         profile = ps._compute_profile()
         assert profile['fec_n'] <= 25
@@ -865,3 +875,63 @@ class TestTwoChannelGate:
                 false_downgrade = True
                 break
         assert not false_downgrade, "Stable SNR should not cause predictive downgrade"
+
+    def test_slow_downgrade_blocked_by_hold_timer(self):
+        """With fast_downgrade=False, non-emergency downgrade is blocked within
+        hold_modes_down_ms."""
+        ps = _make_selector({'profile selection': {'fast_downgrade': 'False'}})
+        self._settle_at(ps, snr=22)  # MCS4
+        assert ps.current_profile_idx == 4
+
+        # Pretend an MCS change just happened
+        ps.min_between_changes_ms = 0
+        ps.hold_modes_down_ms = 5000
+        ps.last_mcs_change_time_ms = ps._now_ms()
+
+        # Drop SNR well below threshold — would trigger downgrade if not held
+        for i in range(10):
+            _feed_tick(ps, best_snr=10, all_packets=300000 + 1000 * (i + 1))
+            changed, idx, _ = ps.select()
+            assert not changed, "Slow downgrade should be blocked by hold_modes_down_ms"
+
+    def test_slow_downgrade_fires_after_hold_timer(self):
+        """With fast_downgrade=False, non-emergency downgrade fires once
+        hold_modes_down_ms has elapsed."""
+        ps = _make_selector({'profile selection': {'fast_downgrade': 'False'}})
+        self._settle_at(ps, snr=22)  # MCS4
+        assert ps.current_profile_idx == 4
+
+        # Set hold timer in the past so it's already expired
+        ps.min_between_changes_ms = 0
+        ps.hold_modes_down_ms = 3000
+        ps.last_mcs_change_time_ms = ps._now_ms() - 5000
+
+        # Drop SNR — downgrade should fire
+        downgraded = False
+        for i in range(10):
+            _feed_tick(ps, best_snr=10, all_packets=300000 + 1000 * (i + 1))
+            changed, idx, _ = ps.select()
+            if changed and idx < 4:
+                downgraded = True
+                break
+        assert downgraded, "Slow downgrade should fire after hold_modes_down_ms expires"
+
+    def test_emergency_bypasses_slow_downgrade_hold(self):
+        """Emergency downgrade fires immediately even with fast_downgrade=False
+        and hold timer active."""
+        ps = _make_selector({'profile selection': {'fast_downgrade': 'False'}})
+        self._settle_at(ps, snr=24)  # MCS5
+        assert ps.current_profile_idx == 5
+        start_idx = ps.current_profile_idx
+
+        # Set hold timer to block slow downgrades
+        ps.min_between_changes_ms = 0
+        ps.hold_modes_down_ms = 5000
+        ps.last_mcs_change_time_ms = ps._now_ms()
+
+        # Trigger emergency via high loss
+        _feed_tick(ps, best_snr=24, all_packets=400000)
+        ps._current_loss_rate = 0.25  # > emergency_loss_rate=0.15
+        changed, idx, _ = ps.select()
+        assert changed, "Emergency should bypass slow downgrade hold"
+        assert idx < start_idx

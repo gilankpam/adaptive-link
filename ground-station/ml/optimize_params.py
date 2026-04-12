@@ -42,19 +42,22 @@ PARAM_REGISTRY = [
     ('snr_predict_horizon_ticks',        'gate',              'float',   0.0,  10.0, None),
     ('emergency_loss_rate',              'gate',              'float',  0.05,  0.35, None),
     ('emergency_fec_pressure',           'gate',              'float',   0.4,  0.95, None),
-    ('snr_safety_margin',                'dynamic',           'float',   1.0,   8.0, None),
-    ('snr_ema_alpha',                    'dynamic',           'float',  0.05,   0.8, None),
-    ('loss_margin_weight',               'dynamic',           'float',   5.0,  50.0, None),
-    ('fec_margin_weight',                'dynamic',           'float',   1.0,  15.0, None),
-    ('max_mcs',                          'dynamic',           'int',       2,  None, None),
+    ('snr_safety_margin',                'gate',              'float',   1.0,   8.0, None),
+    ('snr_ema_alpha',                    'gate',              'float',  0.05,   0.8, None),
+    ('loss_margin_weight',               'gate',              'float',   5.0,  50.0, None),
+    ('fec_margin_weight',                'gate',              'float',   1.0,  15.0, None),
+    ('max_mcs',                          'gate',              'int',       2,  None, None),
+    ('max_mcs_step_up',                  'gate',              'int',       0,     3, None),
     ('short_gi_snr_margin',              'dynamic',           'float',   2.0,  10.0, None),
+    ('short_gi_max_loss',                'dynamic',           'float', 0.005,  0.10, None),
+    ('short_gi_max_fec_pressure',        'dynamic',           'float',   0.1,   0.8, None),
     ('loss_threshold_for_fec_downgrade', 'dynamic',           'float',  0.01,  0.15, None),
     ('fec_redundancy_ratio',             'dynamic',           'float',  0.15,  0.40, None),
     ('utilization_factor',               'dynamic',           'float',   0.2,   0.7, None),
-    ('max_bitrate',                      'dynamic',           'int',   15000, 40000, None),
-    ('min_bitrate',                      'dynamic',           'int',    1000,  5000, None),
-    ('max_power',                        'dynamic',           'int',    1000,  2900, None),
-    ('min_power',                        'dynamic',           'int',      50,  1000, None),
+    ('max_bitrate',                      'hardware',          'int',   15000, 40000, None),
+    ('min_bitrate',                      'hardware',          'int',    1000,  5000, None),
+    ('max_power',                        'hardware',          'int',    1000,  2900, None),
+    ('min_power',                        'hardware',          'int',      50,  1000, None),
 ]
 
 PARAM_SECTION = {name: section for (name, section, *_) in PARAM_REGISTRY}
@@ -65,6 +68,7 @@ _SECTION_ALIAS = {
     'profile-selection': 'profile selection',
     'gate': 'gate',
     'dynamic': 'dynamic',
+    'hardware': 'hardware',
 }
 
 
@@ -153,7 +157,7 @@ def _print_registry():
             print(f"  {name:38s} {bounds}")
         print()
     print("Section shorthands for --params / --exclude:")
-    print("  profile_selection, gate, dynamic")
+    print("  profile_selection, gate, dynamic, hardware")
 
 
 class ParameterSpace:

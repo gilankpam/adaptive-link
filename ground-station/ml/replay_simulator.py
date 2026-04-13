@@ -153,6 +153,15 @@ class ReplaySimulator:
             def correct_timestamp(self, ts): return ts
             def is_synced(self): return False
 
+        # Disable online learning for deterministic replay
+        if not config.has_section('ml'):
+            config.add_section('ml')
+        config.set('ml', 'persist_path', '')
+        for param in ('snr_safety_margin', 'fec_redundancy_ratio',
+                      'utilization_factor', 'hysteresis_up_db'):
+            for suffix in ('_lr_up', '_lr_down'):
+                config.set('ml', param + suffix, '0')
+
         # Create ProfileSelector
         self.selector = _ProfileSelector(config, _MockHandshake())
 

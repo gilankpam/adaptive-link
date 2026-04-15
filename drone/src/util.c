@@ -203,3 +203,31 @@ int util_parse_url(const char *url, char *host, size_t host_size,
 
     return 0;
 }
+
+int util_venc_parse_int_value(const char *json, int *out) {
+    const char *p = strstr(json, "\"value\":");
+    if (!p) return -1;
+    p += 8; /* skip past "value": */
+    while (*p == ' ') p++;
+    char *endptr;
+    long v = strtol(p, &endptr, 10);
+    if (endptr == p) return -1;
+    *out = (int)v;
+    return 0;
+}
+
+int util_venc_parse_str_value(const char *json, char *out, size_t out_size) {
+    const char *p = strstr(json, "\"value\":");
+    if (!p) return -1;
+    p += 8; /* skip past "value": */
+    while (*p == ' ') p++;
+    if (*p != '"') return -1;
+    p++; /* skip opening quote */
+    const char *end = strchr(p, '"');
+    if (!end) return -1;
+    size_t len = (size_t)(end - p);
+    if (len >= out_size) len = out_size - 1;
+    memcpy(out, p, len);
+    out[len] = '\0';
+    return 0;
+}

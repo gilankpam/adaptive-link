@@ -107,23 +107,14 @@ int profile_apply_api_batch(const alink_config_t *cfg,
 
     snprintf(bitrateStr, sizeof(bitrateStr), "%d", bitrate);
     snprintf(gopStr, sizeof(gopStr), "%.1f", gop);
-    snprintf(roiQpStr, sizeof(roiQpStr), "0,%d,0", roiQp);
+    snprintf(roiQpStr, sizeof(roiQpStr), "%d", roiQp);
 
     const char *keys[] = { "bitrate", "gop", "roiQp" };
     const char *values[] = { bitrateStr, gopStr, roiQpStr };
 
     cmd_format(path, sizeof(path), cfg->apiCommandTemplate, 3, keys, values, cfg->log_level);
 
-    /* Parse the URL to extract host, port, and path */
-    char host[64];
-    int port = 80;
-    char url_path[MAX_COMMAND_SIZE];
-
-    if (util_parse_url(path, host, sizeof(host), &port, url_path, sizeof(url_path)) != 0) {
-        return -1;
-    }
-
-    return cmd_http_get(host, port, url_path, NULL, 0, cmd);
+    return cmd_http_get(VENC_API_HOST, VENC_API_PORT, path, NULL, 0, cmd);
 }
 
 /* ─── Per-step apply helpers ────────────────────────────────────────────
@@ -231,15 +222,8 @@ static void apply_idr_step(profile_state_t *ps) {
     alink_config_t *cfg = ps->cfg;
     if (!cfg->idr_every_change) return;
 
-    const char *idrApiCommand = cfg->idrApiCommandTemplate;
-    char host[64];
-    int port = 80;
-    char url_path[MAX_COMMAND_SIZE];
-
-    if (util_parse_url(idrApiCommand, host, sizeof(host), &port, url_path, sizeof(url_path)) == 0) {
-        if (cmd_http_get(host, port, url_path, NULL, 0, ps->cmd) != 0) {
-            ERROR_LOG(cfg, "IDR command failed: %s\n", idrApiCommand);
-        }
+    if (cmd_http_get(VENC_API_HOST, VENC_API_PORT, cfg->idrApiCommandTemplate, NULL, 0, ps->cmd) != 0) {
+        ERROR_LOG(cfg, "IDR command failed: %s\n", cfg->idrApiCommandTemplate);
     }
 }
 

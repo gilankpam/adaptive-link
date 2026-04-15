@@ -18,7 +18,7 @@ typedef struct {
     log_level_t log_level;
     /* Serializes cmd_exec_with_timeout() and cmd_http_get() across threads
      * so the profile worker and tx_monitor don't race each other — e.g. two
-     * concurrent HTTP GETs to the camera majestic API. */
+     * concurrent HTTP GETs to the camera waybeam_venc API. */
     pthread_mutex_t exec_mutex;
 } cmd_ctx_t;
 

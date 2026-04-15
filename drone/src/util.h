@@ -35,4 +35,27 @@ long util_elapsed_ms_timeval(const struct timeval *current, const struct timeval
 int util_parse_url(const char *url, char *host, size_t host_size,
                    int *port, char *path, size_t path_size);
 
+/**
+ * Parse an integer "value" field from a waybeam_venc JSON response.
+ * Finds the first "value": token and reads the integer that follows.
+ * Example input: {"ok":true,"data":{"field":"video0.fps","value":60}}
+ *
+ * @param json    NUL-terminated JSON response string
+ * @param out     Output integer
+ * @return 0 on success, -1 if token not found or value is not parseable
+ */
+int util_venc_parse_int_value(const char *json, int *out);
+
+/**
+ * Parse a string "value" field from a waybeam_venc JSON response.
+ * Finds the first "value": token and reads the quoted string that follows.
+ * Example input: {"ok":true,"data":{"field":"video0.size","value":"1920x1080"}}
+ *
+ * @param json     NUL-terminated JSON response string
+ * @param out      Output buffer
+ * @param out_size Size of output buffer (result is always NUL-terminated)
+ * @return 0 on success, -1 if token not found or string is malformed
+ */
+int util_venc_parse_str_value(const char *json, char *out, size_t out_size);
+
 #endif /* ALINK_UTIL_H */

@@ -8,29 +8,29 @@
 #include "command.h"
 
 /* TTL for cached camera FPS/resolution (milliseconds).
- * Coalesces handshake bursts so the camera CLI isn't hit per probe,
+ * Coalesces handshake bursts so the camera API isn't hit per probe,
  * while still picking up runtime camera reconfigs within ~2s. */
 #define CAMERA_INFO_CACHE_INTERVAL_MS 2000
 
+
+
 static int get_resolution_inner(hw_state_t *hw) {
-    char resolution[32];
+    char response[256];
 
-    FILE *fp = popen("cli -g .video0.size", "r");
-    if (fp == NULL) {
-        ERROR_LOG_LEVEL(hw->log_level, "Failed to run get resolution command\n");
+    if (http_get(VENC_API_HOST, VENC_API_PORT, "/api/v1/get?video0.size",
+                 response, sizeof(response), VENC_QUERY_TIMEOUT_MS) != 0) {
+        ERROR_LOG_LEVEL(hw->log_level, "Failed to query video0.size from waybeam_venc\n");
         return 1;
     }
 
-    if (fgets(resolution, sizeof(resolution) - 1, fp) == NULL) {
-        ERROR_LOG_LEVEL(hw->log_level, "fgets failed\n");
-        pclose(fp);
+    char size_str[32];
+    if (util_venc_parse_str_value(response, size_str, sizeof(size_str)) != 0) {
+        ERROR_LOG_LEVEL(hw->log_level, "Failed to parse video0.size response\n");
         return 1;
     }
 
-    pclose(fp);
-
-    if (sscanf(resolution, "%dx%d", &hw->x_res, &hw->y_res) != 2) {
-        ERROR_LOG_LEVEL(hw->log_level, "Failed to parse resolution\n");
+    if (sscanf(size_str, "%dx%d", &hw->x_res, &hw->y_res) != 2) {
+        ERROR_LOG_LEVEL(hw->log_level, "Failed to parse resolution from '%s'\n", size_str);
         return 1;
     }
 
@@ -81,31 +81,26 @@ void hw_load_vtx_info(hw_state_t *hw) {
 }
 
 int hw_get_camera_bin(hw_state_t *hw) {
-    char sensor_config[256];
+    char response[256];
 
-    FILE *fp = popen("cli -g .isp.sensorConfig", "r");
-    if (fp == NULL) {
-        ERROR_LOG_LEVEL(hw->log_level, "Failed to run sensorConfig command\n");
+    if (http_get(VENC_API_HOST, VENC_API_PORT, "/api/v1/get?isp.sensorBin",
+                 response, sizeof(response), VENC_QUERY_TIMEOUT_MS) != 0) {
+        ERROR_LOG_LEVEL(hw->log_level, "Failed to query isp.sensorBin from waybeam_venc\n");
         return 1;
     }
 
-    if (fgets(sensor_config, sizeof(sensor_config), fp) == NULL) {
-        ERROR_LOG_LEVEL(hw->log_level, "fgets failed\n");
-        pclose(fp);
+    char sensor_path[256];
+    if (util_venc_parse_str_value(response, sensor_path, sizeof(sensor_path)) != 0) {
+        ERROR_LOG_LEVEL(hw->log_level, "Failed to parse isp.sensorBin response\n");
         return 1;
     }
 
-    pclose(fp);
-
-    sensor_config[strcspn(sensor_config, "\n")] = '\0';
-
-    const char *filename = strrchr(sensor_config, '/');
+    const char *filename = strrchr(sensor_path, '/');
     if (filename) {
         strncpy(hw->camera_bin, filename + 1, sizeof(hw->camera_bin) - 1);
     } else {
-        strncpy(hw->camera_bin, sensor_config, sizeof(hw->camera_bin) - 1);
+        strncpy(hw->camera_bin, sensor_path, sizeof(hw->camera_bin) - 1);
     }
-
     hw->camera_bin[sizeof(hw->camera_bin) - 1] = '\0';
 
     INFO_LOG_LEVEL(hw->log_level, "Camera Bin: %s\n", hw->camera_bin);
@@ -123,22 +118,20 @@ int hw_get_resolution(hw_state_t *hw) {
 }
 
 int hw_get_video_fps(hw_state_t *hw) {
-    char command[] = "cli -g .video0.fps";
-    char buffer[128];
-    FILE *pipe;
-    int fps = 0;
+    char response[256];
 
-    pipe = popen(command, "r");
-    if (pipe == NULL) {
-        ERROR_LOG_LEVEL(hw->log_level, "Failed to run cli -g .video0.fps\n");
+    if (http_get(VENC_API_HOST, VENC_API_PORT, "/api/v1/get?video0.fps",
+                 response, sizeof(response), VENC_QUERY_TIMEOUT_MS) != 0) {
+        ERROR_LOG_LEVEL(hw->log_level, "Failed to query video0.fps from waybeam_venc\n");
         return -1;
     }
 
-    if (fgets(buffer, sizeof(buffer), pipe) != NULL) {
-        fps = atoi(buffer);
+    int fps = 0;
+    if (util_venc_parse_int_value(response, &fps) != 0) {
+        ERROR_LOG_LEVEL(hw->log_level, "Failed to parse video0.fps response\n");
+        return -1;
     }
 
-    pclose(pipe);
     return fps;
 }
 
@@ -215,40 +208,6 @@ int hw_get_wlan0_channel(void) {
     return channel;
 }
 
-int hw_setup_roi(hw_state_t *hw) {
-    /* Round resolution to multiples of 32 (macroblock alignment) */
-    int rx = (hw->x_res / 32) * 32;
-    int ry = (hw->y_res / 32) * 32;
-
-    /* 3 zones: left 25%, center 50%, right = remainder */
-    int left_w   = (rx / 4 / 32) * 32;
-    int center_w = (rx / 2 / 32) * 32;
-    int right_w  = ((rx - left_w - center_w) / 32) * 32;
-
-    int coord0 = 0;
-    int coord1 = left_w;
-    int coord2 = left_w + center_w;
-
-    char roi_rect[256];
-    snprintf(roi_rect, sizeof(roi_rect),
-             "%dx%dx%dx%d,%dx%dx%dx%d,%dx%dx%dx%d",
-             coord0, 0, left_w, ry,
-             coord1, 0, center_w, ry,
-             coord2, 0, right_w, ry);
-
-    char command[512];
-    snprintf(command, sizeof(command), "cli -s .fpv.roiRect %s", roi_rect);
-
-    INFO_LOG_LEVEL(hw->log_level, "Setting ROI rect: %s\n", roi_rect);
-
-    FILE *fp = popen(command, "r");
-    if (fp == NULL) {
-        ERROR_LOG_LEVEL(hw->log_level, "Failed to set fpv.roiRect\n");
-        return 1;
-    }
-    pclose(fp);
-    return 0;
-}
 
 long hw_get_tx_dropped(hw_state_t *hw) {
     const char *path = "/sys/class/net/wlan0/statistics/tx_dropped";

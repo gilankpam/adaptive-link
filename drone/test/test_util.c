@@ -638,6 +638,107 @@ void test_parse_url_with_fragment(void) {
 }
 
 /* ============================================================
+ * util_venc_parse_int_value tests
+ * ============================================================ */
+
+void test_venc_parse_int_typical(void) {
+    int val = 0;
+    int ret = util_venc_parse_int_value(
+        "{\"ok\":true,\"data\":{\"field\":\"video0.fps\",\"value\":60}}", &val);
+    TEST_ASSERT_EQUAL(0, ret);
+    TEST_ASSERT_EQUAL(60, val);
+}
+
+void test_venc_parse_int_zero(void) {
+    int val = -1;
+    int ret = util_venc_parse_int_value(
+        "{\"ok\":true,\"data\":{\"field\":\"video0.fps\",\"value\":0}}", &val);
+    TEST_ASSERT_EQUAL(0, ret);
+    TEST_ASSERT_EQUAL(0, val);
+}
+
+void test_venc_parse_int_negative(void) {
+    int val = 0;
+    int ret = util_venc_parse_int_value(
+        "{\"ok\":true,\"data\":{\"field\":\"fpv.roiQp\",\"value\":-12}}", &val);
+    TEST_ASSERT_EQUAL(0, ret);
+    TEST_ASSERT_EQUAL(-12, val);
+}
+
+void test_venc_parse_int_no_value_key(void) {
+    int val = 0;
+    int ret = util_venc_parse_int_value("{\"ok\":true,\"data\":{}}", &val);
+    TEST_ASSERT_EQUAL(-1, ret);
+}
+
+void test_venc_parse_int_value_is_string(void) {
+    int val = 0;
+    int ret = util_venc_parse_int_value(
+        "{\"ok\":true,\"data\":{\"value\":\"notanint\"}}", &val);
+    TEST_ASSERT_EQUAL(-1, ret);
+}
+
+void test_venc_parse_int_whitespace_after_colon(void) {
+    int val = 0;
+    int ret = util_venc_parse_int_value(
+        "{\"ok\":true,\"data\":{\"value\": 90}}", &val);
+    TEST_ASSERT_EQUAL(0, ret);
+    TEST_ASSERT_EQUAL(90, val);
+}
+
+/* ============================================================
+ * util_venc_parse_str_value tests
+ * ============================================================ */
+
+void test_venc_parse_str_typical(void) {
+    char out[32];
+    int ret = util_venc_parse_str_value(
+        "{\"ok\":true,\"data\":{\"field\":\"video0.size\",\"value\":\"1920x1080\"}}",
+        out, sizeof(out));
+    TEST_ASSERT_EQUAL(0, ret);
+    TEST_ASSERT_EQUAL_STRING("1920x1080", out);
+}
+
+void test_venc_parse_str_path(void) {
+    char out[128];
+    int ret = util_venc_parse_str_value(
+        "{\"ok\":true,\"data\":{\"field\":\"isp.sensorBin\","
+        "\"value\":\"/etc/sensors/imx415_infinity6e.bin\"}}",
+        out, sizeof(out));
+    TEST_ASSERT_EQUAL(0, ret);
+    TEST_ASSERT_EQUAL_STRING("/etc/sensors/imx415_infinity6e.bin", out);
+}
+
+void test_venc_parse_str_no_value_key(void) {
+    char out[32];
+    int ret = util_venc_parse_str_value("{\"ok\":true,\"data\":{}}", out, sizeof(out));
+    TEST_ASSERT_EQUAL(-1, ret);
+}
+
+void test_venc_parse_str_value_is_int(void) {
+    char out[32];
+    int ret = util_venc_parse_str_value(
+        "{\"ok\":true,\"data\":{\"value\":60}}", out, sizeof(out));
+    TEST_ASSERT_EQUAL(-1, ret);
+}
+
+void test_venc_parse_str_truncates_to_buffer(void) {
+    char out[5]; /* smaller than the actual value */
+    int ret = util_venc_parse_str_value(
+        "{\"ok\":true,\"data\":{\"value\":\"1920x1080\"}}", out, sizeof(out));
+    TEST_ASSERT_EQUAL(0, ret);
+    TEST_ASSERT_EQUAL_STRING("1920", out); /* truncated to 4 chars + NUL */
+}
+
+void test_venc_parse_str_whitespace_after_colon(void) {
+    char out[32];
+    int ret = util_venc_parse_str_value(
+        "{\"ok\":true,\"data\":{\"value\": \"1280x720\"}}", out, sizeof(out));
+    TEST_ASSERT_EQUAL(0, ret);
+    TEST_ASSERT_EQUAL_STRING("1280x720", out);
+}
+
+/* ============================================================
  * Main - Test Runner
  * ============================================================ */
 
@@ -718,6 +819,22 @@ int main(void) {
     RUN_TEST(test_parse_url_buffer_overflow_protection);
     RUN_TEST(test_parse_url_ipv4_address);
     RUN_TEST(test_parse_url_with_fragment);
-    
+
+    /* venc int value parsing tests */
+    RUN_TEST(test_venc_parse_int_typical);
+    RUN_TEST(test_venc_parse_int_zero);
+    RUN_TEST(test_venc_parse_int_negative);
+    RUN_TEST(test_venc_parse_int_no_value_key);
+    RUN_TEST(test_venc_parse_int_value_is_string);
+    RUN_TEST(test_venc_parse_int_whitespace_after_colon);
+
+    /* venc string value parsing tests */
+    RUN_TEST(test_venc_parse_str_typical);
+    RUN_TEST(test_venc_parse_str_path);
+    RUN_TEST(test_venc_parse_str_no_value_key);
+    RUN_TEST(test_venc_parse_str_value_is_int);
+    RUN_TEST(test_venc_parse_str_truncates_to_buffer);
+    RUN_TEST(test_venc_parse_str_whitespace_after_colon);
+
     return UNITY_END();
 }

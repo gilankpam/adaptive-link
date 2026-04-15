@@ -28,6 +28,11 @@ typedef struct {
     log_level_t log_level;
 } hw_state_t;
 
+/* waybeam_venc HTTP API endpoint — shared by hardware, profile, and keyframe modules. */
+#define VENC_API_HOST         "localhost"
+#define VENC_API_PORT         80
+#define VENC_QUERY_TIMEOUT_MS 1000
+
 void hw_init(hw_state_t *hw);
 void hw_load_vtx_info(hw_state_t *hw);
 int  hw_get_camera_bin(hw_state_t *hw);
@@ -38,6 +43,5 @@ void hw_read_wfb_status(int *k, int *n, int *stbc_val, int *ldpc, int *short_gi,
                         int *actual_bandwidth, int *mcs_index, int *vht_mode, int *vht_nss);
 int  hw_get_wlan0_channel(void);
 long hw_get_tx_dropped(hw_state_t *hw);
-int  hw_setup_roi(hw_state_t *hw);
 
 #endif /* ALINK_HARDWARE_H */

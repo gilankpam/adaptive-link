@@ -56,7 +56,7 @@ static void print_usage(void) {
 int main(int argc, char *argv[]) {
     static alink_daemon_t daemon;
 
-    /* A closing HTTP peer (majestic restart, OOM) would otherwise deliver
+    /* A closing HTTP peer (waybeam_venc restart, OOM) would otherwise deliver
      * SIGPIPE on the next send() and kill the daemon. Convert to EPIPE. */
     signal(SIGPIPE, SIG_IGN);
 
@@ -188,10 +188,9 @@ int main(int argc, char *argv[]) {
     }
 
     hw_get_resolution(&daemon.hw);
-    hw_setup_roi(&daemon.hw);
     osd_adjust_font_size(&daemon.osd, daemon.hw.x_res, daemon.cfg.multiply_font_size_by);
 
-    /* Get FPS value from majestic */
+    /* Get FPS value from waybeam_venc */
     int fps = hw_get_video_fps(&daemon.hw);
     if (fps >= 0) {
         INFO_LOG(&daemon.cfg, "Video FPS: %d\n", fps);
@@ -200,7 +199,7 @@ int main(int argc, char *argv[]) {
             daemon.cfg.limitFPS = 0;
         }
     } else {
-        ERROR_LOG(&daemon.cfg, "Failed to retrieve video FPS from majestic.\n");
+        ERROR_LOG(&daemon.cfg, "Failed to retrieve video FPS from waybeam_venc.\n");
         daemon.cfg.limitFPS = 0;
     }
 

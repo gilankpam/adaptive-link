@@ -71,6 +71,17 @@ fec_redundancy_ratio = 0.25
 loss_threshold_for_fec_downgrade = 0.05
 utilization_factor = 0.45
 
+[ml]
+persist_path =
+snr_safety_margin_lr_up = 0
+snr_safety_margin_lr_down = 0
+fec_redundancy_ratio_lr_up = 0
+fec_redundancy_ratio_lr_down = 0
+utilization_factor_lr_up = 0
+utilization_factor_lr_down = 0
+hysteresis_up_db_lr_up = 0
+hysteresis_up_db_lr_down = 0
+
 [telemetry]
 log_enabled = False
 log_dir = /var/log/alink

@@ -102,6 +102,35 @@ fec_pressure   = fec_recovered / fec_capacity         (fraction of budget consum
 
 FEC pressure also widens the SNR safety margin via `fec_margin_weight`, making profile upgrades harder when FEC is working hard.
 
+## MTU assumption and wfb-ng mlink mode
+
+`_compute_fec_from_bitrate()` reads `mtu_payload_bytes` from the `[dynamic]` section of `alink_gs.conf`. The default is **1446 bytes**, which matches a standard 1500-byte Ethernet MTU minus IP/UDP headers — the normal OpenIPC setup where Majestic emits ~1400-byte UDP packets to `wfb_tx`.
+
+**If you run Majestic with wfb-ng mlink and a larger MTU**, set `mtu_payload_bytes` to match. A typical mlink value is **3893 bytes**. wfb-ng itself tolerates payloads up to `MAX_FEC_PAYLOAD ≈ 3996` bytes; larger values are truncated by `wfb_tx`. alink clamps `mtu_payload_bytes` at 3900 with a startup warning.
+
+### Why it matters
+
+K is `ceil(bitrate / (fps × 8 × mtu))`. With the default 1446-byte assumption but actual 3893-byte packets, `packets_per_frame` is computed as ~2.7× larger than reality, so K (and therefore N) is scaled up by the same factor. The consequences are all latency:
+
+- **Recovery / reorder stall doubles-to-triples.** Stall = `K × packet_period`. Inflated K × unchanged per-packet wall time = 2.5–3× longer stalls whenever FEC has to recover a lost packet.
+- **`max_fec_n` tuning stops working.** The natural N at high MCS drops from ~44 to ~17 at MTU=3893, so the `max_fec_n=25-30` recommendation further down in this doc becomes non-binding. Operators following that guide on mlink setups won't see the behavior the guide describes.
+
+### Worked example at MTU=3893 (90fps, 20MHz, long GI, utilization 0.7, redundancy 0.25)
+
+| MCS | PHY (Mbps) | video (Mbps) | K (MTU=1446) | Stall (1446) | K (MTU=3893) | Stall (3893) |
+|-----|-----------|--------------|--------------|--------------|--------------|--------------|
+| 0   | 6.5       | 3.4          | 4            | 37 ms        | 2 (floor)    | 18 ms        |
+| 2   | 19.5      | 10.2         | 10           | 31 ms        | 4            | 13 ms        |
+| 4   | 39.0      | 20.5         | 20           | 31 ms        | 8            | 12 ms        |
+| 5   | 52.0      | 27.3         | 26           | 30 ms        | 10           | 12 ms        |
+| 7   | 65.0      | 34.1         | 33           | 31 ms        | 13           | 12 ms        |
+
+At 90fps (11.1 ms per frame), the 30+ ms stall at the default MTU is ~3 frames of video hold — perceptible as stutter whenever the link is lossy. After the fix the stall drops to 12–18 ms (~1–2 frames) and is usually invisible.
+
+### Caveat: burst tolerance also drops
+
+The fixed K/N pairs at mid-high MCS (MCS 4–7) go from 6–10 parity packets per block down to 3–4. A single lost burst can still be recovered, but less slack. **If you see new stutter at mid-MCS after setting `mtu_payload_bytes` correctly, raise `fec_redundancy_ratio` from 0.25 to ~0.33** — a config-only retune. The `K=2` floor at MCS 0 means low-MCS behavior is effectively unchanged.
+
 ## Block sizing: why K ~ packets_per_frame
 
 `_compute_fec_from_bitrate()` sets K to `ceil(bitrate / (fps * 8 * MTU))`, which equals the expected number of UDP packets per video frame at the given bitrate. This is **frame-proportional block sizing** — a heuristic for scaling block size with data rate:
@@ -262,3 +291,51 @@ Loss rate threshold that triggers the K-1 adjustment (more parity per block). Lo
 ### emergency_fec_pressure (default: 0.75)
 
 FEC pressure threshold for the Channel B emergency downgrade. When FEC is consuming >= 75% of its recovery budget, forces an immediate one-step MCS downgrade regardless of SNR margin or rate limiting.
+
+## Recommended: enable `wfb_tx -T` (fec_timeout)
+
+alink doesn't manage `wfb_tx` process startup, so this tuning lives in the operator's drone service config — but it is the single biggest latency improvement you can make after fixing `mtu_payload_bytes`. By default `wfb_tx` runs with `fec_timeout = 0` (disabled), which means a half-filled FEC block waits indefinitely for the next data packet to close it. During encoder pauses, end-of-GOP lulls, and low-motion scenes, the tail packets of the pending block can stall for **hundreds of milliseconds**.
+
+### What `-T` does
+
+`-T <ms>` enables an idle-triggered block flush. The mechanism (see `wfb-ng/src/tx.cpp` around line 986):
+
+1. wfb-ng tracks `fec_close_ts = (time of last incoming packet) + fec_timeout`.
+2. If `fec_close_ts` elapses with no new data, wfb-ng injects a zero-sized pad fragment into the current block via `send_packet(NULL, 0, WFB_PACKET_FEC_ONLY)`.
+3. The pad counts as one fragment and bumps `fragment_idx`. If that pushes the block to K, parity is encoded and the block closes normally. Otherwise the block stays open and the timer re-arms for another `fec_timeout` interval.
+4. If the block is completely empty (`fragment_idx == 0`), the pad is refused — idle-idle emits nothing, which is correct.
+
+**Net effect:** worst-case tail latency is bounded by `(K − fragment_idx_at_stall) × fec_timeout` instead of "however long until the next packet shows up." This bound is tightest at low MCS where K is small (K=2 at MCS 0 means 1 pad closes the block) and loosens at high MCS where K is larger — but encoder stalls at high MCS are rare, so the common case is well-bounded.
+
+### What to set
+
+| Stream FPS | Recommended `-T` | Rationale                               |
+|-----------:|-----------------:|-----------------------------------------|
+| 120        |             8 ms | Just above one frame period (8.3 ms)    |
+| 90         |            17 ms | Just above one frame period (11.1 ms)   |
+| 60         |            25 ms | Just above one frame period (16.7 ms)   |
+| 30         |            40 ms | Just above one frame period (33.3 ms)   |
+
+Rule of thumb: slightly longer than one frame period. Too low and the timer fires during normal playback (wasted parity injections, minor overhead). Too high and the bound is loose.
+
+### How to enable
+
+Find your drone's `wfb_tx` invocation — usually in `/etc/systemd/system/wifibroadcast@.service`, a custom init script, or an OpenIPC wrapper. Add `-T 17` (or whatever value matches your fps) to the argument list **before** the positional arguments. Restart `wfb_tx`.
+
+Example (OpenIPC-style):
+
+```
+wfb_tx -K /etc/gs.key -M 1 -B 20 -G long -S 1 -L 1 -N 15 -T 17 \
+       -k 8 -n 12 -i 7669206 -f data wlan0
+```
+
+### How to verify
+
+`wfb_tx` logs `count_p_fec_timeouts` every `log_interval` (default 1 s). Watch the drone stderr or the stats IPC message. You want:
+
+- **Zero or near-zero `count_p_fec_timeouts`** during steady streaming — the timer shouldn't fire during normal playback. If it does, your `-T` is too small for the current inter-packet gap; bump it up.
+- **Nonzero `count_p_fec_timeouts`** during encoder pauses (`pkill -STOP majestic; sleep 0.1; pkill -CONT majestic`) or end-of-GOP lulls — this confirms the mechanism is actually running.
+
+### Why this isn't managed by alink
+
+The `-T` value is effectively a function of `fps`, and `fps` doesn't change mid-flight. wfb-ng's control socket only supports `CMD_SET_FEC` and `CMD_SET_RADIO` — there's no runtime command for `fec_timeout` — so runtime retuning would require patching wfb-ng. Static-at-startup is the correct granularity for this parameter.

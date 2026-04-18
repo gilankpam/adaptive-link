@@ -47,8 +47,17 @@ PHY_RATES_40MHZ = [
 # Default video frame rate (used when handshake not synced, and as fallback)
 _VIDEO_FPS = 90
 
-# WFB-NG MTU payload byte size (standard for OpenIPC)
+# Default WFB-NG MTU payload byte size — standard 1500-byte Ethernet minus
+# IP/UDP headers, the normal OpenIPC setup. Majestic configured for wfb-ng
+# mlink mode can emit much larger UDP payloads (up to ~3893 bytes), in which
+# case set mtu_payload_bytes in the [dynamic] section of alink_gs.conf.
+# wfb-ng's own ceiling is MAX_FEC_PAYLOAD ≈ 3996 bytes; oversized packets are
+# truncated by wfb_tx.
 MTU_PAYLOAD_BYTES = 1446
+
+# Absolute upper bound for mtu_payload_bytes config — wfb-ng's MAX_FEC_PAYLOAD
+# leaves room for a wpacket_hdr_t, so stay comfortably below the raw ceiling.
+MTU_PAYLOAD_BYTES_MAX = 3900
 
 REQUIRED_SECTIONS = {
     'outgoing', 'wfb-ng', 'keyframe', 'profile selection', 'dynamic', 'gate',
@@ -616,6 +625,15 @@ class ProfileSelector:
         self.loss_threshold_for_fec_downgrade = config.getfloat(d, 'loss_threshold_for_fec_downgrade')
         self.fec_redundancy_ratio = config.getfloat(d, 'fec_redundancy_ratio')
         self.utilization_factor = config.getfloat(d, 'utilization_factor')
+        self.mtu_payload_bytes = config.getint(
+            d, 'mtu_payload_bytes', fallback=MTU_PAYLOAD_BYTES)
+        if self.mtu_payload_bytes > MTU_PAYLOAD_BYTES_MAX:
+            print(
+                f"WARNING: mtu_payload_bytes={self.mtu_payload_bytes} exceeds "
+                f"wfb-ng max ({MTU_PAYLOAD_BYTES_MAX}); wfb_tx will truncate "
+                f"oversized packets. Clamping for FEC calculations."
+            )
+            self.mtu_payload_bytes = MTU_PAYLOAD_BYTES_MAX
 
         # Hardware / adapter limits
         hw = 'hardware'
@@ -716,7 +734,7 @@ class ProfileSelector:
 
         # Step 1: Packets per frame = bitrate / (fps * 8 * mtu)
         video_fps = self.handshake.get_fps()
-        packets_per_frame = bitrate_bps / (video_fps * 8 * MTU_PAYLOAD_BYTES)
+        packets_per_frame = bitrate_bps / (video_fps * 8 * self.mtu_payload_bytes)
 
         # Step 2: K = ceil(packets_per_frame) — proportional block sizing
         fec_k = max(2, math.ceil(packets_per_frame))

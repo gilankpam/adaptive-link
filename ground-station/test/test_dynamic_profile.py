@@ -597,6 +597,86 @@ class TestMCSStepLimit:
         assert changes[0] > 3
 
 
+class TestFECWithLargeMTU:
+    """FEC computation with configurable mtu_payload_bytes (wfb-ng mlink setups).
+
+    Majestic configured for wfb-ng mlink sends UDP packets up to ~3893 bytes
+    instead of the standard ~1446. Without the MTU override, the frame-
+    proportional block-sizing formula computes K for ~2.7x too many packets
+    per frame. These tests cover the corrected path.
+    """
+
+    MTU_LARGE = 3893
+
+    def _selector(self, overrides=None):
+        base = {'dynamic': {'mtu_payload_bytes': str(self.MTU_LARGE)}}
+        if overrides:
+            for section, kvs in overrides.items():
+                base.setdefault(section, {}).update(kvs)
+        return _make_selector(base)
+
+    def test_config_key_loaded(self):
+        ps = self._selector()
+        assert ps.mtu_payload_bytes == self.MTU_LARGE
+
+    def test_default_mtu_is_1446(self):
+        ps = _make_selector()
+        assert ps.mtu_payload_bytes == 1446
+
+    def test_fec_k_scaled_down_at_mid_bitrate(self):
+        """20.5 Mbps at 60fps with MTU=3893 → ~11 packets/frame, not ~30."""
+        ps = self._selector()
+        fec_k, fec_n = ps._compute_fec_from_bitrate(20_500_000)
+        # bitrate / (fps*8*mtu) = 20.5e6 / (60*8*3893) = 10.97 → K=11
+        assert fec_k == 11
+        # N = ceil(11 / 0.75) = 15
+        assert fec_n == 15
+
+    def test_fec_k_floor_at_low_bitrate(self):
+        """Low bitrate hits the K=2 floor, same as small-MTU path."""
+        ps = self._selector()
+        fec_k, fec_n = ps._compute_fec_from_bitrate(2_000_000)
+        # 2e6 / (60*8*3893) = 1.07 → ceil=2 (floor)
+        assert fec_k == 2
+
+    def test_formula_self_consistency_across_mtu(self):
+        """K * mtu * fps * 8 should approximate bitrate within one-packet rounding.
+
+        The formula is self-consistent iff K is proportional to 1/mtu for
+        fixed bitrate. Guards against off-by-one regressions when anyone
+        refactors _compute_fec_from_bitrate.
+        """
+        fps = 60  # from MockHandshake
+        for mtu in (1446, 3893):
+            ps = _make_selector({'dynamic': {'mtu_payload_bytes': str(mtu)}})
+            for bitrate in (5_000_000, 10_000_000, 20_000_000, 30_000_000):
+                fec_k, _ = ps._compute_fec_from_bitrate(bitrate)
+                implied = fec_k * mtu * fps * 8
+                # fec_k = ceil(bitrate / (fps*8*mtu)), so
+                # implied >= bitrate and implied < bitrate + (fps*8*mtu)
+                assert implied >= bitrate
+                assert implied < bitrate + (fps * 8 * mtu)
+
+    def test_fec_computation_scales_inversely_with_mtu(self):
+        """Same bitrate at 2.7x larger MTU gives ~2.7x smaller K."""
+        ps_small = _make_selector({'dynamic': {'mtu_payload_bytes': '1446'}})
+        ps_large = self._selector()
+        bitrate = 20_500_000
+        k_small, _ = ps_small._compute_fec_from_bitrate(bitrate)
+        k_large, _ = ps_large._compute_fec_from_bitrate(bitrate)
+        ratio = k_small / k_large
+        # 3893 / 1446 = 2.69
+        assert 2.5 <= ratio <= 3.0
+
+    def test_oversized_mtu_clamped_with_warning(self, capsys):
+        """mtu_payload_bytes beyond the wfb-ng ceiling is clamped."""
+        ps = _make_selector(
+            {'dynamic': {'mtu_payload_bytes': '5000'}})
+        captured = capsys.readouterr()
+        assert 'WARNING' in captured.out
+        assert ps.mtu_payload_bytes == MTU_PAYLOAD_BYTES_MAX
+
+
 class TestMaxFECN:
     """Test max_fec_n configuration parameter enforcement."""
 

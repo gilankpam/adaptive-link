@@ -92,7 +92,7 @@ The GS computes profile parameters from real-time link metrics using `_compute_p
 
 - **MCS selection:** Uses 802.11n SNR thresholds with configurable safety margin that widens under link stress (params in `[gate]`: `snr_safety_margin`, `loss_margin_weight`, `fec_margin_weight`, `max_mcs`)
 - **Guard interval:** Short GI selected when SNR margin is comfortable and loss/FEC pressure are below configurable thresholds (params in `[dynamic]`: `short_gi_snr_margin`, `short_gi_max_loss`, `short_gi_max_fec_pressure`)
-- **FEC adjustment:** Frame-proportional block sizing (`_compute_fec_from_bitrate()`) — K is set to the expected packets per video frame as a block-sizing heuristic. wfb-ng forms blocks sequentially with no frame awareness; larger K gives better burst-loss tolerance. See `docs/FEC_CALCULATION.md`
+- **FEC adjustment:** Frame-proportional block sizing (`_compute_fec_from_bitrate()`) — K is set to the expected packets per video frame as a block-sizing heuristic. wfb-ng forms blocks sequentially with no frame awareness; larger K gives better burst-loss tolerance. UDP packet size is taken from `[dynamic]` `mtu_payload_bytes` (default 1446, set to ~3893 for wfb-ng mlink setups). See `docs/FEC_CALCULATION.md`
 - **Bitrate computation:** Derived from PHY rate × utilization factor × FEC efficiency (K/N ratio)
 - **Power scaling:** Linear inverse scaling with MCS level for link stability (params in `[hardware]`: `max_power`, `min_power`)
 - **MCS step limiting:** Configurable `max_mcs_step_up` (in `[gate]`) prevents rapid upward transitions that cause power-coupling oscillation

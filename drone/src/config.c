@@ -76,7 +76,6 @@ void config_set_defaults(alink_config_t *cfg) {
 
     cfg->wfb_control_port = 8000;
 
-    cfg->limitFPS = 1;
     cfg->get_card_info_from_yaml = false;
     cfg->osd_level = 4;
     cfg->multiply_font_size_by = 0.5f;
@@ -103,7 +102,6 @@ static const cfg_entry_t CONFIG_KEYS[] = {
     { "allow_request_keyframe",      offsetof(alink_config_t, allow_request_keyframe),      0,                                                                CT_BOOL  },
     { "get_card_info_from_yaml",     offsetof(alink_config_t, get_card_info_from_yaml),     0,                                                                CT_BOOL  },
     { "allow_rq_kf_by_tx_d",         offsetof(alink_config_t, allow_rq_kf_by_tx_d),         0,                                                                CT_BOOL  },
-    { "allow_spike_fix_fps",         offsetof(alink_config_t, limitFPS),                    0,                                                                CT_BOOL  },
     { "allow_xtx_reduce_bitrate",    offsetof(alink_config_t, allow_xtx_reduce_bitrate),    0,                                                                CT_BOOL  },
     { "xtx_reduce_bitrate_factor",   offsetof(alink_config_t, xtx_reduce_bitrate_factor),   0,                                                                CT_FLOAT },
     { "osd_level",                   offsetof(alink_config_t, osd_level),                   0,                                                                CT_INT   },
@@ -127,7 +125,6 @@ static const cfg_entry_t CONFIG_KEYS[] = {
 
     /* Command templates */
     { "powerCommandTemplate",        offsetof(alink_config_t, powerCommandTemplate),        sizeof(((alink_config_t*)0)->powerCommandTemplate),               CT_STR   },
-    { "fpsCommandTemplate",          offsetof(alink_config_t, fpsCommandTemplate),          sizeof(((alink_config_t*)0)->fpsCommandTemplate),                 CT_STR   },
     { "idrApiCommandTemplate",       offsetof(alink_config_t, idrApiCommandTemplate),       sizeof(((alink_config_t*)0)->idrApiCommandTemplate),              CT_STR   },
     { "apiCommandTemplate",          offsetof(alink_config_t, apiCommandTemplate),          sizeof(((alink_config_t*)0)->apiCommandTemplate),                 CT_STR   },
     { "customOSD",                   offsetof(alink_config_t, customOSD),                   sizeof(((alink_config_t*)0)->customOSD),                          CT_OSDFMT },

@@ -3,9 +3,10 @@
  * @brief Profile application and async worker thread.
  *
  * The drone receives finalized profile parameters from the GS and
- * applies them via command templates. Profile application is dispatched
+ * applies them (direct UDP to the wfb_tx daemon for FEC/MCS; shell
+ * and native HTTP for power/API/IDR). Profile application is dispatched
  * to an async worker thread so the main UDP receive loop is never
- * blocked by system() calls.
+ * blocked.
  */
 #ifndef ALINK_PROFILE_H
 #define ALINK_PROFILE_H
@@ -36,9 +37,8 @@ typedef struct {
     /* Previous-value tracking for apply_*_step delta detection. Mirrors the
      * Profile struct so adding a new profile field automatically gets a
      * "previous" slot. Protected by worker_mutex when accessed from
-     * tx_monitor. prevFPS is separate because FPS isn't part of Profile. */
+     * tx_monitor. */
     Profile prevApplied;
-    int prevFPS;
 
     /* Set by tx_monitor while the xtx-driven bitrate reduction is active;
      * cleared when it restores to prevApplied.setBitrate. */
@@ -71,23 +71,6 @@ void profile_apply_direct(profile_state_t *ps, const Profile *profile,
  * Dispatch profile to the async worker thread.
  */
 void profile_apply(profile_state_t *ps, Profile *profile, void *osd);
-
-/**
- * Apply FEC parameters using wfb_tx_cmd.
- * Only handles FEC (fecK, fecN) - bitrate is handled via batched API.
- *
- * @param ps Profile state
- * @param fec_k FEC K value
- * @param fec_n FEC N value
- * @return 0 on success, non-zero on failure
- */
-int profile_apply_fec(profile_state_t *ps, int fec_k, int fec_n);
-
-/**
- * Compute ROI QP from bitrate (kbps).
- * Returns scaled roiqp_base based on bitrate position between lo and hi.
- */
-int calc_roiQp_from_bitrate(int kbps, int hi, int lo, int roiqp_base);
 
 /**
  * Apply batched API call for bitrate, gop, and drone-computed roiQp.

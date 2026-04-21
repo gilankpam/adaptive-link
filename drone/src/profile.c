@@ -4,10 +4,9 @@
  *
  * The GS selects profiles; the drone just applies them. This module
  * handles command execution ordering (upgrade vs downgrade) and
- * delta detection to avoid redundant commands.
- * 
- * Optimized to use native HTTP client for API calls (no curl) and
- * fork/exec for shell commands (faster than system()).
+ * delta detection to avoid redundant commands. FEC and MCS go
+ * directly to the wfb_tx control socket; power/API/IDR use the
+ * shell-command or native HTTP-client paths.
  */
 #include "profile.h"
 #include "osd.h"
@@ -31,7 +30,6 @@ void profile_init(profile_state_t *ps, alink_config_t *cfg,
     ps->prevApplied.setFecK   = -1;
     ps->prevApplied.setFecN   = -1;
     ps->prevApplied.setBitrate = -1;
-    ps->prevFPS = -1;
 
     ps->bitrate_reduced = false;
 
@@ -45,7 +43,7 @@ void profile_init(profile_state_t *ps, alink_config_t *cfg,
     ps->cmd = cmd;
 }
 
-int profile_apply_fec(profile_state_t *ps, int new_fec_k, int new_fec_n) {
+static int profile_apply_fec(profile_state_t *ps, int new_fec_k, int new_fec_n) {
     int result = cmd_wfb_set_fec(ps->cmd, (uint8_t)new_fec_k, (uint8_t)new_fec_n);
     if (result != 0) {
         ERROR_LOG(ps->cfg, "FEC set failed: k=%d n=%d\n", new_fec_k, new_fec_n);
@@ -57,7 +55,7 @@ int profile_apply_fec(profile_state_t *ps, int new_fec_k, int new_fec_n) {
  * Compute ROI QP from bitrate (kbps).
  * Linearly scales roiqp_base between hi and lo thresholds.
  */
-int calc_roiQp_from_bitrate(int kbps, int hi, int lo, int roiqp_base) {
+static int calc_roiQp_from_bitrate(int kbps, int hi, int lo, int roiqp_base) {
     const int span = hi - lo;
 
     if (kbps > hi) return 0;
@@ -119,25 +117,6 @@ int profile_apply_api_batch(const alink_config_t *cfg,
  * state update. The outer profile_apply_exec chooses the ordering
  * (upgrade vs downgrade) by calling them in a different sequence.
  */
-
-static void apply_fps_step(profile_state_t *ps, int currentFPS) {
-    if (currentFPS == ps->prevFPS) return;
-
-    alink_config_t *cfg = ps->cfg;
-    char fpsCommand[MAX_COMMAND_SIZE];
-    char strFPS[10];
-    snprintf(strFPS, sizeof(strFPS), "%d", currentFPS);
-    const char *keys[] = { "fps" };
-    const char *values[] = { strFPS };
-    cmd_format(fpsCommand, sizeof(fpsCommand), cfg->fpsCommandTemplate, 1, keys, values, cfg->log_level);
-
-    DEBUG_LOG(cfg, "FPS: %d -> %d\n", ps->prevFPS, currentFPS);
-    if (cmd_exec_with_timeout(ps->cmd, fpsCommand) == 0) {
-        ps->prevFPS = currentFPS;
-    } else {
-        ERROR_LOG(cfg, "FPS command failed: %s\n", fpsCommand);
-    }
-}
 
 static void apply_power_step(profile_state_t *ps, int finalPower) {
     alink_config_t *cfg = ps->cfg;
@@ -233,14 +212,13 @@ static void apply_idr_step(profile_state_t *ps) {
 
 /*
  * Internal: execute profile commands on the worker thread.
- * Upgrading order:   FPS → power → MCS → FEC → API → IDR
- * Downgrading order: FPS → FEC → API → MCS → power → IDR
+ * Upgrading order:   power → MCS → FEC → API → IDR
+ * Downgrading order: FEC → API → MCS → power → IDR
  */
 static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
     const Profile *profile = &job->profile;
     osd_state_t *os = (osd_state_t *)job->osd;
     alink_config_t *cfg = ps->cfg;
-    hw_state_t *hw = ps->hw;
 
     int finalPower = profile->wfbPower;
     float currentSetGop = profile->setGop;
@@ -250,15 +228,6 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
     int currentSetFecN = profile->setFecN;
     int currentSetBitrate = profile->setBitrate;
     int currentBandwidth = profile->bandwidth;
-
-    int currentFPS = hw->global_fps;
-    if (cfg->limitFPS && currentSetBitrate < 4000 && hw->global_fps > 30 && hw->total_pixels > HIGH_RES_PIXEL_THRESHOLD) {
-        currentFPS = 30;
-    } else if (cfg->limitFPS && currentSetBitrate < 8000 && hw->total_pixels > HIGH_RES_PIXEL_THRESHOLD && hw->global_fps > 60) {
-        currentFPS = 60;
-    }
-
-    apply_fps_step(ps, currentFPS);
 
     if (job->currentProfile > job->previousProfile) {
         /* Upgrading: power before MCS/FEC/API */
@@ -276,7 +245,7 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
 
     apply_idr_step(ps);
 
-    /* Update OSD with actual values from wfb_tx_cmd output */
+    /* Update OSD with actual values read back from the wfb_tx daemon. */
     int k, n, stbc_val, ldpc_val, short_gi, actual_bandwidth, mcs_index, vht_mode, vht_nss;
     hw_read_wfb_status(&k, &n, &stbc_val, &ldpc_val, &short_gi, &actual_bandwidth, &mcs_index, &vht_mode, &vht_nss);
     const char *gi_string = short_gi ? "short" : "long";

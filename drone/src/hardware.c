@@ -45,7 +45,6 @@ void hw_init(hw_state_t *hw) {
     hw->x_res = 1920;
     hw->y_res = 1080;
     hw->global_fps = 120;
-    hw->total_pixels = 1920 * 1080;
     hw->camera_bin[0] = '\0';
     hw->tx_dropped_initialized = false;
     hw->global_total_tx_dropped = 0;
@@ -118,7 +117,6 @@ int hw_get_resolution(hw_state_t *hw) {
         hw->x_res = 1920;
         hw->y_res = 1080;
     }
-    hw->total_pixels = hw->x_res * hw->y_res;
     return 0;
 }
 

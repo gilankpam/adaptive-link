@@ -31,7 +31,6 @@ typedef struct {
     bool idr_every_change;
 
     /* Camera/display */
-    bool limitFPS;
     int roiqp_hi;
     int roiqp_lo;
     int roiqp_base;
@@ -44,7 +43,6 @@ typedef struct {
     int wfb_control_port;
 
     /* Command templates */
-    char fpsCommandTemplate[150];
     char powerCommandTemplate[100];
     /* IDR API command template - uses native HTTP client (no curl) */
     char idrApiCommandTemplate[100];

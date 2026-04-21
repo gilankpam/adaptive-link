@@ -196,12 +196,8 @@ int main(int argc, char *argv[]) {
     if (fps >= 0) {
         INFO_LOG(&daemon.cfg, "Video FPS: %d\n", fps);
         daemon.hw.global_fps = fps;
-        if (fps == 0) {
-            daemon.cfg.limitFPS = 0;
-        }
     } else {
         ERROR_LOG(&daemon.cfg, "Failed to retrieve video FPS from majestic.\n");
-        daemon.cfg.limitFPS = 0;
     }
 
     /* Start drone antenna monitoring thread */

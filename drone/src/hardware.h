@@ -19,7 +19,6 @@ typedef struct {
     int x_res;
     int y_res;
     int global_fps;
-    int total_pixels;
     bool tx_dropped_initialized;
     /* Written by tx_monitor thread, read lockless by the OSD thread —
      * volatile forces a fresh load each tick. Single-writer, so no RMW race. */

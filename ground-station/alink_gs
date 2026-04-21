@@ -634,6 +634,8 @@ class ProfileSelector:
                 f"oversized packets. Clamping for FEC calculations."
             )
             self.mtu_payload_bytes = MTU_PAYLOAD_BYTES_MAX
+        self.block_latency_budget_ms = config.getfloat(
+            d, 'block_latency_budget_ms', fallback=5.0)
 
         # Hardware / adapter limits
         hw = 'hardware'
@@ -713,13 +715,18 @@ class ProfileSelector:
         return round(self.dyn_max_power - t * (self.dyn_max_power - self.dyn_min_power))
 
     def _compute_fec_from_bitrate(self, bitrate_bps, redundancy_ratio=None):
-        """Compute FEC K,N from bitrate using frame-proportional block sizing.
+        """Compute FEC K,N from bitrate using a latency-targeted block size.
 
-        Sizes K to match the expected number of packets per video frame.
-        This is a block-sizing heuristic — wfb-ng forms FEC blocks purely
-        sequentially, so K does not create actual alignment with video
-        frame boundaries.  Larger K gives better burst-loss tolerance at
-        the cost of higher recovery latency when FEC is needed.
+        Sizes K so that the wfb-ng TX block completes in
+        `block_latency_budget_ms`. wfb-ng airs every source packet immediately
+        on arrival; K only gates recovery latency when packets are lost (the
+        RX must wait for the whole block to close before FEC decode can run).
+        Pinning block-completion time to a small constant keeps loss recovery
+        fast across all MCS levels, instead of the former 1-block-per-frame
+        heuristic which pinned it to ~one frame period.
+
+        An additional cap keeps K ≤ packets_per_frame so a generous budget
+        can't oversize the block beyond one video frame.
 
         Args:
             bitrate_bps: Target video bitrate in bits per second
@@ -728,21 +735,26 @@ class ProfileSelector:
         Returns:
             Tuple of (fec_k, fec_n) integers
         """
-        # Use adaptive value if not provided
         if redundancy_ratio is None:
             redundancy_ratio = self._adaptive.get('fec_redundancy_ratio')
 
-        # Step 1: Packets per frame = bitrate / (fps * 8 * mtu)
+        packets_per_sec = bitrate_bps / (8 * self.mtu_payload_bytes)
+
+        # Latency-targeted K: block completes in block_latency_budget_ms.
+        k_by_latency = round(self.block_latency_budget_ms / 1000.0 * packets_per_sec)
+
+        # Cap at one block per frame so a large budget can't make K exceed
+        # the frame size (wasteful — parity would straddle video frames for
+        # no extra recovery benefit).
         video_fps = self.handshake.get_fps()
-        packets_per_frame = bitrate_bps / (video_fps * 8 * self.mtu_payload_bytes)
+        k_by_frame = round(packets_per_sec / video_fps)
 
-        # Step 2: K = ceil(packets_per_frame) — proportional block sizing
-        fec_k = max(2, math.ceil(packets_per_frame))
+        fec_k = max(2, min(k_by_latency, k_by_frame))
 
-        # Step 3: Apply configurable redundancy ratio
-        # N = K / (1 - redundancy_ratio)
-        # For 25% redundancy (0.25): N = K / 0.75 = K * 1.333...
-        fec_n = math.ceil(fec_k / (1 - redundancy_ratio))
+        # At least one parity packet; otherwise scale N for the configured
+        # redundancy. For K=2 the math rounds to N=3 (33%) — unavoidable with
+        # integer parity — so we always pay at least fec_k+1.
+        fec_n = max(fec_k + 1, math.ceil(fec_k / (1 - redundancy_ratio)))
 
         return fec_k, fec_n
 
@@ -799,13 +811,19 @@ class ProfileSelector:
                                  (1 - self._adaptive.get('fec_redundancy_ratio')))
         target_bitrate_bps = min(target_bitrate_bps, self.dyn_max_bitrate * 1000)
 
-        # FEC block sizing proportional to video frame packet count
-        # (wfb-ng blocks are sequential, not aligned to frame boundaries)
+        # FEC block sizing targets a constant block-completion time
+        # (block_latency_budget_ms). Keeps loss-recovery latency flat across
+        # MCS; clean-link latency is unaffected (wfb-ng airs sources
+        # immediately, K only gates recovery).
         fec_k, fec_n = self._compute_fec_from_bitrate(target_bitrate_bps)
 
-        # Increase redundancy under loss (reduce K, keep N constant)
+        # Under loss, add parity (N+=1) instead of shrinking K. Both add
+        # one recoverable loss per block, but N+=1 keeps K (and therefore
+        # t_block) at the operator's block_latency_budget_ms, isolating the
+        # loss reaction to the redundancy knob. It also disrupts the
+        # encoder bitrate less: K/N drops by ~14% vs ~25% for K-=1.
         if loss_rate > self.loss_threshold_for_fec_downgrade:
-            fec_k = max(2, fec_k - 1)
+            fec_n = fec_n + 1
 
         # Enforce max_fec_redundancy
         # Calculate actual redundancy ratio

@@ -19,11 +19,18 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/select.h>
+#include <sys/time.h>
 #include <errno.h>
 #include <signal.h>
 #include <fcntl.h>
+#include <time.h>
 
 #define DEFAULT_EXEC_TIMEOUT_MS 500
+#define WFB_RECV_TIMEOUT_MS     100
+
+/* wfb_tx command protocol opcodes (matches wfb-ng/src/tx_cmd.h). */
+#define WFB_CMD_SET_FEC   1
+#define WFB_CMD_SET_RADIO 2
 
 /* Substitutes `value` into `str` UNESCAPED — see TRUST MODEL at top of file.
  * Returns 0 on success, -1 if substitution would overflow MAX_COMMAND_SIZE
@@ -57,10 +64,12 @@ static int replace_placeholder(char *str, const char *placeholder, const char *v
     return 0;
 }
 
-void cmd_init(cmd_ctx_t *ctx, long pace_exec_us, log_level_t log_level) {
+void cmd_init(cmd_ctx_t *ctx, long pace_exec_us, log_level_t log_level, int wfb_ctl_port) {
     ctx->pace_exec_us = pace_exec_us;
     ctx->exec_timeout_ms = DEFAULT_EXEC_TIMEOUT_MS;
     ctx->log_level = log_level;
+    ctx->wfb_ctl_fd = -1;
+    ctx->wfb_ctl_port = wfb_ctl_port;
     pthread_mutex_init(&ctx->exec_mutex, NULL);
 }
 
@@ -205,4 +214,115 @@ int cmd_http_get(const char *host, int port, const char *path,
     pthread_mutex_unlock(mu);
 
     return result;
+}
+
+static void wfb_seed_rand(void) {
+    srand((unsigned)(time(NULL) ^ getpid()));
+}
+
+/* Build, send, and await ack for a wfb_tx control-socket request. Returns 0
+ * on success (daemon rc == 0), non-zero on local error or daemon rc != 0.
+ * Wire format matches wfb-ng/src/tx_cmd.h (packed): req_id(net u32) +
+ * cmd_id(u8) + payload. Reply: req_id(echo) + rc(net u32). */
+static int wfb_send_request(cmd_ctx_t *ctx, uint8_t cmd_id,
+                            const uint8_t *payload, size_t payload_len) {
+    static pthread_once_t rand_once = PTHREAD_ONCE_INIT;
+    pthread_once(&rand_once, wfb_seed_rand);
+
+    pthread_mutex_lock(&ctx->exec_mutex);
+
+    if (ctx->wfb_ctl_fd < 0) {
+        int fd = socket(AF_INET, SOCK_DGRAM, 0);
+        if (fd < 0) {
+            ERROR_LOG_LEVEL(ctx->log_level, "wfb: socket() failed: %s\n", strerror(errno));
+            pthread_mutex_unlock(&ctx->exec_mutex);
+            return -1;
+        }
+        struct timeval tv = { .tv_sec = 0, .tv_usec = WFB_RECV_TIMEOUT_MS * 1000L };
+        if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+            ERROR_LOG_LEVEL(ctx->log_level, "wfb: SO_RCVTIMEO failed: %s\n", strerror(errno));
+            close(fd);
+            pthread_mutex_unlock(&ctx->exec_mutex);
+            return -1;
+        }
+        ctx->wfb_ctl_fd = fd;
+    }
+
+    /* Packet: 5-byte header + up to 7 bytes payload (set_radio is largest). */
+    uint8_t buf[5 + 7];
+    if (payload_len > sizeof(buf) - 5) {
+        ERROR_LOG_LEVEL(ctx->log_level, "wfb: payload_len %zu exceeds buffer\n", payload_len);
+        pthread_mutex_unlock(&ctx->exec_mutex);
+        return -1;
+    }
+    uint32_t req_id_net = htonl((uint32_t)rand());
+    memcpy(buf, &req_id_net, 4);
+    buf[4] = cmd_id;
+    if (payload_len > 0) memcpy(buf + 5, payload, payload_len);
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t)ctx->wfb_ctl_port);
+    addr.sin_addr.s_addr = htonl(0x7f000001); /* 127.0.0.1 */
+
+    ssize_t sent = sendto(ctx->wfb_ctl_fd, buf, 5 + payload_len, 0,
+                          (struct sockaddr *)&addr, sizeof(addr));
+    if (sent < 0 || (size_t)sent != 5 + payload_len) {
+        ERROR_LOG_LEVEL(ctx->log_level, "wfb: sendto failed: %s\n", strerror(errno));
+        pthread_mutex_unlock(&ctx->exec_mutex);
+        return -1;
+    }
+
+    uint8_t resp[8];
+    ssize_t nrecv = recv(ctx->wfb_ctl_fd, resp, sizeof(resp), 0);
+    if (nrecv < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            ERROR_LOG_LEVEL(ctx->log_level, "wfb: reply timeout (cmd_id=%u)\n", cmd_id);
+        } else {
+            ERROR_LOG_LEVEL(ctx->log_level, "wfb: recv failed: %s\n", strerror(errno));
+        }
+        pthread_mutex_unlock(&ctx->exec_mutex);
+        return -1;
+    }
+    if (nrecv < 8 || memcmp(resp, &req_id_net, 4) != 0) {
+        ERROR_LOG_LEVEL(ctx->log_level, "wfb: invalid reply (nrecv=%zd, cmd_id=%u)\n", nrecv, cmd_id);
+        pthread_mutex_unlock(&ctx->exec_mutex);
+        return -1;
+    }
+
+    uint32_t rc_net;
+    memcpy(&rc_net, resp + 4, 4);
+    int rc = (int)ntohl(rc_net);
+
+    if (ctx->pace_exec_us > 0) {
+        usleep(ctx->pace_exec_us);
+    }
+    pthread_mutex_unlock(&ctx->exec_mutex);
+
+    if (rc != 0) {
+        ERROR_LOG_LEVEL(ctx->log_level, "wfb: daemon rc=%d (%s) for cmd_id=%u\n",
+                        rc, strerror(rc), cmd_id);
+    }
+    return rc;
+}
+
+int cmd_wfb_set_fec(cmd_ctx_t *ctx, uint8_t k, uint8_t n) {
+    uint8_t payload[2] = { k, n };
+    return wfb_send_request(ctx, WFB_CMD_SET_FEC, payload, sizeof(payload));
+}
+
+int cmd_wfb_set_radio(cmd_ctx_t *ctx,
+                      uint8_t stbc, bool ldpc, bool short_gi,
+                      uint8_t bandwidth, uint8_t mcs_index,
+                      bool vht_mode, uint8_t vht_nss) {
+    uint8_t payload[7];
+    payload[0] = stbc;
+    payload[1] = ldpc ? 1 : 0;
+    payload[2] = short_gi ? 1 : 0;
+    payload[3] = bandwidth;
+    payload[4] = mcs_index;
+    payload[5] = vht_mode ? 1 : 0;
+    payload[6] = vht_nss;
+    return wfb_send_request(ctx, WFB_CMD_SET_RADIO, payload, sizeof(payload));
 }

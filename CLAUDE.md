@@ -101,11 +101,13 @@ This mode makes `profiles/default.conf` optional and provides finer-grained adap
 
 ### Command Template System
 
-Settings are applied via shell commands with placeholder substitution (`{mcs}`, `{bitrate}`, `{power}`, etc.) defined in `config/alink.conf`. Templates call into wfb-ng CLI (`wfb_tx_cmd`), the OpenIPC camera API (via native HTTP client), and `iw` for power control.
+Settings are applied via a mix of direct UDP to the wfb_tx daemon (FEC, MCS/radio) and shell commands with placeholder substitution (FPS, power, IDR, batched API). Templates in `config/alink.conf` call into the OpenIPC camera API (native HTTP client) and `iw` for power control.
+
+**Direct wfb_tx control:** `cmd_wfb_set_fec()` and `cmd_wfb_set_radio()` (in `command.c`) build the 7-byte / 12-byte packed request and send it to `127.0.0.1:wfbControlPort` (default 8000), waiting ~100 ms via `SO_RCVTIMEO` for the daemon's 8-byte reply (echoed `req_id` + network-order `rc`). Replaces the former `wfb_tx_cmd` subprocess entirely — no fork/exec, no shell. Auto-VHT rule from `wfb_tx_cmd` is preserved: `apply_mcs_step` sets `vht_mode = (bandwidth >= 80)`, `vht_nss = 1`.
 
 **API batching:** The `apiCommandTemplate` batches multiple camera parameters (qpDelta, bitrate, gop, roiQp) into a single HTTP request for efficiency.
 
-**Timeout execution:** All commands use `cmd_exec_with_timeout()` with millisecond-precision timeout via fork/exec. The legacy `cmd_exec()` and `cmd_exec_noquote()` functions have been removed.
+**Timeout execution:** Shell commands use `cmd_exec_with_timeout()` with millisecond-precision timeout via fork/exec. The legacy `cmd_exec()` and `cmd_exec_noquote()` functions have been removed. All three paths (`cmd_exec_with_timeout`, `cmd_http_get`, `cmd_wfb_*`) serialize on `cmd_ctx_t.exec_mutex` so the profile worker and tx_monitor never race.
 
 **Trust model:** Substituted values flow unescaped into `/bin/sh -c`. The GS is trusted; placeholder values originate from `_compute_profile()` and reference tables, not user input. Templates must come from operator-controlled `/etc/alink.conf` — a malicious config file is equivalent to shell access. The `customOSD` field is the one exception: it feeds a runtime `snprintf`, so `customosd_format_is_safe()` in `config.c` rejects anything but `%d`/`%i`/`%%` and caps the spec count at 2, closing format-string injection. `replace_placeholder()` checks its post-substitution length against `MAX_COMMAND_SIZE` and logs + aborts on overflow instead of silently truncating.
 
@@ -139,7 +141,7 @@ The `TelemetryLogger` class provides ML-ready data collection:
 
 | File | Deployed to | Purpose |
 |------|------------|---------|
-| `config/alink.conf` | `/etc/alink.conf` | Drone daemon settings and command templates |
+| `config/alink.conf` | `/etc/alink.conf` | Drone daemon settings, `wfbControlPort` (default 8000), and shell command templates (FPS/power/IDR/API) |
 | `config/alink_gs.conf` | `/etc/alink_gs.conf` | GS config: `[gate]` (SNR smoothing, margin, hysteresis, MCS limits), `[profile selection]` (temporal gates), `[dynamic]` (GI/FEC/bitrate tuning), `[hardware]` (adapter limits), `[handshake]`, `[telemetry]` |
 | `profiles/default.conf` | `/etc/txprofiles.conf` | Score-to-profile mapping (multiple presets in `profiles/`) |
 | `config/wlan_adapters.yaml` | `/etc/wlan_adapters.yaml` | WiFi adapter power tables and capabilities |

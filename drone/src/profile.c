@@ -13,6 +13,7 @@
 #include "osd.h"
 #include "util.h"
 #include <string.h>
+#include <strings.h>
 
 void profile_init(profile_state_t *ps, alink_config_t *cfg,
                   hw_state_t *hw, cmd_ctx_t *cmd) {
@@ -32,9 +33,6 @@ void profile_init(profile_state_t *ps, alink_config_t *cfg,
     ps->prevApplied.setBitrate = -1;
     ps->prevFPS = -1;
 
-    ps->old_bitrate = -1;
-    ps->old_fec_k = -1;
-    ps->old_fec_n = -1;
     ps->bitrate_reduced = false;
 
     ps->worker_mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
@@ -48,21 +46,10 @@ void profile_init(profile_state_t *ps, alink_config_t *cfg,
 }
 
 int profile_apply_fec(profile_state_t *ps, int new_fec_k, int new_fec_n) {
-    char fecCommand[MAX_COMMAND_SIZE];
-    alink_config_t *cfg = ps->cfg;
-
-    const char *fecKeys[] = { "fecK", "fecN" };
-    char strFecK[10], strFecN[10];
-    snprintf(strFecK, sizeof(strFecK), "%d", new_fec_k);
-    snprintf(strFecN, sizeof(strFecN), "%d", new_fec_n);
-    const char *fecValues[] = { strFecK, strFecN };
-    cmd_format(fecCommand, sizeof(fecCommand), cfg->fecCommandTemplate, 2, fecKeys, fecValues, cfg->log_level);
-    int result = cmd_exec_with_timeout(ps->cmd, fecCommand);
+    int result = cmd_wfb_set_fec(ps->cmd, (uint8_t)new_fec_k, (uint8_t)new_fec_n);
     if (result != 0) {
-        ERROR_LOG(ps->cfg, "FEC command failed: %s\n", fecCommand);
+        ERROR_LOG(ps->cfg, "FEC set failed: k=%d n=%d\n", new_fec_k, new_fec_n);
     }
-    ps->old_fec_k = new_fec_k;
-    ps->old_fec_n = new_fec_n;
     return result;
 }
 
@@ -145,10 +132,11 @@ static void apply_fps_step(profile_state_t *ps, int currentFPS) {
     cmd_format(fpsCommand, sizeof(fpsCommand), cfg->fpsCommandTemplate, 1, keys, values, cfg->log_level);
 
     DEBUG_LOG(cfg, "FPS: %d -> %d\n", ps->prevFPS, currentFPS);
-    if (cmd_exec_with_timeout(ps->cmd, fpsCommand) != 0) {
+    if (cmd_exec_with_timeout(ps->cmd, fpsCommand) == 0) {
+        ps->prevFPS = currentFPS;
+    } else {
         ERROR_LOG(cfg, "FPS command failed: %s\n", fpsCommand);
     }
-    ps->prevFPS = currentFPS;
 }
 
 static void apply_power_step(profile_state_t *ps, int finalPower) {
@@ -163,10 +151,11 @@ static void apply_power_step(profile_state_t *ps, int finalPower) {
     cmd_format(powerCommand, sizeof(powerCommand), cfg->powerCommandTemplate, 1, keys, values, cfg->log_level);
 
     DEBUG_LOG(cfg, "Power: %d -> %d\n", ps->prevApplied.wfbPower, finalPower);
-    if (cmd_exec_with_timeout(ps->cmd, powerCommand) != 0) {
+    if (cmd_exec_with_timeout(ps->cmd, powerCommand) == 0) {
+        ps->prevApplied.wfbPower = finalPower;
+    } else {
         ERROR_LOG(cfg, "Power command failed: %s\n", powerCommand);
     }
-    ps->prevApplied.wfbPower = finalPower;
 }
 
 static void apply_mcs_step(profile_state_t *ps, const char *currentSetGI,
@@ -179,27 +168,27 @@ static void apply_mcs_step(profile_state_t *ps, const char *currentSetGI,
 
     alink_config_t *cfg = ps->cfg;
     hw_state_t *hw = ps->hw;
-    char mcsCommand[MAX_COMMAND_SIZE];
-    char strBandwidth[10], strGI[10], strStbc[10], strLdpc[10], strMcs[10];
-    snprintf(strBandwidth, sizeof(strBandwidth), "%d", currentBandwidth);
-    snprintf(strGI, sizeof(strGI), "%s", currentSetGI);
-    snprintf(strStbc, sizeof(strStbc), "%d", hw->stbc);
-    snprintf(strLdpc, sizeof(strLdpc), "%d", hw->ldpc_tx);
-    snprintf(strMcs, sizeof(strMcs), "%d", currentSetMCS);
-    const char *keys[] = { "bandwidth", "gi", "stbc", "ldpc", "mcs" };
-    const char *values[] = { strBandwidth, strGI, strStbc, strLdpc, strMcs };
-    cmd_format(mcsCommand, sizeof(mcsCommand), cfg->mcsCommandTemplate, 5, keys, values, cfg->log_level);
+
+    bool short_gi = (strcasecmp(currentSetGI, "short") == 0);
+    /* Mirror wfb_tx_cmd's implicit VHT rule: auto-force VHT at BW >= 80. */
+    bool vht_mode = (currentBandwidth >= 80);
+    uint8_t vht_nss = 1;
 
     DEBUG_LOG(cfg, "MCS: %d -> %d, GI: %s -> %s, BW: %d -> %d\n",
               ps->prevApplied.setMCS, currentSetMCS, ps->prevApplied.setGI, currentSetGI,
               ps->prevApplied.bandwidth, currentBandwidth);
-    if (cmd_exec_with_timeout(ps->cmd, mcsCommand) != 0) {
-        ERROR_LOG(cfg, "MCS command failed: %s\n", mcsCommand);
+    if (cmd_wfb_set_radio(ps->cmd,
+                          (uint8_t)hw->stbc, hw->ldpc_tx != 0, short_gi,
+                          (uint8_t)currentBandwidth, (uint8_t)currentSetMCS,
+                          vht_mode, vht_nss) == 0) {
+        ps->prevApplied.bandwidth = currentBandwidth;
+        strncpy(ps->prevApplied.setGI, currentSetGI, sizeof(ps->prevApplied.setGI) - 1);
+        ps->prevApplied.setGI[sizeof(ps->prevApplied.setGI) - 1] = '\0';
+        ps->prevApplied.setMCS = currentSetMCS;
+    } else {
+        ERROR_LOG(cfg, "MCS set failed: mcs=%d bw=%d gi=%s\n",
+                  currentSetMCS, currentBandwidth, currentSetGI);
     }
-    ps->prevApplied.bandwidth = currentBandwidth;
-    strncpy(ps->prevApplied.setGI, currentSetGI, sizeof(ps->prevApplied.setGI) - 1);
-    ps->prevApplied.setGI[sizeof(ps->prevApplied.setGI) - 1] = '\0';
-    ps->prevApplied.setMCS = currentSetMCS;
 }
 
 static void apply_fec_step(profile_state_t *ps, int currentSetFecK, int currentSetFecN) {
@@ -207,11 +196,10 @@ static void apply_fec_step(profile_state_t *ps, int currentSetFecK, int currentS
 
     DEBUG_LOG(ps->cfg, "FEC: %d/%d -> %d/%d\n",
               ps->prevApplied.setFecK, ps->prevApplied.setFecN, currentSetFecK, currentSetFecN);
-    if (profile_apply_fec(ps, currentSetFecK, currentSetFecN) != 0) {
-        ERROR_LOG(ps->cfg, "Failed to apply FEC settings\n");
+    if (profile_apply_fec(ps, currentSetFecK, currentSetFecN) == 0) {
+        ps->prevApplied.setFecK = currentSetFecK;
+        ps->prevApplied.setFecN = currentSetFecN;
     }
-    ps->prevApplied.setFecK = currentSetFecK;
-    ps->prevApplied.setFecN = currentSetFecN;
 }
 
 static void apply_api_step(profile_state_t *ps, int currentSetBitrate, float currentSetGop) {

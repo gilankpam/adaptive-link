@@ -40,11 +40,12 @@ typedef struct {
     float multiply_font_size_by;
     log_level_t log_level;
 
+    /* wfb_tx control-socket UDP port (set_fec / set_radio sent directly). */
+    int wfb_control_port;
+
     /* Command templates */
     char fpsCommandTemplate[150];
     char powerCommandTemplate[100];
-    char mcsCommandTemplate[100];
-    char fecCommandTemplate[100];
     /* IDR API command template - uses native HTTP client (no curl) */
     char idrApiCommandTemplate[100];
 

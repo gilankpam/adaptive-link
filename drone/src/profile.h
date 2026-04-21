@@ -40,10 +40,8 @@ typedef struct {
     Profile prevApplied;
     int prevFPS;
 
-    /* FEC/bitrate restore tracking */
-    int old_bitrate;
-    int old_fec_k;
-    int old_fec_n;
+    /* Set by tx_monitor while the xtx-driven bitrate reduction is active;
+     * cleared when it restores to prevApplied.setBitrate. */
     bool bitrate_reduced;
 
     /* Async worker */

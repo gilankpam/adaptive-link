@@ -143,7 +143,7 @@ int main(int argc, char *argv[]) {
     daemon.ks.log_level = daemon.cfg.log_level;
 
     /* Initialize command context */
-    cmd_init(&daemon.cmd, pace_exec, daemon.cfg.log_level);
+    cmd_init(&daemon.cmd, pace_exec, daemon.cfg.log_level, daemon.cfg.wfb_control_port);
 
     /* Initialize profile state */
     profile_init(&daemon.ps, &daemon.cfg, &daemon.hw, &daemon.cmd);

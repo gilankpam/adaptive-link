@@ -10,7 +10,7 @@
 /* TTL for cached camera FPS/resolution (milliseconds).
  * Coalesces handshake bursts so the camera CLI isn't hit per probe,
  * while still picking up runtime camera reconfigs within ~2s. */
-#define CAMERA_INFO_CACHE_INTERVAL_MS 2000
+#define CAMERA_INFO_CACHE_INTERVAL_MS 30000
 
 static int get_resolution_inner(hw_state_t *hw) {
     char resolution[32];
@@ -29,12 +29,16 @@ static int get_resolution_inner(hw_state_t *hw) {
 
     pclose(fp);
 
-    if (sscanf(resolution, "%dx%d", &hw->x_res, &hw->y_res) != 2) {
+    /* sscanf doesn't accept volatile int*, so parse into locals then commit. */
+    int parsed_x = 0, parsed_y = 0;
+    if (sscanf(resolution, "%dx%d", &parsed_x, &parsed_y) != 2) {
         ERROR_LOG_LEVEL(hw->log_level, "Failed to parse resolution\n");
         return 1;
     }
+    hw->x_res = parsed_x;
+    hw->y_res = parsed_y;
 
-    INFO_LOG_LEVEL(hw->log_level, "Video Size: %dx%d\n", hw->x_res, hw->y_res);
+    INFO_LOG_LEVEL(hw->log_level, "Video Size: %dx%d\n", parsed_x, parsed_y);
     return 0;
 }
 
@@ -45,7 +49,6 @@ void hw_init(hw_state_t *hw) {
     hw->x_res = 1920;
     hw->y_res = 1080;
     hw->global_fps = 120;
-    hw->total_pixels = 1920 * 1080;
     hw->camera_bin[0] = '\0';
     hw->tx_dropped_initialized = false;
     hw->global_total_tx_dropped = 0;
@@ -118,7 +121,6 @@ int hw_get_resolution(hw_state_t *hw) {
         hw->x_res = 1920;
         hw->y_res = 1080;
     }
-    hw->total_pixels = hw->x_res * hw->y_res;
     return 0;
 }
 
@@ -156,39 +158,6 @@ void hw_refresh_camera_info(hw_state_t *hw) {
     hw_get_resolution(hw);
 
     hw->camera_info_cache_time = now;
-}
-
-void hw_read_wfb_status(int *k, int *n, int *stbc_val, int *ldpc, int *short_gi,
-                        int *actual_bandwidth, int *mcs_index, int *vht_mode, int *vht_nss) {
-    char buffer[256];
-    FILE *fp;
-
-    fp = popen("wfb_tx_cmd 8000 get_fec", "r");
-    if (fp == NULL) {
-        perror("Failed to run wfb_tx_cmd command");
-        return;
-    }
-    while (fgets(buffer, sizeof(buffer), fp) != NULL) {
-        if (sscanf(buffer, "k=%d", k) == 1) continue;
-        if (sscanf(buffer, "n=%d", n) == 1) continue;
-    }
-    pclose(fp);
-
-    fp = popen("wfb_tx_cmd 8000 get_radio", "r");
-    if (fp == NULL) {
-        perror("Failed to run wfb_tx_cmd command");
-        return;
-    }
-    while (fgets(buffer, sizeof(buffer), fp) != NULL) {
-        if (sscanf(buffer, "stbc=%d", stbc_val) == 1) continue;
-        if (sscanf(buffer, "ldpc=%d", ldpc) == 1) continue;
-        if (sscanf(buffer, "short_gi=%d", short_gi) == 1) continue;
-        if (sscanf(buffer, "bandwidth=%d", actual_bandwidth) == 1) continue;
-        if (sscanf(buffer, "mcs_index=%d", mcs_index) == 1) continue;
-        if (sscanf(buffer, "vht_mode=%d", vht_mode) == 1) continue;
-        if (sscanf(buffer, "vht_nss=%d", vht_nss) == 1) continue;
-    }
-    pclose(fp);
 }
 
 int hw_get_wlan0_channel(void) {
@@ -266,11 +235,29 @@ long hw_get_tx_dropped(hw_state_t *hw) {
 
     long delta = tx_dropped - hw->global_total_tx_dropped;
     hw->global_total_tx_dropped = tx_dropped;
-    
+
     if (!hw->tx_dropped_initialized) {
         hw->tx_dropped_initialized = true;
         return 0;
     }
-    
+
     return delta;
+}
+
+static long hw_read_long_file(const char *path) {
+    FILE *fp = fopen(path, "r");
+    if (!fp) return 0;
+    long v = 0;
+    if (fscanf(fp, "%ld", &v) != 1) v = 0;
+    fclose(fp);
+    return v;
+}
+
+void hw_get_tx_netstats(long *tx_bytes, long *tx_packets) {
+    if (tx_bytes) {
+        *tx_bytes = hw_read_long_file("/sys/class/net/wlan0/statistics/tx_bytes");
+    }
+    if (tx_packets) {
+        *tx_packets = hw_read_long_file("/sys/class/net/wlan0/statistics/tx_packets");
+    }
 }

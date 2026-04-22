@@ -143,7 +143,7 @@ int main(int argc, char *argv[]) {
     daemon.ks.log_level = daemon.cfg.log_level;
 
     /* Initialize command context */
-    cmd_init(&daemon.cmd, pace_exec, daemon.cfg.log_level);
+    cmd_init(&daemon.cmd, pace_exec, daemon.cfg.log_level, daemon.cfg.wfb_control_port);
 
     /* Initialize profile state */
     profile_init(&daemon.ps, &daemon.cfg, &daemon.hw, &daemon.cmd);
@@ -196,12 +196,8 @@ int main(int argc, char *argv[]) {
     if (fps >= 0) {
         INFO_LOG(&daemon.cfg, "Video FPS: %d\n", fps);
         daemon.hw.global_fps = fps;
-        if (fps == 0) {
-            daemon.cfg.limitFPS = 0;
-        }
     } else {
         ERROR_LOG(&daemon.cfg, "Failed to retrieve video FPS from majestic.\n");
-        daemon.cfg.limitFPS = 0;
     }
 
     /* Start drone antenna monitoring thread */
@@ -232,6 +228,7 @@ int main(int argc, char *argv[]) {
         .ks = &daemon.ks,
         .rs = &daemon.rs,
         .ms = &daemon.ms,
+        .cmd = &daemon.cmd,
         .initialized = &daemon.initialized
     };
     pthread_t osd_thread;

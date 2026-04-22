@@ -71,6 +71,17 @@ fec_redundancy_ratio = 0.25
 loss_threshold_for_fec_downgrade = 0.05
 utilization_factor = 0.45
 
+[ml]
+persist_path =
+snr_safety_margin_lr_up = 0
+snr_safety_margin_lr_down = 0
+fec_redundancy_ratio_lr_up = 0
+fec_redundancy_ratio_lr_down = 0
+utilization_factor_lr_up = 0
+utilization_factor_lr_down = 0
+hysteresis_up_db_lr_up = 0
+hysteresis_up_db_lr_down = 0
+
 [telemetry]
 log_enabled = False
 log_dir = /var/log/alink
@@ -217,153 +228,177 @@ class TestGuardInterval:
 
 
 class TestFEC:
-    """Test bitrate-aware FEC block sizing using frame-aligned algorithm."""
+    """Integration tests: FEC block sizing via _compute_profile.
+
+    K is sized for a fixed block-completion time (block_latency_budget_ms,
+    default 5 ms), not per video frame. This pins loss-recovery latency
+    across MCS levels instead of scaling it with 1/fps.
+    """
 
     def test_small_blocks_at_low_bitrate(self):
-        """MCS0 LGI: PHY=6.5 Mbps, raw=2925 kbps, target=2194 kbps.
-        Packets per frame: 2194000/(60*8*1446)=3.16 → K=4, N=ceil(4/0.75)=6."""
+        """MCS0 LGI: PHY=6.5 Mbps, target=2194 kbps, pps=189.6.
+        K_latency = round(5ms * 189.6pps) = 1 → floored to 2; N = K+1 = 3."""
         ps = _make_selector()
         _feed_score(ps, best_snr=7)
         profile = ps._compute_profile()
-        assert profile['fec_n'] == 6
-        assert profile['fec_k'] == 4
+        assert profile['fec_k'] == 2
+        assert profile['fec_n'] == 3
 
     def test_medium_blocks_at_mid_bitrate(self):
-        """MCS4 LGI: PHY=39 Mbps, raw=17550 kbps, target=13163 kbps.
-        Packets per frame: 13162500/(60*8*1446)=18.96 → K=19, N=ceil(19/0.75)=26."""
+        """MCS4 LGI: PHY=39 Mbps, target=13163 kbps, pps=1137.9.
+        K_latency = round(5ms * 1137.9pps) = 6; N = ceil(6/0.75) = 8."""
         ps = _make_selector()
         _feed_score(ps, best_snr=21)  # MCS4: 17+3=20 < 21
         profile = ps._compute_profile()
-        assert profile['fec_n'] == 26
-        assert profile['fec_k'] == 19
+        assert profile['fec_k'] == 6
+        assert profile['fec_n'] == 8
 
     def test_large_blocks_at_high_bitrate(self):
-        """MCS7 SGI: PHY=72.2 Mbps, raw=32490 kbps, target=24368 kbps.
-        Packets per frame: 24368000/(60*8*1446)=35.1 → K=36, N=ceil(36/0.75)=48."""
+        """MCS7 SGI: PHY=72.2 Mbps, target=24368 kbps, pps=2106.9.
+        K_latency = round(5ms * 2106.9pps) = 11; N = ceil(11/0.75) = 15."""
         ps = _make_selector()
         _feed_score(ps, best_snr=32)
         profile = ps._compute_profile()
-        assert profile['fec_n'] == 48
-        assert profile['fec_k'] == 36
+        assert profile['fec_k'] == 11
+        assert profile['fec_n'] == 15
 
-    def test_fec_downgrade_on_high_loss(self):
-        """Loss > threshold reduces fec_k by 1, keeping fec_n constant (increases redundancy).
-        SNR=21 with loss=0.06 → margin=3+0.06*20=4.2 → MCS3 (14+4.2=18.2<21).
-        MCS3 LGI: PHY=26 Mbps, raw=11700 kbps, target=8775 kbps.
-        Packets per frame: 8775000/(60*8*1446)=12.6 → K=13, N=ceil(13/0.75)=18.
-        Loss>0.05 → K=max(2,13-1)=12, N stays 18 (redundancy increases from 27.8% to 33.3%).
-        max_fec_redundancy check: 33.3% < 50%, OK."""
+    def test_block_fill_time_is_roughly_constant_across_mcs(self):
+        """Core invariant of the latency-targeted formula: at the target
+        bitrate used to size K, block-completion time stays near
+        block_latency_budget_ms across MCS (or the K=2 floor, whichever is
+        larger).
+
+        Uses _compute_fec_from_bitrate directly against a range of target
+        bitrates rather than going through _compute_profile, so we compare
+        against the bitrate K was actually sized for (pre-K/N rounding)."""
+        ps = _make_selector()
+        budget_s = ps.block_latency_budget_ms / 1000.0
+        mtu = ps.mtu_payload_bytes
+        for target_bps in (2_000_000, 8_000_000, 14_000_000, 24_000_000):
+            fec_k, fec_n = ps._compute_fec_from_bitrate(target_bps)
+            pps = target_bps / (8 * mtu)
+            t_block_s = fec_k / pps
+            # Allow up to 1 packet of rounding slack; at very low bitrate
+            # the K=2 floor dominates the budget.
+            cap = max(budget_s, 2.0 / pps) + (1.0 / pps)
+            assert t_block_s <= cap, (
+                f"target_bps={target_bps} K={fec_k} "
+                f"t_block={t_block_s*1000:.2f}ms cap={cap*1000:.2f}ms"
+            )
+
+    def test_loss_adds_parity_not_reduces_k(self):
+        """Loss > threshold increases N (more parity) instead of reducing K.
+        Both would add one recoverable loss per block; N+=1 keeps K (and
+        t_block) at the operator's block_latency_budget_ms and disrupts the
+        encoder bitrate less than K-=1 (smaller K/N change).
+        SNR=21 with loss=0.06 → margin widens → MCS3. Base K=4, N=6.
+        Loss > 0.05 → N += 1 = 7, K unchanged."""
         ps = _make_selector()
         _feed_score(ps, best_snr=21)
         ps._current_loss_rate = 0.06  # > 0.05 threshold
         profile = ps._compute_profile()
-        assert profile['mcs'] == 3  # Margin pushed MCS down
-        assert profile['fec_k'] == 12
-        assert profile['fec_n'] == 18  # N stays constant after loss downgrade
+        assert profile['mcs'] == 3  # margin widened by loss
+        assert profile['fec_k'] == 4  # K unchanged by loss reaction
+        assert profile['fec_n'] == 7  # N bumped by one
 
-    def test_fec_downgrade_floor(self):
-        """fec_k has minimum of 2, but max_fec_redundancy may raise it.
-        MCS0: K=4, N=6. After loss downgrade: K=4-1=3, N stays 6.
-        Redundancy becomes (6-3)/6 = 50% = max_fec_redundancy, OK."""
+    def test_loss_reaction_respects_max_fec_redundancy(self):
+        """Loss-driven N bump must not push redundancy past max_fec_redundancy.
+        MCS0: K=2, N=3. Loss → N=4 → redundancy=(4-2)/4=50%=max, still allowed."""
         ps = _make_selector()
-        _feed_score(ps, best_snr=7)  # MCS0, K=4, N=6
-        ps._current_loss_rate = 0.06  # Triggers downgrade
+        _feed_score(ps, best_snr=7)  # MCS0, K=2, N=3
+        ps._current_loss_rate = 0.06
         profile = ps._compute_profile()
-        assert profile['fec_k'] == 3  # 4-1=3, at max_fec_redundancy boundary (50%)
-        assert profile['fec_n'] == 6  # N stays constant
-
-    def test_max_fec_redundancy_enforced(self):
-        """max_fec_redundancy should prevent excessive redundancy after loss.
-
-        MCS0: K=4, N=6. Loss downgrade: K=4-1=3, N stays 6.
-        Redundancy = (6-3)/6 = 50% = max_fec_redundancy, so it just passes.
-
-        The purpose is to prevent FEC from becoming too aggressive (too much redundancy)
-        on weak links, which would make the link even more fragile.
-        """
-        ps = _make_selector()
-        _feed_score(ps, best_snr=7)  # MCS0, K=5, N=7
-        ps._current_loss_rate = 0.06  # Triggers downgrade
-        profile = ps._compute_profile()
-        # After loss: K=3, N=4
-        # max_fec_redundancy=0.5 means max 50% redundancy
-        # (N-K)/N <= 0.5 → K/N >= 0.5 → K >= N/2
-        # With K=3, N=4: 3/4 = 0.75 >= 0.5, so it passes
         redundancy = (profile['fec_n'] - profile['fec_k']) / profile['fec_n']
-        assert redundancy <= 0.5 + 0.01  # Allow small tolerance
+        assert redundancy <= 0.5 + 1e-9
 
 
 class TestFECFromBitrate:
-    """Test the new FEC calculation algorithm."""
+    """Unit tests for _compute_fec_from_bitrate (latency-targeted block size)."""
 
-    def test_packets_per_frame_calculation(self):
-        """Verify packets per frame formula: 4 Mbps at 60 FPS = 5.76 packets."""
+    def test_k_minimum_is_2(self):
+        """K must never drop below 2 regardless of how low the bitrate goes."""
         ps = _make_selector()
-        bitrate = 4000000  # 4 Mbps
-        fps = ps.handshake.get_fps()
-        packets_per_frame = bitrate / (fps * 8 * MTU_PAYLOAD_BYTES)
-        assert packets_per_frame == pytest.approx(5.76, abs=0.1)
-
-    def test_fec_k_equals_ceil_packets_per_frame(self):
-        """K should be ceiling of packets per frame."""
-        ps = _make_selector()
-        bitrate = 4000000  # 4 Mbps → 5.76 packets → K=6
-        fec_k, fec_n = ps._compute_fec_from_bitrate(bitrate)
-        assert fec_k == 6
-
-    def test_fec_n_uses_config_redundancy_ratio(self):
-        """N should use fec_redundancy_ratio config (default 0.25 = 25%)."""
-        ps = _make_selector()
-        # With 25% redundancy: N = K / 0.75
-        # K=6 → N = 6 / 0.75 = 8
-        fec_k, fec_n = ps._compute_fec_from_bitrate(4000000)
-        assert fec_n == 8
-
-    def test_fec_k_minimum_is_2(self):
-        """K should never be less than 2."""
-        ps = _make_selector()
-        # Very low bitrate should still give K >= 2
-        fec_k, fec_n = ps._compute_fec_from_bitrate(100000)  # 100 kbps
+        fec_k, fec_n = ps._compute_fec_from_bitrate(100_000)  # 100 kbps
         assert fec_k >= 2
+        assert fec_n >= fec_k + 1
 
-    def test_4mbps_example_from_spec(self):
-        """Test the exact example from the specification: 4 Mbps at 60 FPS = 6/8."""
+    def test_n_guarantees_at_least_one_parity(self):
+        """fec_n must be strictly greater than fec_k (at least one parity packet)."""
         ps = _make_selector()
-        # 4 Mbps / (60 * 8 * 1446) = 5.76 packets → K=6
-        # N = 6 / 0.75 = 8 (with 25% redundancy)
-        fec_k, fec_n = ps._compute_fec_from_bitrate(4000000)
-        assert fec_k == 6
-        assert fec_n == 8
+        for bitrate in (500_000, 2_000_000, 10_000_000, 24_000_000):
+            fec_k, fec_n = ps._compute_fec_from_bitrate(bitrate)
+            assert fec_n > fec_k
 
-    def test_different_redundancy_ratio(self):
-        """Test that custom redundancy ratio is respected."""
+    def test_k_scales_with_bitrate(self):
+        """At constant MTU/fps/budget, K grows with bitrate (more packets/sec
+        fit into the same latency budget)."""
         ps = _make_selector()
-        # With 33% redundancy: N = K / 0.67 ≈ K * 1.5
-        # K=6 → N = 6 / 0.67 = 9
-        fec_k, fec_n = ps._compute_fec_from_bitrate(4000000, redundancy_ratio=0.33)
-        assert fec_k == 6
-        assert fec_n == 9
+        k_low, _ = ps._compute_fec_from_bitrate(2_000_000)
+        k_mid, _ = ps._compute_fec_from_bitrate(10_000_000)
+        k_high, _ = ps._compute_fec_from_bitrate(24_000_000)
+        assert k_low <= k_mid <= k_high
+
+    def test_k_tracks_block_latency_budget(self):
+        """K scales linearly with block_latency_budget_ms when budget is the
+        binding constraint (not the K=2 floor)."""
+        ps = _make_selector()
+        ps.block_latency_budget_ms = 5.0
+        k_5, _ = ps._compute_fec_from_bitrate(20_000_000)
+        ps.block_latency_budget_ms = 10.0
+        k_10, _ = ps._compute_fec_from_bitrate(20_000_000)
+        # Doubling the budget should roughly double K.
+        assert abs(k_10 - 2 * k_5) <= 1
+
+    def test_budget_capped_by_one_block_per_frame(self):
+        """A wildly generous budget must not size K past one-block-per-frame,
+        which would be pure overhead."""
+        ps = _make_selector()
+        ps.block_latency_budget_ms = 1000.0  # absurd
+        bitrate = 20_000_000
+        fec_k, _ = ps._compute_fec_from_bitrate(bitrate)
+        fps = ps.handshake.get_fps()
+        packets_per_frame = round(bitrate / (8 * ps.mtu_payload_bytes) / fps)
+        assert fec_k <= packets_per_frame
+
+    def test_k_inversely_scales_with_mtu(self):
+        """Larger MTU → fewer packets per second → smaller K at same bitrate."""
+        ps_small = _make_selector({'dynamic': {'mtu_payload_bytes': '1446'}})
+        ps_large = _make_selector({'dynamic': {'mtu_payload_bytes': '3893'}})
+        bitrate = 20_000_000
+        k_small, _ = ps_small._compute_fec_from_bitrate(bitrate)
+        k_large, _ = ps_large._compute_fec_from_bitrate(bitrate)
+        assert k_small > k_large
+
+    def test_custom_redundancy_ratio_respected(self):
+        """Caller-supplied redundancy_ratio scales N without touching K."""
+        ps = _make_selector()
+        k_25, n_25 = ps._compute_fec_from_bitrate(20_000_000, redundancy_ratio=0.25)
+        k_50, n_50 = ps._compute_fec_from_bitrate(20_000_000, redundancy_ratio=0.50)
+        assert k_25 == k_50
+        assert n_50 > n_25
 
 
 class TestBitrate:
-    """Test bitrate computation."""
+    """Test bitrate computation. Values derive from link_bw × K/N — when the
+    new latency-targeted formula picks smaller K, rounding shifts K/N slightly
+    away from the configured redundancy ratio so bitrates are not identical
+    to the old frame-proportional path."""
 
     def test_bitrate_mcs0_long_gi(self):
-        """MCS0 LGI: PHY=6.5 Mbps, link_bw=2925 kbps, K=4, N=6.
-        bitrate = 2925000 * 4/6 / 1000 = 1950 → clamped to min_bitrate=2000."""
+        """MCS0 LGI: K=2, N=3. link_bw=2925 kbps → 2925×2/3=1950 → clamped
+        to min_bitrate=2000."""
         ps = _make_selector()
         _feed_score(ps, best_snr=7)
         profile = ps._compute_profile()
         assert profile['bitrate'] == 2000
 
     def test_bitrate_mcs7_short_gi(self):
-        """SNR=32 → MCS7, snr_above=32-26=6 >= 5 → short GI.
-        PHY 72.2 Mbps, raw=32490 kbps, target=32490×0.75=24367 kbps."""
+        """MCS7 SGI: K=11, N=15. link_bw=32490 kbps → 32490×11/15=23826."""
         ps = _make_selector()
         _feed_score(ps, best_snr=32)
         profile = ps._compute_profile()
         assert profile['gi'] == 'short'
-        assert profile['bitrate'] == 24367
+        assert profile['bitrate'] == 23826
 
     def test_bitrate_capped_at_max(self):
         ps = _make_selector({'hardware': {'max_bitrate': '10000'}})
@@ -378,27 +413,26 @@ class TestBitrate:
         assert profile['bitrate'] == 3000
 
     def test_bitrate_40mhz(self):
+        """MCS0 40MHz LGI: PHY=13.5 Mbps, link_bw=6075 kbps, target=4556 kbps.
+        pps=393.9 → K_latency=round(1.97)=2; N=max(3, ceil(2/0.75))=3.
+        bitrate = 6075 × 2/3 = 4050."""
         ps = _make_selector({'hardware': {'bandwidth': '40'}})
         _feed_score(ps, best_snr=7)
         profile = ps._compute_profile()
-        # PHY 13.5 Mbps (40MHz MCS0 long GI), link_bw=6075 kbps
-        # K=7, N=10 → bitrate = 6075000 * 7/10 / 1000 = 4252
-        assert profile['bitrate'] == 4252
+        assert profile['bitrate'] == 4050
 
     def test_fec_sized_from_capped_bitrate(self):
-        """When max_bitrate constrains encoder below link capacity,
-        FEC K/N should be sized from the capped bitrate, not raw link capacity.
+        """max_bitrate caps target_bitrate before FEC sizing — pps is derived
+        from the capped bitrate, so K/N reflect the encoder's actual output.
 
-        MCS7 SGI: link_bw=32490 kbps, uncapped target=24367 kbps → K=36, N=48.
-        With max_bitrate=10000: target capped to 10000 kbps.
-        packets_per_frame = 10000000/(60*8*1446) = 14.41 → K=15, N=20.
+        max_bitrate=10000 → target=10000 kbps → pps=864.4.
+        K_latency=round(5ms × 864.4pps)=4; N=max(5, ceil(4/0.75))=6.
         """
         ps = _make_selector({'hardware': {'max_bitrate': '10000'}})
         _feed_score(ps, best_snr=32)
         profile = ps._compute_profile()
-        # K should be sized for 10 Mbps (15), not 24 Mbps (36)
-        assert profile['fec_k'] == 15
-        assert profile['fec_n'] == 20
+        assert profile['fec_k'] == 4
+        assert profile['fec_n'] == 6
 
 
 class TestPower:
@@ -586,53 +620,92 @@ class TestMCSStepLimit:
         assert changes[0] > 3
 
 
+class TestFECWithLargeMTU:
+    """FEC computation with configurable mtu_payload_bytes (wfb-ng mlink setups).
+
+    Majestic configured for wfb-ng mlink sends UDP packets up to ~3893 bytes
+    instead of the standard ~1446. K should scale inversely with MTU so the
+    block-completion latency stays constant.
+    """
+
+    MTU_LARGE = 3893
+
+    def _selector(self, overrides=None):
+        base = {'dynamic': {'mtu_payload_bytes': str(self.MTU_LARGE)}}
+        if overrides:
+            for section, kvs in overrides.items():
+                base.setdefault(section, {}).update(kvs)
+        return _make_selector(base)
+
+    def test_config_key_loaded(self):
+        ps = self._selector()
+        assert ps.mtu_payload_bytes == self.MTU_LARGE
+
+    def test_default_mtu_is_1446(self):
+        ps = _make_selector()
+        assert ps.mtu_payload_bytes == 1446
+
+    def test_fec_k_scaled_down_at_mid_bitrate(self):
+        """20.5 Mbps at MTU=3893: pps=658.5. K=round(5ms × 658.5)=3; N=4."""
+        ps = self._selector()
+        fec_k, fec_n = ps._compute_fec_from_bitrate(20_500_000)
+        assert fec_k == 3
+        assert fec_n == 4
+
+    def test_fec_k_floor_at_low_bitrate(self):
+        """Low bitrate hits the K=2 floor, same as small-MTU path."""
+        ps = self._selector()
+        fec_k, fec_n = ps._compute_fec_from_bitrate(2_000_000)
+        assert fec_k == 2
+        assert fec_n == 3
+
+    def test_fec_computation_scales_inversely_with_mtu(self):
+        """Same bitrate at 2.7x larger MTU gives ~2.7x smaller K (before floors)."""
+        ps_small = _make_selector({'dynamic': {'mtu_payload_bytes': '1446'}})
+        ps_large = self._selector()
+        # Use a high bitrate so the K=2 floor doesn't distort the ratio.
+        bitrate = 30_000_000
+        k_small, _ = ps_small._compute_fec_from_bitrate(bitrate)
+        k_large, _ = ps_large._compute_fec_from_bitrate(bitrate)
+        ratio = k_small / k_large
+        # 3893 / 1446 ≈ 2.69, allow ±0.5 for integer rounding
+        assert 2.0 <= ratio <= 3.5
+
+    def test_block_fill_time_independent_of_mtu_at_high_bitrate(self):
+        """At high enough bitrate that neither K floor nor frame cap bind,
+        block-fill time should sit near block_latency_budget_ms regardless
+        of MTU — the whole point of the new formula."""
+        bitrate = 30_000_000
+        for mtu in (1446, 3893):
+            ps = _make_selector({'dynamic': {'mtu_payload_bytes': str(mtu)}})
+            fec_k, _ = ps._compute_fec_from_bitrate(bitrate)
+            pps = bitrate / (8 * mtu)
+            t_block_ms = fec_k / pps * 1000
+            assert abs(t_block_ms - ps.block_latency_budget_ms) <= 0.7, (
+                f"mtu={mtu} K={fec_k} pps={pps:.1f} t_block={t_block_ms:.2f}ms"
+            )
+
+    def test_oversized_mtu_clamped_with_warning(self, capsys):
+        """mtu_payload_bytes beyond the wfb-ng ceiling is clamped."""
+        ps = _make_selector(
+            {'dynamic': {'mtu_payload_bytes': '5000'}})
+        captured = capsys.readouterr()
+        assert 'WARNING' in captured.out
+        assert ps.mtu_payload_bytes == MTU_PAYLOAD_BYTES_MAX
+
+
 class TestMaxFECN:
-    """Test max_fec_n configuration parameter enforcement."""
+    """Test max_fec_n configuration parameter enforcement.
 
-    def test_max_fec_n_not_exceeded_at_high_bitrate(self):
-        """When computed fec_n exceeds max_fec_n, it should be capped.
-        
-        MCS7 SGI: PHY=72.2 Mbps, raw=32490 kbps, target=24368 kbps.
-        Packets per frame: 24368000/(60*8*1446)=35.1 → K=36, N=ceil(36/0.75)=48.
-        With max_fec_n=30, N should be capped to 30.
-        """
-        ps = _make_selector({'hardware': {'max_fec_n': '30'}})
-        _feed_score(ps, best_snr=32)
-        profile = ps._compute_profile()
-        assert profile['fec_n'] <= 30
-
-    def test_max_fec_n_preserves_redundancy_ratio(self):
-        """When fec_n is capped, fec_k should be adjusted to preserve redundancy ratio.
-
-        Original: K=36, N=48 → redundancy = (48-36)/48 = 25%
-        After cap to N=30: K should be ceil(30 * 0.75) = 23
-        New redundancy = (30-23)/30 = 23.3% (close to original 25%)
-        """
-        ps = _make_selector({'hardware': {'max_fec_n': '30'}})
-        _feed_score(ps, best_snr=32)
-        profile = ps._compute_profile()
-        # Verify redundancy ratio is preserved (within 5% tolerance)
-        original_ratio = 0.25  # fec_redundancy_ratio from config
-        actual_ratio = (profile['fec_n'] - profile['fec_k']) / profile['fec_n']
-        assert abs(actual_ratio - original_ratio) <= 0.05
-
-    def test_max_fec_n_does_not_affect_low_bitrate(self):
-        """At low bitrates where fec_n is already below max, no capping occurs.
-
-        MCS0 LGI: K=4, N=6. With max_fec_n=30, no change.
-        """
-        ps = _make_selector({'hardware': {'max_fec_n': '30'}})
-        _feed_score(ps, best_snr=7)
-        profile = ps._compute_profile()
-        assert profile['fec_n'] == 6
-        assert profile['fec_k'] == 4
+    With the latency-targeted formula K is much smaller than the old
+    frame-proportional version, so max_fec_n only binds at very aggressive
+    caps. These tests still cover the cap machinery.
+    """
 
     def test_max_fec_n_aggressive_cap(self):
-        """Test with a very aggressive max_fec_n cap.
-
-        MCS7 SGI with max_fec_n=10:
-        Original K=36, N=48 → capped to N=10
-        K = ceil(10 * 0.75) = 8
+        """MCS7 SGI: K=11, N=15 (new formula). max_fec_n=10 caps N to 10
+        and scales K down preserving the original 11/15 ratio:
+          K = ceil(10 × 11/15) = 8.
         """
         ps = _make_selector({'hardware': {'max_fec_n': '10'}})
         _feed_score(ps, best_snr=32)
@@ -640,22 +713,43 @@ class TestMaxFECN:
         assert profile['fec_n'] == 10
         assert profile['fec_k'] == 8
 
+    def test_max_fec_n_not_exceeded_at_high_bitrate(self):
+        """At any reasonable cap, N stays at or below it."""
+        ps = _make_selector({'hardware': {'max_fec_n': '8'}})
+        _feed_score(ps, best_snr=32)
+        profile = ps._compute_profile()
+        assert profile['fec_n'] <= 8
+
+    def test_max_fec_n_preserves_redundancy_ratio(self):
+        """When the cap triggers, K is rescaled to keep redundancy close."""
+        ps = _make_selector({'hardware': {'max_fec_n': '8'}})
+        _feed_score(ps, best_snr=32)
+        profile = ps._compute_profile()
+        # Redundancy before cap was (15-11)/15 ≈ 0.267; after cap stays close.
+        actual_ratio = (profile['fec_n'] - profile['fec_k']) / profile['fec_n']
+        assert abs(actual_ratio - 0.267) <= 0.1
+
+    def test_max_fec_n_does_not_affect_low_bitrate(self):
+        """At low bitrates where N is already tiny, no cap applies.
+        MCS0: K=2, N=3. Cap at 30 is irrelevant."""
+        ps = _make_selector({'hardware': {'max_fec_n': '30'}})
+        _feed_score(ps, best_snr=7)
+        profile = ps._compute_profile()
+        assert profile['fec_k'] == 2
+        assert profile['fec_n'] == 3
+
     def test_max_fec_n_default_value(self):
         """Default max_fec_n should be 50."""
         ps = _make_selector()
         assert ps.max_fec_n == 50
 
     def test_max_fec_n_with_intermediate_mcs(self):
-        """Test max_fec_n enforcement at intermediate MCS levels.
-
-        MCS4 SGI: PHY=43.3 Mbps, raw=19485 kbps, target=14614 kbps.
-        Packets per frame: 14614000/(60*8*1446)=21.1 → K=22, N=ceil(22/0.75)=30.
-        With max_fec_n=25, N should be capped to 25.
-        """
+        """MCS4: K=6, N=8 with new formula. max_fec_n=25 doesn't bind."""
         ps = _make_selector({'hardware': {'max_fec_n': '25'}})
-        _feed_score(ps, best_snr=21)  # MCS4: 17+3=20 < 21
+        _feed_score(ps, best_snr=21)
         profile = ps._compute_profile()
         assert profile['fec_n'] <= 25
+        assert profile['fec_n'] == 8  # actually well below cap
 
 
 

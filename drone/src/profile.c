@@ -4,15 +4,15 @@
  *
  * The GS selects profiles; the drone just applies them. This module
  * handles command execution ordering (upgrade vs downgrade) and
- * delta detection to avoid redundant commands.
- * 
- * Optimized to use native HTTP client for API calls (no curl) and
- * fork/exec for shell commands (faster than system()).
+ * delta detection to avoid redundant commands. FEC and MCS go
+ * directly to the wfb_tx control socket; power/API/IDR use the
+ * shell-command or native HTTP-client paths.
  */
 #include "profile.h"
 #include "osd.h"
 #include "util.h"
 #include <string.h>
+#include <strings.h>
 
 void profile_init(profile_state_t *ps, alink_config_t *cfg,
                   hw_state_t *hw, cmd_ctx_t *cmd) {
@@ -30,11 +30,7 @@ void profile_init(profile_state_t *ps, alink_config_t *cfg,
     ps->prevApplied.setFecK   = -1;
     ps->prevApplied.setFecN   = -1;
     ps->prevApplied.setBitrate = -1;
-    ps->prevFPS = -1;
 
-    ps->old_bitrate = -1;
-    ps->old_fec_k = -1;
-    ps->old_fec_n = -1;
     ps->bitrate_reduced = false;
 
     ps->worker_mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
@@ -47,22 +43,11 @@ void profile_init(profile_state_t *ps, alink_config_t *cfg,
     ps->cmd = cmd;
 }
 
-int profile_apply_fec(profile_state_t *ps, int new_fec_k, int new_fec_n) {
-    char fecCommand[MAX_COMMAND_SIZE];
-    alink_config_t *cfg = ps->cfg;
-
-    const char *fecKeys[] = { "fecK", "fecN" };
-    char strFecK[10], strFecN[10];
-    snprintf(strFecK, sizeof(strFecK), "%d", new_fec_k);
-    snprintf(strFecN, sizeof(strFecN), "%d", new_fec_n);
-    const char *fecValues[] = { strFecK, strFecN };
-    cmd_format(fecCommand, sizeof(fecCommand), cfg->fecCommandTemplate, 2, fecKeys, fecValues, cfg->log_level);
-    int result = cmd_exec_with_timeout(ps->cmd, fecCommand);
+static int profile_apply_fec(profile_state_t *ps, int new_fec_k, int new_fec_n) {
+    int result = cmd_wfb_set_fec(ps->cmd, (uint8_t)new_fec_k, (uint8_t)new_fec_n);
     if (result != 0) {
-        ERROR_LOG(ps->cfg, "FEC command failed: %s\n", fecCommand);
+        ERROR_LOG(ps->cfg, "FEC set failed: k=%d n=%d\n", new_fec_k, new_fec_n);
     }
-    ps->old_fec_k = new_fec_k;
-    ps->old_fec_n = new_fec_n;
     return result;
 }
 
@@ -70,7 +55,7 @@ int profile_apply_fec(profile_state_t *ps, int new_fec_k, int new_fec_n) {
  * Compute ROI QP from bitrate (kbps).
  * Linearly scales roiqp_base between hi and lo thresholds.
  */
-int calc_roiQp_from_bitrate(int kbps, int hi, int lo, int roiqp_base) {
+static int calc_roiQp_from_bitrate(int kbps, int hi, int lo, int roiqp_base) {
     const int span = hi - lo;
 
     if (kbps > hi) return 0;
@@ -114,16 +99,16 @@ int profile_apply_api_batch(const alink_config_t *cfg,
 
     cmd_format(path, sizeof(path), cfg->apiCommandTemplate, 3, keys, values, cfg->log_level);
 
-    /* Parse the URL to extract host, port, and path */
-    char host[64];
-    int port = 80;
-    char url_path[MAX_COMMAND_SIZE];
-
-    if (util_parse_url(path, host, sizeof(host), &port, url_path, sizeof(url_path)) != 0) {
-        return -1;
+    /* Templates are path-only. Accept legacy full-URL templates by skipping
+     * past `http://host[:port]/` if present. Majestic is always on localhost,
+     * so the host/port from a legacy URL is ignored. */
+    const char *url_path = path;
+    if (strncmp(url_path, "http://", 7) == 0) {
+        const char *slash = strchr(url_path + 7, '/');
+        url_path = slash ? slash : "/";
     }
 
-    return cmd_http_get(host, port, url_path, NULL, 0, cmd);
+    return cmd_http_get("localhost", 80, url_path, NULL, 0, cmd);
 }
 
 /* ─── Per-step apply helpers ────────────────────────────────────────────
@@ -132,24 +117,6 @@ int profile_apply_api_batch(const alink_config_t *cfg,
  * state update. The outer profile_apply_exec chooses the ordering
  * (upgrade vs downgrade) by calling them in a different sequence.
  */
-
-static void apply_fps_step(profile_state_t *ps, int currentFPS) {
-    if (currentFPS == ps->prevFPS) return;
-
-    alink_config_t *cfg = ps->cfg;
-    char fpsCommand[MAX_COMMAND_SIZE];
-    char strFPS[10];
-    snprintf(strFPS, sizeof(strFPS), "%d", currentFPS);
-    const char *keys[] = { "fps" };
-    const char *values[] = { strFPS };
-    cmd_format(fpsCommand, sizeof(fpsCommand), cfg->fpsCommandTemplate, 1, keys, values, cfg->log_level);
-
-    DEBUG_LOG(cfg, "FPS: %d -> %d\n", ps->prevFPS, currentFPS);
-    if (cmd_exec_with_timeout(ps->cmd, fpsCommand) != 0) {
-        ERROR_LOG(cfg, "FPS command failed: %s\n", fpsCommand);
-    }
-    ps->prevFPS = currentFPS;
-}
 
 static void apply_power_step(profile_state_t *ps, int finalPower) {
     alink_config_t *cfg = ps->cfg;
@@ -163,10 +130,11 @@ static void apply_power_step(profile_state_t *ps, int finalPower) {
     cmd_format(powerCommand, sizeof(powerCommand), cfg->powerCommandTemplate, 1, keys, values, cfg->log_level);
 
     DEBUG_LOG(cfg, "Power: %d -> %d\n", ps->prevApplied.wfbPower, finalPower);
-    if (cmd_exec_with_timeout(ps->cmd, powerCommand) != 0) {
+    if (cmd_exec_with_timeout(ps->cmd, powerCommand) == 0) {
+        ps->prevApplied.wfbPower = finalPower;
+    } else {
         ERROR_LOG(cfg, "Power command failed: %s\n", powerCommand);
     }
-    ps->prevApplied.wfbPower = finalPower;
 }
 
 static void apply_mcs_step(profile_state_t *ps, const char *currentSetGI,
@@ -179,27 +147,27 @@ static void apply_mcs_step(profile_state_t *ps, const char *currentSetGI,
 
     alink_config_t *cfg = ps->cfg;
     hw_state_t *hw = ps->hw;
-    char mcsCommand[MAX_COMMAND_SIZE];
-    char strBandwidth[10], strGI[10], strStbc[10], strLdpc[10], strMcs[10];
-    snprintf(strBandwidth, sizeof(strBandwidth), "%d", currentBandwidth);
-    snprintf(strGI, sizeof(strGI), "%s", currentSetGI);
-    snprintf(strStbc, sizeof(strStbc), "%d", hw->stbc);
-    snprintf(strLdpc, sizeof(strLdpc), "%d", hw->ldpc_tx);
-    snprintf(strMcs, sizeof(strMcs), "%d", currentSetMCS);
-    const char *keys[] = { "bandwidth", "gi", "stbc", "ldpc", "mcs" };
-    const char *values[] = { strBandwidth, strGI, strStbc, strLdpc, strMcs };
-    cmd_format(mcsCommand, sizeof(mcsCommand), cfg->mcsCommandTemplate, 5, keys, values, cfg->log_level);
+
+    bool short_gi = (strcasecmp(currentSetGI, "short") == 0);
+    /* Mirror wfb_tx_cmd's implicit VHT rule: auto-force VHT at BW >= 80. */
+    bool vht_mode = (currentBandwidth >= 80);
+    uint8_t vht_nss = 1;
 
     DEBUG_LOG(cfg, "MCS: %d -> %d, GI: %s -> %s, BW: %d -> %d\n",
               ps->prevApplied.setMCS, currentSetMCS, ps->prevApplied.setGI, currentSetGI,
               ps->prevApplied.bandwidth, currentBandwidth);
-    if (cmd_exec_with_timeout(ps->cmd, mcsCommand) != 0) {
-        ERROR_LOG(cfg, "MCS command failed: %s\n", mcsCommand);
+    if (cmd_wfb_set_radio(ps->cmd,
+                          (uint8_t)hw->stbc, hw->ldpc_tx != 0, short_gi,
+                          (uint8_t)currentBandwidth, (uint8_t)currentSetMCS,
+                          vht_mode, vht_nss) == 0) {
+        ps->prevApplied.bandwidth = currentBandwidth;
+        strncpy(ps->prevApplied.setGI, currentSetGI, sizeof(ps->prevApplied.setGI) - 1);
+        ps->prevApplied.setGI[sizeof(ps->prevApplied.setGI) - 1] = '\0';
+        ps->prevApplied.setMCS = currentSetMCS;
+    } else {
+        ERROR_LOG(cfg, "MCS set failed: mcs=%d bw=%d gi=%s\n",
+                  currentSetMCS, currentBandwidth, currentSetGI);
     }
-    ps->prevApplied.bandwidth = currentBandwidth;
-    strncpy(ps->prevApplied.setGI, currentSetGI, sizeof(ps->prevApplied.setGI) - 1);
-    ps->prevApplied.setGI[sizeof(ps->prevApplied.setGI) - 1] = '\0';
-    ps->prevApplied.setMCS = currentSetMCS;
 }
 
 static void apply_fec_step(profile_state_t *ps, int currentSetFecK, int currentSetFecN) {
@@ -207,11 +175,10 @@ static void apply_fec_step(profile_state_t *ps, int currentSetFecK, int currentS
 
     DEBUG_LOG(ps->cfg, "FEC: %d/%d -> %d/%d\n",
               ps->prevApplied.setFecK, ps->prevApplied.setFecN, currentSetFecK, currentSetFecN);
-    if (profile_apply_fec(ps, currentSetFecK, currentSetFecN) != 0) {
-        ERROR_LOG(ps->cfg, "Failed to apply FEC settings\n");
+    if (profile_apply_fec(ps, currentSetFecK, currentSetFecN) == 0) {
+        ps->prevApplied.setFecK = currentSetFecK;
+        ps->prevApplied.setFecN = currentSetFecN;
     }
-    ps->prevApplied.setFecK = currentSetFecK;
-    ps->prevApplied.setFecN = currentSetFecN;
 }
 
 static void apply_api_step(profile_state_t *ps, int currentSetBitrate, float currentSetGop) {
@@ -231,28 +198,33 @@ static void apply_idr_step(profile_state_t *ps) {
     alink_config_t *cfg = ps->cfg;
     if (!cfg->idr_every_change) return;
 
-    const char *idrApiCommand = cfg->idrApiCommandTemplate;
-    char host[64];
-    int port = 80;
-    char url_path[MAX_COMMAND_SIZE];
-
-    if (util_parse_url(idrApiCommand, host, sizeof(host), &port, url_path, sizeof(url_path)) == 0) {
-        if (cmd_http_get(host, port, url_path, NULL, 0, ps->cmd) != 0) {
-            ERROR_LOG(cfg, "IDR command failed: %s\n", idrApiCommand);
-        }
+    const char *url_path = cfg->idrApiCommandTemplate;
+    if (strncmp(url_path, "http://", 7) == 0) {
+        const char *slash = strchr(url_path + 7, '/');
+        url_path = slash ? slash : "/";
     }
+
+    if (cmd_http_get("localhost", 80, url_path, NULL, 0, ps->cmd) != 0) {
+        ERROR_LOG(cfg, "IDR command failed: %s\n", cfg->idrApiCommandTemplate);
+    }
+}
+
+/* Cheap bitwise compare of Profile for "did anything change?" — avoids
+ * listing each field and is safe because every slot in the struct is
+ * always initialised (profile_init sentinels, steady-state copies). */
+static bool profile_equal(const Profile *a, const Profile *b) {
+    return memcmp(a, b, sizeof(Profile)) == 0;
 }
 
 /*
  * Internal: execute profile commands on the worker thread.
- * Upgrading order:   FPS → power → MCS → FEC → API → IDR
- * Downgrading order: FPS → FEC → API → MCS → power → IDR
+ * Upgrading order:   power → MCS → FEC → API → IDR
+ * Downgrading order: FEC → API → MCS → power → IDR
  */
 static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
     const Profile *profile = &job->profile;
     osd_state_t *os = (osd_state_t *)job->osd;
     alink_config_t *cfg = ps->cfg;
-    hw_state_t *hw = ps->hw;
 
     int finalPower = profile->wfbPower;
     float currentSetGop = profile->setGop;
@@ -263,14 +235,10 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
     int currentSetBitrate = profile->setBitrate;
     int currentBandwidth = profile->bandwidth;
 
-    int currentFPS = hw->global_fps;
-    if (cfg->limitFPS && currentSetBitrate < 4000 && hw->global_fps > 30 && hw->total_pixels > HIGH_RES_PIXEL_THRESHOLD) {
-        currentFPS = 30;
-    } else if (cfg->limitFPS && currentSetBitrate < 8000 && hw->total_pixels > HIGH_RES_PIXEL_THRESHOLD && hw->global_fps > 60) {
-        currentFPS = 60;
-    }
-
-    apply_fps_step(ps, currentFPS);
+    /* Snapshot prevApplied so we can tell whether any step actually landed.
+     * Each apply_*_step only updates prevApplied on successful commit, so a
+     * post-hoc memcmp is sufficient. */
+    Profile before = ps->prevApplied;
 
     if (job->currentProfile > job->previousProfile) {
         /* Upgrading: power before MCS/FEC/API */
@@ -286,23 +254,32 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
         apply_power_step(ps, finalPower);
     }
 
+    if (!profile_equal(&before, &ps->prevApplied)) {
+        pthread_mutex_lock(&ps->worker_mutex);
+        ps->apply_count += 1;
+        ps->last_apply_time_ms = util_now_ms();
+        pthread_mutex_unlock(&ps->worker_mutex);
+    }
+
     apply_idr_step(ps);
 
-    /* Update OSD with actual values from wfb_tx_cmd output */
-    int k, n, stbc_val, ldpc_val, short_gi, actual_bandwidth, mcs_index, vht_mode, vht_nss;
-    hw_read_wfb_status(&k, &n, &stbc_val, &ldpc_val, &short_gi, &actual_bandwidth, &mcs_index, &vht_mode, &vht_nss);
-    const char *gi_string = short_gi ? "short" : "long";
+    /* Top line reflects the DESIRED (commanded) profile, rendered from the
+     * Profile struct the GS sent. Always updates, even if one of the apply
+     * steps above failed. The DBG line in osd.c reflects the last successful
+     * apply (prevApplied), so a mismatch between the two surfaces apply
+     * failures directly. */
     int pwr = cfg->allow_set_power ? finalPower : 0;
 
     snprintf(os->profile, sizeof(os->profile), "%d %d%s%d Pw%d g%.1f",
              profile->setBitrate,
-             actual_bandwidth,
-             gi_string,
-             mcs_index,
+             profile->bandwidth,
+             profile->setGI,
+             profile->setMCS,
              pwr,
              profile->setGop);
 
-    snprintf(os->profile_fec, sizeof(os->profile_fec), "%d/%d", k, n);
+    snprintf(os->profile_fec, sizeof(os->profile_fec), "%d/%d",
+             profile->setFecK, profile->setFecN);
 }
 
 /*

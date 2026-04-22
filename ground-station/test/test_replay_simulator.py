@@ -215,8 +215,15 @@ class TestReplaySimulatorDeterminism:
                 'upward_confidence_loops': '1',
             }
         }
-        config1 = _make_config({**overrides, 'gate': {'snr_safety_margin': '3'}})
-        config2 = _make_config({**overrides, 'gate': {'snr_safety_margin': '12'}})
+        ml_off = {'ml': {
+            'persist_path': '',
+            'snr_safety_margin_lr_up': '0', 'snr_safety_margin_lr_down': '0',
+            'fec_redundancy_ratio_lr_up': '0', 'fec_redundancy_ratio_lr_down': '0',
+            'utilization_factor_lr_up': '0', 'utilization_factor_lr_down': '0',
+            'hysteresis_up_db_lr_up': '0', 'hysteresis_up_db_lr_down': '0',
+        }}
+        config1 = _make_config({**overrides, **ml_off, 'gate': {'snr_safety_margin': '3'}})
+        config2 = _make_config({**overrides, **ml_off, 'gate': {'snr_safety_margin': '12'}})
 
         r1 = ReplaySimulator(df.copy(), config1).run()
         r2 = ReplaySimulator(df.copy(), config2).run()

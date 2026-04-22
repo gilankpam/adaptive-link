@@ -99,16 +99,16 @@ int profile_apply_api_batch(const alink_config_t *cfg,
 
     cmd_format(path, sizeof(path), cfg->apiCommandTemplate, 3, keys, values, cfg->log_level);
 
-    /* Parse the URL to extract host, port, and path */
-    char host[64];
-    int port = 80;
-    char url_path[MAX_COMMAND_SIZE];
-
-    if (util_parse_url(path, host, sizeof(host), &port, url_path, sizeof(url_path)) != 0) {
-        return -1;
+    /* Templates are path-only. Accept legacy full-URL templates by skipping
+     * past `http://host[:port]/` if present. Majestic is always on localhost,
+     * so the host/port from a legacy URL is ignored. */
+    const char *url_path = path;
+    if (strncmp(url_path, "http://", 7) == 0) {
+        const char *slash = strchr(url_path + 7, '/');
+        url_path = slash ? slash : "/";
     }
 
-    return cmd_http_get(host, port, url_path, NULL, 0, cmd);
+    return cmd_http_get("localhost", 80, url_path, NULL, 0, cmd);
 }
 
 /* ─── Per-step apply helpers ────────────────────────────────────────────
@@ -198,16 +198,22 @@ static void apply_idr_step(profile_state_t *ps) {
     alink_config_t *cfg = ps->cfg;
     if (!cfg->idr_every_change) return;
 
-    const char *idrApiCommand = cfg->idrApiCommandTemplate;
-    char host[64];
-    int port = 80;
-    char url_path[MAX_COMMAND_SIZE];
-
-    if (util_parse_url(idrApiCommand, host, sizeof(host), &port, url_path, sizeof(url_path)) == 0) {
-        if (cmd_http_get(host, port, url_path, NULL, 0, ps->cmd) != 0) {
-            ERROR_LOG(cfg, "IDR command failed: %s\n", idrApiCommand);
-        }
+    const char *url_path = cfg->idrApiCommandTemplate;
+    if (strncmp(url_path, "http://", 7) == 0) {
+        const char *slash = strchr(url_path + 7, '/');
+        url_path = slash ? slash : "/";
     }
+
+    if (cmd_http_get("localhost", 80, url_path, NULL, 0, ps->cmd) != 0) {
+        ERROR_LOG(cfg, "IDR command failed: %s\n", cfg->idrApiCommandTemplate);
+    }
+}
+
+/* Cheap bitwise compare of Profile for "did anything change?" — avoids
+ * listing each field and is safe because every slot in the struct is
+ * always initialised (profile_init sentinels, steady-state copies). */
+static bool profile_equal(const Profile *a, const Profile *b) {
+    return memcmp(a, b, sizeof(Profile)) == 0;
 }
 
 /*
@@ -229,6 +235,11 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
     int currentSetBitrate = profile->setBitrate;
     int currentBandwidth = profile->bandwidth;
 
+    /* Snapshot prevApplied so we can tell whether any step actually landed.
+     * Each apply_*_step only updates prevApplied on successful commit, so a
+     * post-hoc memcmp is sufficient. */
+    Profile before = ps->prevApplied;
+
     if (job->currentProfile > job->previousProfile) {
         /* Upgrading: power before MCS/FEC/API */
         apply_power_step(ps, finalPower);
@@ -243,23 +254,32 @@ static void profile_apply_exec(profile_state_t *ps, const profile_job_t *job) {
         apply_power_step(ps, finalPower);
     }
 
+    if (!profile_equal(&before, &ps->prevApplied)) {
+        pthread_mutex_lock(&ps->worker_mutex);
+        ps->apply_count += 1;
+        ps->last_apply_time_ms = util_now_ms();
+        pthread_mutex_unlock(&ps->worker_mutex);
+    }
+
     apply_idr_step(ps);
 
-    /* Update OSD with actual values read back from the wfb_tx daemon. */
-    int k, n, stbc_val, ldpc_val, short_gi, actual_bandwidth, mcs_index, vht_mode, vht_nss;
-    hw_read_wfb_status(&k, &n, &stbc_val, &ldpc_val, &short_gi, &actual_bandwidth, &mcs_index, &vht_mode, &vht_nss);
-    const char *gi_string = short_gi ? "short" : "long";
+    /* Top line reflects the DESIRED (commanded) profile, rendered from the
+     * Profile struct the GS sent. Always updates, even if one of the apply
+     * steps above failed. The DBG line in osd.c reflects the last successful
+     * apply (prevApplied), so a mismatch between the two surfaces apply
+     * failures directly. */
     int pwr = cfg->allow_set_power ? finalPower : 0;
 
     snprintf(os->profile, sizeof(os->profile), "%d %d%s%d Pw%d g%.1f",
              profile->setBitrate,
-             actual_bandwidth,
-             gi_string,
-             mcs_index,
+             profile->bandwidth,
+             profile->setGI,
+             profile->setMCS,
              pwr,
              profile->setGop);
 
-    snprintf(os->profile_fec, sizeof(os->profile_fec), "%d/%d", k, n);
+    snprintf(os->profile_fec, sizeof(os->profile_fec), "%d/%d",
+             profile->setFecK, profile->setFecN);
 }
 
 /*

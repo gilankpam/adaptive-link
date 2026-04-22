@@ -228,6 +228,7 @@ int main(int argc, char *argv[]) {
         .ks = &daemon.ks,
         .rs = &daemon.rs,
         .ms = &daemon.ms,
+        .cmd = &daemon.cmd,
         .initialized = &daemon.initialized
     };
     pthread_t osd_thread;

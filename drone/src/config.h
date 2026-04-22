@@ -39,6 +39,17 @@ typedef struct {
     float multiply_font_size_by;
     log_level_t log_level;
 
+    /* Debug OSD: when true, an extra DBG line is appended to the OSD with
+     * applied K/N, computed t_block, profile apply age/count, radio
+     * throughput, TX-drop rate, wfb_tx counters, and the bitrate-reduced
+     * flag. For stutter/latency diagnostics in flight.
+     *
+     * debug_mtu_payload_bytes is only used to compute the t_block estimate
+     * and must match the GS's mtu_payload_bytes (the encoder's actual
+     * outgoing UDP packet size). */
+    bool debug_osd;
+    int debug_mtu_payload_bytes;
+
     /* wfb_tx control-socket UDP port (set_fec / set_radio sent directly). */
     int wfb_control_port;
 

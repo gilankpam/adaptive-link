@@ -44,6 +44,15 @@ typedef struct {
      * cleared when it restores to prevApplied.setBitrate. */
     bool bitrate_reduced;
 
+    /* Debug-OSD telemetry. last_apply_time_ms is the timestamp (from
+     * util_now_ms()) of the most recent profile_apply_exec that actually
+     * changed at least one field on the radio/encoder. apply_count is the
+     * running total of such applies since startup. Both written under
+     * worker_mutex by the worker thread, read under worker_mutex by the
+     * OSD thread. */
+    uint64_t last_apply_time_ms;
+    uint32_t apply_count;
+
     /* Async worker */
     pthread_mutex_t worker_mutex;
     pthread_cond_t worker_cond;

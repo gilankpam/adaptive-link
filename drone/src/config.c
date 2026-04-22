@@ -84,6 +84,9 @@ void config_set_defaults(alink_config_t *cfg) {
     cfg->roiqp_lo = 2000;
     cfg->roiqp_base = 0;
 
+    cfg->debug_osd = false;
+    cfg->debug_mtu_payload_bytes = 1400;
+
     strncpy(cfg->customOSD, CUSTOM_OSD_DEFAULT, sizeof(cfg->customOSD) - 1);
     cfg->customOSD[sizeof(cfg->customOSD) - 1] = '\0';
 }
@@ -112,6 +115,8 @@ static const cfg_entry_t CONFIG_KEYS[] = {
     { "roiqp_lo",                    offsetof(alink_config_t, roiqp_lo),                    0,                                                                CT_INT   },
     { "roiqp_base",                  offsetof(alink_config_t, roiqp_base),                  0,                                                                CT_INT   },
     { "wfbControlPort",              offsetof(alink_config_t, wfb_control_port),            0,                                                                CT_INT   },
+    { "debug_osd",                   offsetof(alink_config_t, debug_osd),                   0,                                                                CT_BOOL  },
+    { "debug_mtu_payload_bytes",     offsetof(alink_config_t, debug_mtu_payload_bytes),     0,                                                                CT_INT   },
 
     /* Fallback profile fields */
     { "fallback_gi",                 FB_OFF(setGI),     sizeof(((Profile*)0)->setGI),                                                                          CT_STR   },

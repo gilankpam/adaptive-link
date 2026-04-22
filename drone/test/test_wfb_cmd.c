@@ -32,6 +32,14 @@ typedef struct {
     uint32_t reply_rc;    /* host byte order; htonl'd on wire */
     int reply;            /* 0 = stay silent, 1 = reply */
     int done;
+    /* Optional extra reply bytes appended after the 8-byte header
+     * (req_id + rc). Used for GET_STATS. */
+    uint8_t reply_extra[64];
+    size_t reply_extra_len;
+    /* When true, emit N spurious replies with a mangled req_id *before*
+     * the correct reply. Simulates the late-arriving-reply race that
+     * triggers the recv-retry loop in wfb_send_request. */
+    int spurious_replies_before;
 } fake_wfb_t;
 
 static void *responder_thread(void *arg) {
@@ -43,11 +51,27 @@ static void *responder_thread(void *arg) {
                           (struct sockaddr *)&from, &fromlen);
 
     if (f->reply && f->req_len >= 5) {
-        uint8_t resp[8];
+        for (int i = 0; i < f->spurious_replies_before; i++) {
+            uint8_t spurious[8];
+            /* Mangle the req_id so wfb_send_request's req_id check rejects it. */
+            spurious[0] = 0xFF; spurious[1] = 0xFF;
+            spurious[2] = 0xFF; spurious[3] = 0xFF;
+            uint32_t zero = htonl(0);
+            memcpy(spurious + 4, &zero, 4);
+            sendto(f->fd, spurious, sizeof(spurious), 0,
+                   (struct sockaddr *)&from, fromlen);
+        }
+
+        uint8_t resp[8 + 64];
         memcpy(resp, f->req_buf, 4);         /* echo req_id */
         uint32_t rc_net = htonl(f->reply_rc);
         memcpy(resp + 4, &rc_net, 4);
-        sendto(f->fd, resp, sizeof(resp), 0,
+        size_t total = 8;
+        if (f->reply_extra_len > 0 && f->reply_extra_len <= sizeof(f->reply_extra)) {
+            memcpy(resp + 8, f->reply_extra, f->reply_extra_len);
+            total += f->reply_extra_len;
+        }
+        sendto(f->fd, resp, total, 0,
                (struct sockaddr *)&from, fromlen);
     }
 
@@ -235,6 +259,116 @@ void test_set_radio_failure_rc(void) {
     fake_wfb_stop(&f);
 }
 
+void test_get_stats_success(void) {
+    fake_wfb_t f;
+    TEST_ASSERT_EQUAL_INT(0, fake_wfb_start(&f, 1, 0));
+
+    /* Pack 6 × uint64_t (host byte order) into the extra-reply buffer.
+     * Same wire format as wfb-ng/src/tx_cmd.h cmd_get_stats. */
+    uint64_t payload[6] = { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06 };
+    memcpy(f.reply_extra, payload, sizeof(payload));
+    f.reply_extra_len = sizeof(payload);
+
+    pthread_t t;
+    pthread_create(&t, NULL, responder_thread, &f);
+
+    cmd_ctx_t ctx;
+    cmd_init(&ctx, 0, LOG_LEVEL_ERROR, f.port);
+
+    wfb_stats_t out = {0};
+    int rc = cmd_wfb_get_stats(&ctx, &out);
+    pthread_join(t, NULL);
+
+    TEST_ASSERT_EQUAL_INT(0, rc);
+
+    /* Request is cmd_id=5 with zero-length payload: 4 (req_id) + 1 (cmd) = 5 bytes. */
+    TEST_ASSERT_EQUAL_INT(5, f.req_len);
+    TEST_ASSERT_EQUAL_UINT8(5, f.req_buf[4]);  /* CMD_GET_STATS */
+
+    TEST_ASSERT_EQUAL_UINT64(0x01, out.p_fec_timeouts);
+    TEST_ASSERT_EQUAL_UINT64(0x02, out.p_incoming);
+    TEST_ASSERT_EQUAL_UINT64(0x03, out.p_injected);
+    TEST_ASSERT_EQUAL_UINT64(0x04, out.b_injected);
+    TEST_ASSERT_EQUAL_UINT64(0x05, out.p_dropped);
+    TEST_ASSERT_EQUAL_UINT64(0x06, out.p_truncated);
+
+    if (ctx.wfb_ctl_fd >= 0) close(ctx.wfb_ctl_fd);
+    fake_wfb_stop(&f);
+}
+
+void test_get_stats_unsupported(void) {
+    /* Old wfb_tx that doesn't know CMD_GET_STATS: replies with rc=ENOTSUP
+     * and no extra payload. cmd_wfb_get_stats must surface the error so
+     * callers (debug OSD) can degrade gracefully. */
+    fake_wfb_t f;
+    TEST_ASSERT_EQUAL_INT(0, fake_wfb_start(&f, 1, 95));  /* ENOTSUP */
+
+    pthread_t t;
+    pthread_create(&t, NULL, responder_thread, &f);
+
+    cmd_ctx_t ctx;
+    cmd_init(&ctx, 0, LOG_LEVEL_ERROR, f.port);
+
+    wfb_stats_t out = {0};
+    int rc = cmd_wfb_get_stats(&ctx, &out);
+    pthread_join(t, NULL);
+
+    TEST_ASSERT_NOT_EQUAL(0, rc);
+    /* Caller MUST NOT trust out contents on non-zero rc. No assert here — the
+     * struct was zero-initialised and should remain so since the inner
+     * wfb_send_request only copies extras when rc == 0. */
+    TEST_ASSERT_EQUAL_UINT64(0, out.p_fec_timeouts);
+
+    if (ctx.wfb_ctl_fd >= 0) close(ctx.wfb_ctl_fd);
+    fake_wfb_stop(&f);
+}
+
+void test_stale_replies_are_skipped(void) {
+    /* Daemon echoes our req_id correctly, but first emits 3 replies with a
+     * mangled req_id — simulating late-arriving replies from previous
+     * timed-out requests. wfb_send_request's retry loop must drop them and
+     * find ours. */
+    fake_wfb_t f;
+    TEST_ASSERT_EQUAL_INT(0, fake_wfb_start(&f, 1, 0));
+    f.spurious_replies_before = 3;
+
+    pthread_t t;
+    pthread_create(&t, NULL, responder_thread, &f);
+
+    cmd_ctx_t ctx;
+    cmd_init(&ctx, 0, LOG_LEVEL_ERROR, f.port);
+
+    int rc = cmd_wfb_set_fec(&ctx, 8, 12);
+    pthread_join(t, NULL);
+
+    TEST_ASSERT_EQUAL_INT(0, rc);
+
+    if (ctx.wfb_ctl_fd >= 0) close(ctx.wfb_ctl_fd);
+    fake_wfb_stop(&f);
+}
+
+void test_get_stats_short_reply(void) {
+    /* Responder sends rc=0 but no extra bytes — treated as a protocol error
+     * because the caller asked for stats. */
+    fake_wfb_t f;
+    TEST_ASSERT_EQUAL_INT(0, fake_wfb_start(&f, 1, 0));
+
+    pthread_t t;
+    pthread_create(&t, NULL, responder_thread, &f);
+
+    cmd_ctx_t ctx;
+    cmd_init(&ctx, 0, LOG_LEVEL_ERROR, f.port);
+
+    wfb_stats_t out = {0};
+    int rc = cmd_wfb_get_stats(&ctx, &out);
+    pthread_join(t, NULL);
+
+    TEST_ASSERT_NOT_EQUAL(0, rc);
+
+    if (ctx.wfb_ctl_fd >= 0) close(ctx.wfb_ctl_fd);
+    fake_wfb_stop(&f);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_set_fec_success);
@@ -243,5 +377,9 @@ int main(void) {
     RUN_TEST(test_set_radio_20mhz);
     RUN_TEST(test_set_radio_80mhz_vht);
     RUN_TEST(test_set_radio_failure_rc);
+    RUN_TEST(test_get_stats_success);
+    RUN_TEST(test_get_stats_unsupported);
+    RUN_TEST(test_get_stats_short_reply);
+    RUN_TEST(test_stale_replies_are_skipped);
     return UNITY_END();
 }

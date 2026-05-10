@@ -153,7 +153,7 @@ class TestTelemetryLoggerOutcome:
         profile = {'mcs': 3, 'gi': 'long', 'fec_k': 6, 'fec_n': 9,
                    'bitrate': 8000, 'power': 40}
 
-        # Profile change tick — reported FEC still old (not yet confirmed)
+        # Profile change tick — outcome window starts immediately
         logger.log(
             timestamp_ms=1000, best_rssi=-50, best_snr=20, min_rssi=-55,
             num_antennas=2, all_packets=1000, lost_packets=0,
@@ -164,8 +164,8 @@ class TestTelemetryLoggerOutcome:
             profile=profile, profile_changed=True,
         )
 
-        # 5 follow-up ticks with low loss — FEC now matches profile (confirmed)
-        for i in range(5):
+        # 4 follow-up ticks with low loss (5 total including change tick)
+        for i in range(4):
             logger.log(
                 timestamp_ms=1100 + i * 100, best_rssi=-50, best_snr=20,
                 min_rssi=-55, num_antennas=2, all_packets=1000,
@@ -200,7 +200,7 @@ class TestTelemetryLoggerOutcome:
         )
 
         # Follow-up ticks with high loss
-        for i in range(3):
+        for i in range(2):
             logger.log(
                 timestamp_ms=2100 + i * 100, best_rssi=-70, best_snr=15,
                 min_rssi=-75, num_antennas=2, all_packets=1000,
@@ -234,7 +234,7 @@ class TestTelemetryLoggerOutcome:
         )
 
         # Follow-up with moderate loss (avg > 0.02 but max < 0.05)
-        for i in range(3):
+        for i in range(2):
             logger.log(
                 timestamp_ms=3100 + i * 100, best_rssi=-60, best_snr=18,
                 min_rssi=-65, num_antennas=2, all_packets=1000,
@@ -257,7 +257,7 @@ class TestTelemetryLoggerOutcome:
         profile = {'mcs': 3, 'gi': 'long', 'fec_k': 6, 'fec_n': 9,
                    'bitrate': 8000, 'power': 40}
 
-        # First change — reported FEC still old
+        # First change — outcome starts immediately
         logger.log(
             timestamp_ms=1000, best_rssi=-50, best_snr=20, min_rssi=-55,
             num_antennas=2, all_packets=1000, lost_packets=0,
@@ -268,7 +268,7 @@ class TestTelemetryLoggerOutcome:
             profile=profile, profile_changed=True,
         )
 
-        # 2 follow-up ticks with confirmed FEC (window is 10)
+        # 2 follow-up ticks (window is 10, not yet complete)
         for i in range(2):
             logger.log(
                 timestamp_ms=1100 + i * 100, best_rssi=-50, best_snr=20,
@@ -281,7 +281,6 @@ class TestTelemetryLoggerOutcome:
             )
 
         # Second profile change — should finalize first outcome early
-        # profile2 FEC matches reported, so confirms immediately
         profile2 = {'mcs': 5, 'gi': 'short', 'fec_k': 8, 'fec_n': 12,
                      'bitrate': 15000, 'power': 35}
         logger.log(
@@ -297,110 +296,10 @@ class TestTelemetryLoggerOutcome:
 
         records = self._read_records()
         outcomes = [r for r in records if r.get('type') == 'outcome']
-        # First outcome finalized early (2 confirmed ticks)
-        # Second outcome: FEC matches immediately, finalized on close (1 tick)
+        # First outcome finalized early (change tick + 2 follow-ups = 3 ticks)
+        # Second outcome: change tick + close finalization (1 tick)
         assert len(outcomes) == 2
         assert outcomes[0]['change_ts'] == 1000
-        assert outcomes[0]['ticks'] == 2
-
-
-class TestTelemetryLoggerFecConfirmation:
-    """Test FEC-confirmed outcome tracking."""
-
-    def setup_method(self):
-        self.tmpdir = tempfile.mkdtemp()
-
-    def teardown_method(self):
-        shutil.rmtree(self.tmpdir)
-
-    def _read_records(self):
-        path = os.path.join(self.tmpdir, 'telemetry_0.jsonl')
-        with open(path) as f:
-            return [json.loads(line) for line in f]
-
-    def _log_tick(self, logger, ts, fec_k=8, fec_n=12, loss_rate=0.001,
-                  profile=None, changed=False):
-        if profile is None:
-            profile = {'mcs': 3, 'gi': 'long', 'fec_k': 6, 'fec_n': 9,
-                       'bitrate': 8000, 'power': 40}
-        logger.log(
-            timestamp_ms=ts, best_rssi=-50, best_snr=20, min_rssi=-55,
-            num_antennas=2, all_packets=1000, lost_packets=0,
-            fec_rec_packets=0, fec_k=fec_k, fec_n=fec_n,
-            loss_rate=loss_rate, fec_pressure=0.0,
-            snr_ema=20.0, snr_slope=0.0,
-            margin_current=4.0, margin_target=4.0, emergency=False,
-            profile=profile, profile_changed=changed,
-        )
-
-    def test_outcome_waits_for_fec_confirmation(self):
-        """Outcome window starts only after FEC confirmation, not immediately."""
-        logger = TelemetryLogger(self.tmpdir, outcome_window=3, confirm_timeout=5)
-        profile = {'mcs': 3, 'gi': 'long', 'fec_k': 6, 'fec_n': 9,
-                   'bitrate': 8000, 'power': 40}
-
-        # Profile change tick — reported FEC still old
-        self._log_tick(logger, ts=1000, fec_k=8, fec_n=12,
-                       profile=profile, changed=True)
-
-        # 2 ticks still showing old FEC (not confirmed yet)
-        for i in range(2):
-            self._log_tick(logger, ts=1100 + i * 100, fec_k=8, fec_n=12,
-                           profile=profile)
-
-        # FEC confirmed — 3 ticks to fill outcome window
-        for i in range(3):
-            self._log_tick(logger, ts=1300 + i * 100, fec_k=6, fec_n=9,
-                           loss_rate=0.001, profile=profile)
-        logger.close()
-
-        records = self._read_records()
-        outcomes = [r for r in records if r.get('type') == 'outcome']
-        assert len(outcomes) == 1
-        assert outcomes[0]['label'] == 'good'
-        assert outcomes[0]['ticks'] == 3  # only confirmed ticks
-        assert outcomes[0]['change_ts'] == 1000
-
-    def test_outcome_discarded_on_confirm_timeout(self):
-        """If FEC never matches within timeout, no outcome is recorded."""
-        logger = TelemetryLogger(self.tmpdir, outcome_window=3, confirm_timeout=3)
-        profile = {'mcs': 3, 'gi': 'long', 'fec_k': 6, 'fec_n': 9,
-                   'bitrate': 8000, 'power': 40}
-
-        # Profile change
-        self._log_tick(logger, ts=1000, fec_k=8, fec_n=12,
-                       profile=profile, changed=True)
-
-        # 5 ticks, FEC never confirms
-        for i in range(5):
-            self._log_tick(logger, ts=1100 + i * 100, fec_k=8, fec_n=12,
-                           profile=profile)
-        logger.close()
-
-        records = self._read_records()
-        outcomes = [r for r in records if r.get('type') == 'outcome']
-        assert len(outcomes) == 0
-
-    def test_immediate_confirmation_when_fec_matches(self):
-        """When reported FEC matches profile on change tick, confirm immediately."""
-        logger = TelemetryLogger(self.tmpdir, outcome_window=3)
-        profile = {'mcs': 5, 'gi': 'long', 'fec_k': 8, 'fec_n': 12,
-                   'bitrate': 15000, 'power': 35}
-
-        # Profile FEC matches reported FEC — confirms on same tick
-        self._log_tick(logger, ts=1000, fec_k=8, fec_n=12,
-                       loss_rate=0.001, profile=profile, changed=True)
-
-        # 2 more ticks to fill window
-        for i in range(2):
-            self._log_tick(logger, ts=1100 + i * 100, fec_k=8, fec_n=12,
-                           loss_rate=0.001, profile=profile)
-        logger.close()
-
-        records = self._read_records()
-        outcomes = [r for r in records if r.get('type') == 'outcome']
-        assert len(outcomes) == 1
-        assert outcomes[0]['label'] == 'good'
         assert outcomes[0]['ticks'] == 3
 
 
@@ -446,6 +345,98 @@ class TestTelemetryLoggerEdgeCases:
         assert len(outcomes) == 0
 
 
+class TestTelemetryLoggerAdaptiveOutcome:
+    """Test that outcome records include adaptive param state."""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmpdir)
+
+    def _read_records(self):
+        path = os.path.join(self.tmpdir, 'telemetry_0.jsonl')
+        with open(path) as f:
+            return [json.loads(line) for line in f]
+
+    def _log_tick(self, logger, ts, loss_rate=0.001,
+                  profile=None, changed=False):
+        if profile is None:
+            profile = {'mcs': 3, 'gi': 'long', 'fec_k': 6, 'fec_n': 9,
+                       'bitrate': 8000, 'power': 40}
+        logger.log(
+            timestamp_ms=ts, best_rssi=-50, best_snr=20, min_rssi=-55,
+            num_antennas=2, all_packets=1000, lost_packets=0,
+            fec_rec_packets=0, fec_k=6, fec_n=9,
+            loss_rate=loss_rate, fec_pressure=0.0,
+            snr_ema=20.0, snr_slope=0.0,
+            margin_current=4.0, margin_target=4.0, emergency=False,
+            profile=profile, profile_changed=changed,
+        )
+
+    def test_outcome_includes_adaptive_state(self):
+        ap = AdaptiveParams(outcome_window=3)
+        ap.add('x', AdaptiveParam(value=5.0, lr_up=1.0, lr_down=0.5,
+                                  bounds=(0, 100), increase_on_bad=True))
+        # Trigger an adaptive outcome so _last_outcome is populated
+        ap.on_profile_changed()
+        for _ in range(3):
+            ap.tick(0.0)
+
+        logger = TelemetryLogger(self.tmpdir, outcome_window=3,
+                                 adaptive_params=ap)
+        profile = {'mcs': 3, 'gi': 'long', 'fec_k': 6, 'fec_n': 9,
+                   'bitrate': 8000, 'power': 40}
+        self._log_tick(logger, ts=1000, profile=profile, changed=True)
+        for i in range(2):
+            self._log_tick(logger, ts=1100 + i * 100, profile=profile)
+        logger.close()
+
+        records = self._read_records()
+        outcomes = [r for r in records if r.get('type') == 'outcome']
+        assert len(outcomes) == 1
+        assert outcomes[0]['adaptive_outcome'] == 'good'
+        assert 'x' in outcomes[0]['adaptive']
+        assert 'value' in outcomes[0]['adaptive']['x']
+        assert 'delta' in outcomes[0]['adaptive']['x']
+
+    def test_outcome_without_adaptive_params(self):
+        """Outcome records work fine without adaptive params."""
+        logger = TelemetryLogger(self.tmpdir, outcome_window=3)
+        profile = {'mcs': 3, 'gi': 'long', 'fec_k': 6, 'fec_n': 9,
+                   'bitrate': 8000, 'power': 40}
+        self._log_tick(logger, ts=1000, profile=profile, changed=True)
+        for i in range(2):
+            self._log_tick(logger, ts=1100 + i * 100, profile=profile)
+        logger.close()
+
+        records = self._read_records()
+        outcomes = [r for r in records if r.get('type') == 'outcome']
+        assert len(outcomes) == 1
+        assert 'adaptive_outcome' not in outcomes[0]
+        assert 'adaptive' not in outcomes[0]
+
+    def test_outcome_before_any_adaptive_finalization(self):
+        """If adaptive hasn't finalized yet, outcome omits adaptive fields."""
+        ap = AdaptiveParams(outcome_window=10)
+        ap.add('x', AdaptiveParam(value=5.0, bounds=(0, 100)))
+        # No adaptive outcome triggered — _last_outcome is None
+
+        logger = TelemetryLogger(self.tmpdir, outcome_window=3,
+                                 adaptive_params=ap)
+        profile = {'mcs': 3, 'gi': 'long', 'fec_k': 6, 'fec_n': 9,
+                   'bitrate': 8000, 'power': 40}
+        self._log_tick(logger, ts=1000, profile=profile, changed=True)
+        for i in range(2):
+            self._log_tick(logger, ts=1100 + i * 100, profile=profile)
+        logger.close()
+
+        records = self._read_records()
+        outcomes = [r for r in records if r.get('type') == 'outcome']
+        assert len(outcomes) == 1
+        assert 'adaptive_outcome' not in outcomes[0]
+
+
 class TestTelemetryLoggerNewSession:
     """Test session-based log rotation triggered by drone restarts."""
 
@@ -456,14 +447,14 @@ class TestTelemetryLoggerNewSession:
         shutil.rmtree(self.tmpdir)
 
     def _log_tick(self, logger, ts=1000, changed=False, loss_rate=0.0,
-                  profile=None, fec_k=8, fec_n=12):
+                  profile=None):
         if profile is None:
             profile = {'mcs': 3, 'gi': 'long', 'fec_k': 6, 'fec_n': 9,
                        'bitrate': 8000, 'power': 40}
         logger.log(
             timestamp_ms=ts, best_rssi=-50, best_snr=20, min_rssi=-55,
             num_antennas=2, all_packets=1000, lost_packets=0,
-            fec_rec_packets=0, fec_k=fec_k, fec_n=fec_n,
+            fec_rec_packets=0, fec_k=8, fec_n=12,
             loss_rate=loss_rate, fec_pressure=0.0,
             snr_ema=20.0, snr_slope=0.0,
             margin_current=4.0, margin_target=4.0, emergency=False,
@@ -510,13 +501,12 @@ class TestTelemetryLoggerNewSession:
                    'bitrate': 12000, 'power': 30}
         logger = TelemetryLogger(self.tmpdir, rotate_mb=50, outcome_window=10)
 
-        # Trigger a profile change and let FEC confirm immediately
-        self._log_tick(logger, ts=1000, changed=True, profile=profile,
-                       fec_k=8, fec_n=12)
+        # Trigger a profile change — outcome starts immediately
+        self._log_tick(logger, ts=1000, changed=True, profile=profile)
         # Feed a few outcome ticks
         for i in range(3):
             self._log_tick(logger, ts=1100 + i * 100, loss_rate=0.01,
-                           profile=profile, fec_k=8, fec_n=12)
+                           profile=profile)
 
         # Rotate — should finalize the partial outcome into telemetry_0
         logger.new_session()

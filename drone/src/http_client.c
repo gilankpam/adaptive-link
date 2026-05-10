@@ -17,7 +17,6 @@
 #include <sys/select.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <netdb.h>
 
 #define HTTP_REQUEST_SIZE 1024
 #define HTTP_RECV_BUFFER 4096
@@ -77,27 +76,15 @@ int http_get(const char *host, int port, const char *path,
     int bytes_received = 0;
     int total_received = 0;
 
-    /* Resolve host via getaddrinfo() — thread-safe, unlike gethostbyname().
-     * The profile worker and tx_monitor both call into this path. */
-    struct addrinfo hints;
-    struct addrinfo *res = NULL;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-
-    int gai = getaddrinfo(host, NULL, &hints, &res);
-    if (gai != 0 || res == NULL) {
-        fprintf(stderr, "http_get: getaddrinfo failed for %s: %s\n",
-                host, gai_strerror(gai));
-        if (res) freeaddrinfo(res);
-        return -1;
-    }
-
+    /* The majestic camera API always runs on the same SoC as this daemon, so
+     * pin the TCP peer to 127.0.0.1 and skip name resolution entirely.
+     * getaddrinfo() used to be called here; on boards with a stale /etc/hosts
+     * or broken resolv.conf that could stall for seconds on every call.
+     * The `host` parameter is still used below for the HTTP Host: header. */
     memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(port);
-    server_addr.sin_addr = ((struct sockaddr_in *)res->ai_addr)->sin_addr;
-    freeaddrinfo(res);
+    server_addr.sin_addr.s_addr = htonl(0x7f000001);  /* 127.0.0.1 */
 
     // Create socket
     sock = socket(AF_INET, SOCK_STREAM, 0);

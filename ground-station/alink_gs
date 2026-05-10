@@ -47,8 +47,17 @@ PHY_RATES_40MHZ = [
 # Default video frame rate (used when handshake not synced, and as fallback)
 _VIDEO_FPS = 90
 
-# WFB-NG MTU payload byte size (standard for OpenIPC)
+# Default WFB-NG MTU payload byte size — standard 1500-byte Ethernet minus
+# IP/UDP headers, the normal OpenIPC setup. Majestic configured for wfb-ng
+# mlink mode can emit much larger UDP payloads (up to ~3893 bytes), in which
+# case set mtu_payload_bytes in the [dynamic] section of alink_gs.conf.
+# wfb-ng's own ceiling is MAX_FEC_PAYLOAD ≈ 3996 bytes; oversized packets are
+# truncated by wfb_tx.
 MTU_PAYLOAD_BYTES = 1446
+
+# Absolute upper bound for mtu_payload_bytes config — wfb-ng's MAX_FEC_PAYLOAD
+# leaves room for a wpacket_hdr_t, so stay comfortably below the raw ceiling.
+MTU_PAYLOAD_BYTES_MAX = 3900
 
 REQUIRED_SECTIONS = {
     'outgoing', 'wfb-ng', 'keyframe', 'profile selection', 'dynamic', 'gate',
@@ -79,10 +88,12 @@ class TelemetryLogger:
     labeling that tracks link quality in the ticks following a profile change.
     """
 
-    def __init__(self, log_dir, rotate_mb=50, outcome_window=10, confirm_timeout=10):
+    def __init__(self, log_dir, rotate_mb=50, outcome_window=10,
+                 adaptive_params=None):
         self.log_dir = log_dir
         self.rotate_bytes = rotate_mb * 1024 * 1024
         self.outcome_window = outcome_window
+        self._adaptive = adaptive_params
         self._file = None
         self._file_size = 0
         self._file_index = 0
@@ -91,12 +102,6 @@ class TelemetryLogger:
         self._outcome_ticks_remaining = 0
         self._outcome_losses = []
         self._outcome_change_record = None
-        self._pending_outcomes = []  # completed outcome labels to flush
-
-        # FEC confirmation state
-        self._pending_confirm = None
-        self._confirm_timeout_ticks = confirm_timeout
-        self._confirm_ticks_waited = 0
 
         os.makedirs(log_dir, exist_ok=True)
         self._open_file()
@@ -163,33 +168,13 @@ class TelemetryLogger:
 
         self._write_record(record)
 
-        # Outcome tracking with FEC confirmation
+        # Outcome tracking — start immediately on profile change
         if profile_changed:
-            # Finalize any pending outcome or confirmation
             self._finalize_outcome()
-            self._pending_confirm = None
-            # Start waiting for FEC confirmation
             if profile is not None:
-                self._pending_confirm = {
-                    'ts': timestamp_ms,
-                    'fec_k': profile['fec_k'],
-                    'fec_n': profile['fec_n'],
-                }
-                self._confirm_ticks_waited = 0
-
-        # Check for FEC confirmation
-        if self._pending_confirm is not None:
-            self._confirm_ticks_waited += 1
-            if (fec_k == self._pending_confirm['fec_k'] and
-                    fec_n == self._pending_confirm['fec_n']):
-                # Confirmed — start outcome window
                 self._outcome_ticks_remaining = self.outcome_window
                 self._outcome_losses = []
-                self._outcome_change_record = {'ts': self._pending_confirm['ts']}
-                self._pending_confirm = None
-            elif self._confirm_ticks_waited >= self._confirm_timeout_ticks:
-                # Timeout — discard, profile wasn't applied
-                self._pending_confirm = None
+                self._outcome_change_record = {'ts': timestamp_ms}
 
         if self._outcome_ticks_remaining > 0:
             self._outcome_losses.append(loss_rate)
@@ -216,6 +201,11 @@ class TelemetryLogger:
             'label': label,
             'ticks': len(self._outcome_losses),
         }
+        if self._adaptive and self._adaptive._last_outcome:
+            last = self._adaptive._last_outcome
+            outcome['adaptive_outcome'] = 'bad' if last['had_loss'] else 'good'
+            outcome['adaptive_group'] = last['group']
+            outcome['adaptive'] = last['params']
         self._write_record(outcome)
         self._outcome_change_record = None
         self._outcome_losses = []
@@ -223,7 +213,6 @@ class TelemetryLogger:
     def new_session(self):
         """Drone restarted — finalize pending outcomes and rotate to a new file."""
         self._finalize_outcome()
-        self._pending_confirm = None
         if self._file:
             self._file.close()
         self._file_index += 1
@@ -231,7 +220,6 @@ class TelemetryLogger:
 
     def close(self):
         self._finalize_outcome()
-        self._pending_confirm = None
         if self._file:
             self._file.close()
             self._file = None
@@ -446,6 +434,138 @@ class HandshakeClient:
         return False
 
 
+# ─── Adaptive margin (online learning) ─────────────────────────────────────
+
+class AdaptiveParam:
+    """A single learnable scalar parameter.
+
+    Adjusts value based on binary outcome feedback (packet loss or not).
+    increase_on_bad controls the "safe" direction for this parameter:
+      True  = increase on bad, decrease on good (e.g. safety margin)
+      False = decrease on bad, increase on good (e.g. utilization factor)
+    """
+
+    def __init__(self, value, lr_up=0.5, lr_down=0.05,
+                 bounds=(0.0, 100.0), increase_on_bad=True, group=None):
+        self.value = float(value)
+        self.lr_up = lr_up
+        self.lr_down = lr_down
+        self.bounds = bounds
+        self.increase_on_bad = increase_on_bad
+        self.group = group
+
+    def update(self, had_loss):
+        """Adjust value based on outcome.
+
+        Bad (had_loss=True): move toward safety by lr_up.
+        Good (had_loss=False): move toward throughput by lr_down.
+        """
+        if had_loss:
+            delta = self.lr_up if self.increase_on_bad else -self.lr_up
+        else:
+            delta = -self.lr_down if self.increase_on_bad else self.lr_down
+        self.value = max(self.bounds[0], min(self.bounds[1], self.value + delta))
+
+
+class AdaptiveParams:
+    """Container for multiple learnable parameters with shared outcome tracking.
+
+    Owns the FEC confirmation + outcome window logic (shared across all params).
+    After each outcome, updates every registered AdaptiveParam and persists.
+    """
+
+    def __init__(self, outcome_window=10, persist_path=''):
+        self.params = {}
+        self.outcome_window = outcome_window
+        self.persist_path = persist_path
+
+        # Outcome window state
+        self._outcome_active = False
+        self._outcome_ticks_remaining = 0
+        self._outcome_had_loss = False
+        self._mcs_changed = True
+
+        self._last_outcome = None
+        self._persisted_data = {}
+        if persist_path:
+            self._load(persist_path)
+
+    def add(self, name, param):
+        """Register a learnable parameter."""
+        self.params[name] = param
+        if name in self._persisted_data:
+            param.value = max(param.bounds[0],
+                              min(param.bounds[1], self._persisted_data[name]))
+
+    def get(self, name):
+        """Get the current value of a parameter."""
+        return self.params[name].value
+
+    def on_profile_changed(self, mcs_changed=True):
+        """Start outcome tracking for a profile change."""
+        if self._outcome_active:
+            self._finalize()
+        self._outcome_active = True
+        self._outcome_ticks_remaining = self.outcome_window
+        self._outcome_had_loss = False
+        self._mcs_changed = mcs_changed
+
+    def tick(self, loss_rate):
+        """Per-tick update: outcome collection."""
+        if self._outcome_active and self._outcome_ticks_remaining > 0:
+            if loss_rate > 0:
+                self._outcome_had_loss = True
+            self._outcome_ticks_remaining -= 1
+            if self._outcome_ticks_remaining == 0:
+                self._finalize()
+
+    def _finalize(self):
+        """Finalize outcome and update only the relevant param group."""
+        if not self._outcome_active:
+            return
+        self._outcome_active = False
+
+        had_loss = self._outcome_had_loss
+        self._outcome_ticks_remaining = 0
+        self._outcome_had_loss = False
+
+        target_group = 'mcs_gate' if self._mcs_changed else 'profile_compute'
+
+        old_values = {name: p.value for name, p in self.params.items()}
+        for param in self.params.values():
+            if param.group is None or param.group == target_group:
+                param.update(had_loss)
+
+        self._last_outcome = {
+            'had_loss': had_loss,
+            'group': target_group,
+            'params': {
+                name: {'value': round(p.value, 6),
+                       'delta': round(p.value - old_values[name], 6)}
+                for name, p in self.params.items()
+            },
+        }
+
+        if self.persist_path:
+            self.save(self.persist_path)
+
+    def save(self, path):
+        """Persist all learned values to a single JSON file."""
+        data = {name: p.value for name, p in self.params.items()}
+        with open(path, 'w') as f:
+            json.dump(data, f)
+
+    def _load(self, path):
+        """Load persisted values if file exists."""
+        if not os.path.isfile(path):
+            return
+        try:
+            with open(path) as f:
+                self._persisted_data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+
+
 class ProfileSelector:
     """Two-channel gate profile selector.
 
@@ -505,6 +625,17 @@ class ProfileSelector:
         self.loss_threshold_for_fec_downgrade = config.getfloat(d, 'loss_threshold_for_fec_downgrade')
         self.fec_redundancy_ratio = config.getfloat(d, 'fec_redundancy_ratio')
         self.utilization_factor = config.getfloat(d, 'utilization_factor')
+        self.mtu_payload_bytes = config.getint(
+            d, 'mtu_payload_bytes', fallback=MTU_PAYLOAD_BYTES)
+        if self.mtu_payload_bytes > MTU_PAYLOAD_BYTES_MAX:
+            print(
+                f"WARNING: mtu_payload_bytes={self.mtu_payload_bytes} exceeds "
+                f"wfb-ng max ({MTU_PAYLOAD_BYTES_MAX}); wfb_tx will truncate "
+                f"oversized packets. Clamping for FEC calculations."
+            )
+            self.mtu_payload_bytes = MTU_PAYLOAD_BYTES_MAX
+        self.block_latency_budget_ms = config.getfloat(
+            d, 'block_latency_budget_ms', fallback=5.0)
 
         # Hardware / adapter limits
         hw = 'hardware'
@@ -517,6 +648,50 @@ class ProfileSelector:
         self.max_fec_redundancy = config.getfloat(hw, 'max_fec_redundancy',
                                                   fallback=0.5)
         self.max_fec_n = config.getint(hw, 'max_fec_n', fallback=50)
+
+        # Adaptive parameters (online learning)
+        ml = 'ml'
+        self._adaptive = AdaptiveParams(
+            outcome_window=config.getint(ml, 'outcome_window_ticks', fallback=10),
+            persist_path=config.get(ml, 'persist_path',
+                                    fallback='/etc/alink_adaptive.json'),
+        )
+        self._adaptive.add('snr_safety_margin', AdaptiveParam(
+            value=self.snr_safety_margin,
+            lr_up=config.getfloat(ml, 'snr_safety_margin_lr_up', fallback=0.5),
+            lr_down=config.getfloat(ml, 'snr_safety_margin_lr_down', fallback=0.05),
+            bounds=(config.getfloat(ml, 'snr_safety_margin_min', fallback=1.0),
+                    config.getfloat(ml, 'snr_safety_margin_max', fallback=10.0)),
+            increase_on_bad=True,
+            group='mcs_gate',
+        ))
+        self._adaptive.add('fec_redundancy_ratio', AdaptiveParam(
+            value=self.fec_redundancy_ratio,
+            lr_up=config.getfloat(ml, 'fec_redundancy_ratio_lr_up', fallback=0.02),
+            lr_down=config.getfloat(ml, 'fec_redundancy_ratio_lr_down', fallback=0.005),
+            bounds=(config.getfloat(ml, 'fec_redundancy_ratio_min', fallback=0.10),
+                    config.getfloat(ml, 'fec_redundancy_ratio_max', fallback=0.50)),
+            increase_on_bad=True,
+            group='profile_compute',
+        ))
+        self._adaptive.add('utilization_factor', AdaptiveParam(
+            value=self.utilization_factor,
+            lr_up=config.getfloat(ml, 'utilization_factor_lr_up', fallback=0.05),
+            lr_down=config.getfloat(ml, 'utilization_factor_lr_down', fallback=0.01),
+            bounds=(config.getfloat(ml, 'utilization_factor_min', fallback=0.2),
+                    config.getfloat(ml, 'utilization_factor_max', fallback=0.9)),
+            increase_on_bad=False,
+            group='profile_compute',
+        ))
+        self._adaptive.add('hysteresis_up_db', AdaptiveParam(
+            value=self.hysteresis_up_db,
+            lr_up=config.getfloat(ml, 'hysteresis_up_db_lr_up', fallback=0.3),
+            lr_down=config.getfloat(ml, 'hysteresis_up_db_lr_down', fallback=0.05),
+            bounds=(config.getfloat(ml, 'hysteresis_up_db_min', fallback=0.5),
+                    config.getfloat(ml, 'hysteresis_up_db_max', fallback=6.0)),
+            increase_on_bad=True,
+            group='mcs_gate',
+        ))
 
         # Link state (updated by evaluate_link, consumed by _compute_profile and select)
         self.snr_ema = 0.0
@@ -540,36 +715,46 @@ class ProfileSelector:
         return round(self.dyn_max_power - t * (self.dyn_max_power - self.dyn_min_power))
 
     def _compute_fec_from_bitrate(self, bitrate_bps, redundancy_ratio=None):
-        """Compute FEC K,N from bitrate using frame-proportional block sizing.
+        """Compute FEC K,N from bitrate using a latency-targeted block size.
 
-        Sizes K to match the expected number of packets per video frame.
-        This is a block-sizing heuristic — wfb-ng forms FEC blocks purely
-        sequentially, so K does not create actual alignment with video
-        frame boundaries.  Larger K gives better burst-loss tolerance at
-        the cost of higher recovery latency when FEC is needed.
+        Sizes K so that the wfb-ng TX block completes in
+        `block_latency_budget_ms`. wfb-ng airs every source packet immediately
+        on arrival; K only gates recovery latency when packets are lost (the
+        RX must wait for the whole block to close before FEC decode can run).
+        Pinning block-completion time to a small constant keeps loss recovery
+        fast across all MCS levels, instead of the former 1-block-per-frame
+        heuristic which pinned it to ~one frame period.
+
+        An additional cap keeps K ≤ packets_per_frame so a generous budget
+        can't oversize the block beyond one video frame.
 
         Args:
             bitrate_bps: Target video bitrate in bits per second
-            redundancy_ratio: FEC redundancy ratio (default: self.fec_redundancy_ratio)
+            redundancy_ratio: FEC redundancy ratio (default: adaptive fec_redundancy_ratio)
 
         Returns:
             Tuple of (fec_k, fec_n) integers
         """
-        # Use config value if not provided
         if redundancy_ratio is None:
-            redundancy_ratio = self.fec_redundancy_ratio
+            redundancy_ratio = self._adaptive.get('fec_redundancy_ratio')
 
-        # Step 1: Packets per frame = bitrate / (fps * 8 * mtu)
+        packets_per_sec = bitrate_bps / (8 * self.mtu_payload_bytes)
+
+        # Latency-targeted K: block completes in block_latency_budget_ms.
+        k_by_latency = round(self.block_latency_budget_ms / 1000.0 * packets_per_sec)
+
+        # Cap at one block per frame so a large budget can't make K exceed
+        # the frame size (wasteful — parity would straddle video frames for
+        # no extra recovery benefit).
         video_fps = self.handshake.get_fps()
-        packets_per_frame = bitrate_bps / (video_fps * 8 * MTU_PAYLOAD_BYTES)
+        k_by_frame = round(packets_per_sec / video_fps)
 
-        # Step 2: K = ceil(packets_per_frame) — proportional block sizing
-        fec_k = max(2, math.ceil(packets_per_frame))
+        fec_k = max(2, min(k_by_latency, k_by_frame))
 
-        # Step 3: Apply configurable redundancy ratio
-        # N = K / (1 - redundancy_ratio)
-        # For 25% redundancy (0.25): N = K / 0.75 = K * 1.333...
-        fec_n = math.ceil(fec_k / (1 - redundancy_ratio))
+        # At least one parity packet; otherwise scale N for the configured
+        # redundancy. For K=2 the math rounds to N=3 (33%) — unavoidable with
+        # integer parity — so we always pay at least fec_k+1.
+        fec_n = max(fec_k + 1, math.ceil(fec_k / (1 - redundancy_ratio)))
 
         return fec_k, fec_n
 
@@ -590,8 +775,8 @@ class ProfileSelector:
         loss_rate = self._current_loss_rate
         fec_pressure = self._current_fec_pressure
 
-        # Dynamic safety margin — widens when link is stressed
-        margin = (self.snr_safety_margin +
+        # Dynamic safety margin — adapts via online learning
+        margin = (self._adaptive.get('snr_safety_margin') +
                   loss_rate * self.loss_margin_weight +
                   fec_pressure * self.fec_margin_weight)
 
@@ -616,21 +801,29 @@ class ProfileSelector:
         phy_rate = phy_rates[mcs][1 if use_short_gi else 0]
 
         # Raw air capacity in bps (PHY rate × utilization factor)
-        link_bandwidth_bps = int(1000 * 1000 * phy_rate * self.utilization_factor)
+        link_bandwidth_bps = int(1000 * 1000 * phy_rate *
+                                 self._adaptive.get('utilization_factor'))
 
         # Target video bitrate = raw capacity × (1 - redundancy_ratio),
         # capped at max_bitrate so FEC blocks are sized for the actual
         # encoder output, not the theoretical link capacity.
-        target_bitrate_bps = int(link_bandwidth_bps * (1 - self.fec_redundancy_ratio))
+        target_bitrate_bps = int(link_bandwidth_bps *
+                                 (1 - self._adaptive.get('fec_redundancy_ratio')))
         target_bitrate_bps = min(target_bitrate_bps, self.dyn_max_bitrate * 1000)
 
-        # FEC block sizing proportional to video frame packet count
-        # (wfb-ng blocks are sequential, not aligned to frame boundaries)
+        # FEC block sizing targets a constant block-completion time
+        # (block_latency_budget_ms). Keeps loss-recovery latency flat across
+        # MCS; clean-link latency is unaffected (wfb-ng airs sources
+        # immediately, K only gates recovery).
         fec_k, fec_n = self._compute_fec_from_bitrate(target_bitrate_bps)
 
-        # Increase redundancy under loss (reduce K, keep N constant)
+        # Under loss, add parity (N+=1) instead of shrinking K. Both add
+        # one recoverable loss per block, but N+=1 keeps K (and therefore
+        # t_block) at the operator's block_latency_budget_ms, isolating the
+        # loss reaction to the redundancy knob. It also disrupts the
+        # encoder bitrate less: K/N drops by ~14% vs ~25% for K-=1.
         if loss_rate > self.loss_threshold_for_fec_downgrade:
-            fec_k = max(2, fec_k - 1)
+            fec_n = fec_n + 1
 
         # Enforce max_fec_redundancy
         # Calculate actual redundancy ratio
@@ -698,15 +891,18 @@ class ProfileSelector:
             self._snr_slope = (self.snr_slope_alpha * delta +
                                (1.0 - self.snr_slope_alpha) * self._snr_slope)
 
+        # Feed adaptive params outcome tracker
+        self._adaptive.tick(self._current_loss_rate)
+
     def _margin(self, mcs):
         """SNR margin (dB) above the threshold required for the given MCS.
 
-        Uses the same stress-widening formula as _compute_profile() so the
-        gate and the parameter mapper share a single source of truth.
+        Uses the same adaptive margin as _compute_profile() so the gate and
+        the parameter mapper share a single source of truth.
         """
         if mcs < 0 or mcs >= len(MCS_SNR_THRESHOLDS):
             return 0.0
-        stress_margin = (self.snr_safety_margin +
+        stress_margin = (self._adaptive.get('snr_safety_margin') +
                          self._current_loss_rate * self.loss_margin_weight +
                          self._current_fec_pressure * self.fec_margin_weight)
         return self.snr_ema - MCS_SNR_THRESHOLDS[mcs] - stress_margin
@@ -755,7 +951,7 @@ class ProfileSelector:
                 # Upgrade: require headroom above threshold + predictive check
                 tgt_margin = self._margin(new_idx)
                 predicted = tgt_margin + self._snr_slope * self.snr_predict_horizon_ticks
-                if tgt_margin < self.hysteresis_up_db or predicted < 0:
+                if tgt_margin < self._adaptive.get('hysteresis_up_db') or predicted < 0:
                     # Not enough headroom — still feed confidence counter so that
                     # when headroom arrives the upgrade can fire quickly.
                     self._try_confidence_feed(new_idx)
@@ -777,6 +973,8 @@ class ProfileSelector:
             self.current_profile = new_profile
             if params_changed:
                 self.last_change_time_ms = now_ms
+                if not emergency:
+                    self._adaptive.on_profile_changed(mcs_changed=False)
                 return True, self.current_profile_idx, self.current_profile
             return False, self.current_profile_idx, self.current_profile
 
@@ -819,6 +1017,11 @@ class ProfileSelector:
         self.last_mcs_change_time_ms = now_ms
         self.up_confidence_count = 0
         self.up_target_profile = -1
+
+        # Start adaptive params outcome tracking (skip emergency — those are
+        # Channel B triggered, not margin-driven)
+        if not emergency:
+            self._adaptive.on_profile_changed(mcs_changed=True)
 
         return True, new_idx, new_profile
 
@@ -1184,7 +1387,8 @@ if __name__ == "__main__":
         log_dir = config.get('telemetry', 'log_dir', fallback='/var/log/alink')
         rotate_mb = config.getint('telemetry', 'log_rotate_mb', fallback=50)
         outcome_window = config.getint('telemetry', 'outcome_window_ticks', fallback=10)
-        telemetry_logger = TelemetryLogger(log_dir, rotate_mb, outcome_window)
+        telemetry_logger = TelemetryLogger(log_dir, rotate_mb, outcome_window,
+                                           adaptive_params=profile_selector._adaptive)
         print(f"Telemetry logging enabled: {log_dir}")
 
     # Global state variables

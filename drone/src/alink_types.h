@@ -45,7 +45,6 @@
 
 /* ─── Named magic numbers ─── */
 #define ANTENNA_SPREAD_THRESHOLD_DB   20
-#define HIGH_RES_PIXEL_THRESHOLD      1300000
 #define NUM_ANTENNA_SLOTS             4
 #define RSSI_HISTORY_SIZE             20
 

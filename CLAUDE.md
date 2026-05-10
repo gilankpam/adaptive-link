@@ -92,7 +92,7 @@ The GS computes profile parameters from real-time link metrics using `_compute_p
 
 - **MCS selection:** Uses 802.11n SNR thresholds with configurable safety margin that widens under link stress (params in `[gate]`: `snr_safety_margin`, `loss_margin_weight`, `fec_margin_weight`, `max_mcs`)
 - **Guard interval:** Short GI selected when SNR margin is comfortable and loss/FEC pressure are below configurable thresholds (params in `[dynamic]`: `short_gi_snr_margin`, `short_gi_max_loss`, `short_gi_max_fec_pressure`)
-- **FEC adjustment:** Frame-proportional block sizing (`_compute_fec_from_bitrate()`) — K is set to the expected packets per video frame as a block-sizing heuristic. wfb-ng forms blocks sequentially with no frame awareness; larger K gives better burst-loss tolerance. See `docs/FEC_CALCULATION.md`
+- **FEC adjustment:** Latency-targeted block sizing (`_compute_fec_from_bitrate()`) — K is sized so TX block-completion time equals `[dynamic]` `block_latency_budget_ms` (default 5), capped at one-block-per-frame. wfb-ng airs source packets immediately (they don't wait for K), so K only gates post-loss recovery latency on the RX; pinning `t_block` to a constant keeps recovery latency flat across MCS instead of scaling with 1/fps. `N = max(K+1, ceil(K / (1 - fec_redundancy_ratio)))`, and the loss-reaction path bumps N (more parity) rather than decrementing K: both add one recoverable loss per block, but N+=1 leaves `t_block` at the budget and disrupts the encoder bitrate less (~14% vs ~25% K/N drop). UDP packet size comes from `[dynamic]` `mtu_payload_bytes` (default 1446; set to the encoder's actual outgoing size on wfb-ng mlink setups, not wfb-ng's MAX_FEC_PAYLOAD ceiling). See `docs/FEC_CALCULATION.md`
 - **Bitrate computation:** Derived from PHY rate × utilization factor × FEC efficiency (K/N ratio)
 - **Power scaling:** Linear inverse scaling with MCS level for link stability (params in `[hardware]`: `max_power`, `min_power`)
 - **MCS step limiting:** Configurable `max_mcs_step_up` (in `[gate]`) prevents rapid upward transitions that cause power-coupling oscillation
@@ -101,11 +101,15 @@ This mode makes `profiles/default.conf` optional and provides finer-grained adap
 
 ### Command Template System
 
-Settings are applied via shell commands with placeholder substitution (`{mcs}`, `{bitrate}`, `{power}`, etc.) defined in `config/alink.conf`. Templates call into wfb-ng CLI (`wfb_tx_cmd`), the OpenIPC camera API (via native HTTP client), and `iw` for power control.
+Settings are applied via a mix of direct UDP to the wfb_tx daemon (FEC, MCS/radio) and shell commands with placeholder substitution (FPS, power, IDR, batched API). Templates in `config/alink.conf` call into the OpenIPC camera API (native HTTP client) and `iw` for power control.
 
-**API batching:** The `apiCommandTemplate` batches multiple camera parameters (qpDelta, bitrate, gop, roiQp) into a single HTTP request for efficiency.
+**Direct wfb_tx control:** `cmd_wfb_set_fec()` and `cmd_wfb_set_radio()` (in `command.c`) build the 7-byte / 12-byte packed request and send it to `127.0.0.1:wfbControlPort` (default 8000), waiting ~100 ms via `SO_RCVTIMEO` for the daemon's 8-byte reply (echoed `req_id` + network-order `rc`). Replaces the former `wfb_tx_cmd` subprocess entirely — no fork/exec, no shell. Auto-VHT rule from `wfb_tx_cmd` is preserved: `apply_mcs_step` sets `vht_mode = (bandwidth >= 80)`, `vht_nss = 1`. `cmd_wfb_get_stats()` shares the same transport but asks for `CMD_GET_STATS` (opcode 5, wfb-ng patch) and receives an extended reply with 6 × uint64 cumulative counters for stutter/latency diagnostics (`p_fec_timeouts`, `p_incoming`, `p_injected`, `b_injected`, `p_dropped`, `p_truncated`); failures (old wfb_tx replying ENOTSUP) surface via non-zero rc so callers degrade gracefully.
 
-**Timeout execution:** All commands use `cmd_exec_with_timeout()` with millisecond-precision timeout via fork/exec. The legacy `cmd_exec()` and `cmd_exec_noquote()` functions have been removed.
+**API batching:** The `apiCommandTemplate` batches multiple camera parameters (qpDelta, bitrate, gop, roiQp) into a single HTTP request for efficiency. Templates in `alink.conf` are path-only (e.g. `/api/v1/set?...`, `/request/idr`); majestic always runs on the same SoC, so `http_client.c` pins the TCP peer to `127.0.0.1` and no longer calls `getaddrinfo`. Legacy `http://localhost/...` full-URL templates are still accepted — the scheme+host prefix is skipped transparently.
+
+**Timeout execution:** Shell commands use `cmd_exec_with_timeout()` with millisecond-precision timeout via fork/exec. The legacy `cmd_exec()` and `cmd_exec_noquote()` functions have been removed.
+
+**Two mutexes, decoupled:** `cmd_ctx_t` carries an `exec_mutex` (covers `cmd_exec_with_timeout` + `cmd_http_get` — majestic and `iw` are neither concurrency-safe) and a `wfb_mutex` (covers `cmd_wfb_*` — the wfb_tx control socket's `req_id` matching is stateful and must be serialised among wfb ops only). Splitting them prevents OSD's per-second `cmd_wfb_get_stats` from queuing behind the profile worker's HTTP call, and vice versa. The `pace_exec_us` `usleep` for driver-settle runs AFTER releasing `exec_mutex` and is skipped entirely on `cmd_http_get` / `cmd_wfb_*` (localhost HTTP and UDP need no settle).
 
 **Trust model:** Substituted values flow unescaped into `/bin/sh -c`. The GS is trusted; placeholder values originate from `_compute_profile()` and reference tables, not user input. Templates must come from operator-controlled `/etc/alink.conf` — a malicious config file is equivalent to shell access. The `customOSD` field is the one exception: it feeds a runtime `snprintf`, so `customosd_format_is_safe()` in `config.c` rejects anything but `%d`/`%i`/`%%` and caps the spec count at 2, closing format-string injection. `replace_placeholder()` checks its post-substitution length against `MAX_COMMAND_SIZE` and logs + aborts on overflow instead of silently truncating.
 
@@ -139,7 +143,7 @@ The `TelemetryLogger` class provides ML-ready data collection:
 
 | File | Deployed to | Purpose |
 |------|------------|---------|
-| `config/alink.conf` | `/etc/alink.conf` | Drone daemon settings and command templates |
+| `config/alink.conf` | `/etc/alink.conf` | Drone daemon settings, `wfbControlPort` (default 8000), and shell command templates (FPS/power/IDR/API) |
 | `config/alink_gs.conf` | `/etc/alink_gs.conf` | GS config: `[gate]` (SNR smoothing, margin, hysteresis, MCS limits), `[profile selection]` (temporal gates), `[dynamic]` (GI/FEC/bitrate tuning), `[hardware]` (adapter limits), `[handshake]`, `[telemetry]` |
 | `profiles/default.conf` | `/etc/txprofiles.conf` | Score-to-profile mapping (multiple presets in `profiles/`) |
 | `config/wlan_adapters.yaml` | `/etc/wlan_adapters.yaml` | WiFi adapter power tables and capabilities |
@@ -184,9 +188,9 @@ The GS and drone exchange handshake messages to obtain current video parameters 
 
 The client tracks `_pending_t1` for the outstanding hello. Only replies whose echoed `t1` matches the latest pending hello are accepted; anything else bumps `unmatched_replies` and is dropped (catches duplicates/stale datagrams). Result: a single lost hello/reply recovers in <1 s instead of 30 s. `_drain_handshake_replies` runs unconditionally from the main loop (not gated on `receiving_video`) so replies don't rot in the kernel buffer during a video stall.
 
-### Camera info refreshed on every hello
+### Camera info refreshed on the OSD thread
 
-The drone re-queries camera FPS/resolution via `hw_refresh_camera_info()` inside `msg_handle_hello` (between the `t2` and `t3` stamps). A 2-second TTL cache coalesces bursts during fast retries. This fixes the silent-staleness bug where a runtime camera reconfig would leave the GS sizing FEC for the boot-time FPS forever.
+The drone re-queries camera FPS/resolution via `hw_refresh_camera_info()` from the OSD thread (once per 200 ms OSD tick; an internal ~30 s TTL gates the actual `cli` popen work so most ticks are a no-op). It used to run on the recv thread inside `msg_handle_hello`, but the `popen("cli …")` fork/exec stalled profile-message intake on weak SoCs every time the TTL expired — especially bad under weak-link stress when the GS is sending frequent profile changes. The hello reply reads whatever's currently cached; stale-by-one-TTL values are acceptable since runtime camera reconfigs are rare. `hw_state_t.{x_res, y_res, global_fps}` are marked `volatile` to make the cross-thread read safe; word-aligned int reads are atomic on every target, so no mutex is needed. This still fixes the silent-staleness bug where a runtime camera reconfig would leave the GS sizing FEC for the boot-time FPS forever.
 
 ### RTT (clock-offset-cancelling)
 

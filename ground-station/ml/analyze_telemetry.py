@@ -491,6 +491,150 @@ def plot_failure_timelines(ticks_df, output_dir):
     print(f"  Saved {path}")
 
 
+def plot_adaptive_params(outcomes_df, output_dir):
+    """Visualize adaptive param learning from outcome records.
+
+    Renders one figure showing each param's value trajectory over time with
+    update events colored by causal group (mcs_gate vs profile_compute) and
+    outcome (good/bad), plus a second figure with per-group outcome counts
+    and per-param update statistics.
+    """
+    if outcomes_df.empty or 'adaptive' not in outcomes_df.columns:
+        print("  Skipping adaptive params — no adaptive outcome data")
+        return
+
+    # Keep only rows that actually carry adaptive data
+    df = outcomes_df[outcomes_df['adaptive'].notna()].copy()
+    if df.empty:
+        print("  Skipping adaptive params — no adaptive outcome data")
+        return
+
+    df = df.reset_index(drop=True)
+    df['adaptive_group'] = df.get('adaptive_group', 'unknown').fillna('unknown')
+    df['adaptive_outcome'] = df.get('adaptive_outcome', 'unknown').fillna('unknown')
+
+    # Flatten adaptive dict into per-param value/delta columns
+    param_names = sorted({k for row in df['adaptive'] for k in row.keys()})
+    if not param_names:
+        print("  Skipping adaptive params — adaptive records empty")
+        return
+
+    for name in param_names:
+        df[f'{name}_value'] = df['adaptive'].apply(
+            lambda d, n=name: d.get(n, {}).get('value') if isinstance(d, dict) else None)
+        df[f'{name}_delta'] = df['adaptive'].apply(
+            lambda d, n=name: d.get(n, {}).get('delta') if isinstance(d, dict) else None)
+
+    # --- Figure 1: per-param value trajectories ---
+    n = len(param_names)
+    ncols = 2
+    nrows = (n + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(14, 4 * nrows), squeeze=False)
+
+    # Map each (group, outcome) combo to a color
+    color_map = {
+        ('mcs_gate', 'good'): '#2ca02c',
+        ('mcs_gate', 'bad'): '#d62728',
+        ('profile_compute', 'good'): '#1f77b4',
+        ('profile_compute', 'bad'): '#ff7f0e',
+    }
+
+    x = np.arange(len(df))
+
+    for i, name in enumerate(param_names):
+        ax = axes[i // ncols, i % ncols]
+        values = df[f'{name}_value']
+        deltas = df[f'{name}_delta'].fillna(0)
+
+        # Line shows the current param value over outcome sequence
+        ax.plot(x, values, color='gray', linewidth=1.0, alpha=0.6, zorder=1)
+
+        # Scatter highlights outcomes where this param actually moved
+        moved = deltas.abs() > 1e-9
+        for (group, outcome), color in color_map.items():
+            mask = moved & (df['adaptive_group'] == group) & (df['adaptive_outcome'] == outcome)
+            if mask.any():
+                ax.scatter(x[mask], values[mask], c=color, s=30, alpha=0.85,
+                           label=f'{group}/{outcome}', zorder=3,
+                           edgecolor='black', linewidth=0.3)
+
+        ax.set_title(name, fontsize=10, fontweight='bold')
+        ax.set_xlabel('Outcome index')
+        ax.set_ylabel('Value')
+        ax.grid(alpha=0.3)
+        if i == 0:
+            ax.legend(fontsize=7, loc='best')
+
+    # Hide any unused subplots
+    for j in range(n, nrows * ncols):
+        axes[j // ncols, j % ncols].set_visible(False)
+
+    plt.tight_layout()
+    path = os.path.join(output_dir, 'adaptive_params_timeseries.png')
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"  Saved {path}")
+
+    # --- Figure 2: outcome breakdown + per-param update counts ---
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+    # Plot 1: outcome counts by group
+    ax = axes[0]
+    groups = ['mcs_gate', 'profile_compute']
+    outcomes_types = ['good', 'bad']
+    width = 0.35
+    xg = np.arange(len(groups))
+    good_counts = [((df['adaptive_group'] == g) & (df['adaptive_outcome'] == 'good')).sum()
+                   for g in groups]
+    bad_counts = [((df['adaptive_group'] == g) & (df['adaptive_outcome'] == 'bad')).sum()
+                  for g in groups]
+    ax.bar(xg - width/2, good_counts, width, label='good', color='#2ca02c')
+    ax.bar(xg + width/2, bad_counts, width, label='bad', color='#d62728')
+    ax.set_xticks(xg)
+    ax.set_xticklabels(groups)
+    ax.set_ylabel('Outcome count')
+    ax.set_title('Outcomes by Causal Group')
+    ax.legend()
+    for i, (g, b) in enumerate(zip(good_counts, bad_counts)):
+        total = g + b
+        pct_bad = 100 * b / total if total > 0 else 0
+        ax.text(i, max(g, b), f'{pct_bad:.0f}% bad', ha='center', va='bottom', fontsize=8)
+
+    # Plot 2: number of times each param actually moved
+    ax = axes[1]
+    move_counts = [(df[f'{name}_delta'].abs() > 1e-9).sum() for name in param_names]
+    colors = ['#1f77b4' if 'margin' in n or 'hysteresis' in n else '#ff7f0e'
+              for n in param_names]
+    ax.barh(param_names, move_counts, color=colors)
+    ax.set_xlabel('Update count')
+    ax.set_title('Param Update Events')
+    for i, c in enumerate(move_counts):
+        ax.text(c, i, f' {c}', va='center', fontsize=8)
+
+    # Plot 3: cumulative drift per param (final - initial value)
+    ax = axes[2]
+    drifts = []
+    for name in param_names:
+        vals = df[f'{name}_value'].dropna()
+        if len(vals) >= 2:
+            drifts.append(float(vals.iloc[-1]) - float(vals.iloc[0]))
+        else:
+            drifts.append(0.0)
+    bar_colors = ['#2ca02c' if d >= 0 else '#d62728' for d in drifts]
+    ax.barh(param_names, drifts, color=bar_colors)
+    ax.axvline(0, color='black', linewidth=0.5)
+    ax.set_xlabel('Net drift (final − initial)')
+    ax.set_title('Param Convergence Direction')
+    for i, d in enumerate(drifts):
+        ax.text(d, i, f' {d:+.4f}', va='center', fontsize=8)
+
+    plt.tight_layout()
+    path = os.path.join(output_dir, 'adaptive_params_summary.png')
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"  Saved {path}")
+
+
 def generate_summary_report(ticks_df, outcomes_df, output_dir):
     """Generate a markdown summary statistics report."""
     total_ticks = len(ticks_df)
@@ -588,6 +732,7 @@ def main():
     plot_antenna_diversity_analysis(ticks_df, args.output)
     plot_gate_analysis(ticks_df, args.output)
     plot_mcs_transitions(ticks_df, args.output)
+    plot_adaptive_params(outcomes_df, args.output)
     analyze_failure_modes(ticks_df, args.output)
     plot_failure_timelines(ticks_df, args.output)
     generate_summary_report(ticks_df, outcomes_df, args.output)

@@ -35,18 +35,16 @@ bool keyframe_fire_request(keyframe_state_t *ks, const alink_config_t *cfg,
         return false;
     }
 
-    /* Parse the IDR API URL and use native HTTP client */
-    const char *idrApiCommand = cfg->idrApiCommandTemplate;
-    char host[64];
-    int port = 80;
-    char url_path[BUFFER_SIZE];
-
-    if (util_parse_url(idrApiCommand, host, sizeof(host), &port, url_path, sizeof(url_path)) != 0) {
-        ERROR_LOG(cfg, "Failed to parse IDR API URL: %s\n", idrApiCommand);
-        return false;
+    /* Templates are path-only; majestic is always on localhost:80.
+     * Accept legacy http://host/... prefix for backward compat. */
+    const char *url_path = cfg->idrApiCommandTemplate;
+    if (strncmp(url_path, "http://", 7) == 0) {
+        const char *slash = strchr(url_path + 7, '/');
+        url_path = slash ? slash : "/";
     }
-    if (cmd_http_get(host, port, url_path, NULL, 0, cmd) != 0) {
-        ERROR_LOG(cfg, "IDR API request failed: %s:%d%s\n", host, port, url_path);
+
+    if (cmd_http_get("localhost", 80, url_path, NULL, 0, cmd) != 0) {
+        ERROR_LOG(cfg, "IDR API request failed: %s\n", url_path);
         return false;
     }
     return true;

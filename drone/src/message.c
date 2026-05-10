@@ -59,10 +59,11 @@ int msg_handle_hello(const char *payload, size_t payload_len,
         return -1;
     }
 
-    /* Pick up runtime camera reconfigs (FPS/resolution) within the cache TTL.
-     * Any latency this introduces is captured between t2 and t3 and removed
-     * from the GS's RTT calculation. */
-    hw_refresh_camera_info(hw);
+    /* Camera info (fps/x_res/y_res) is refreshed on the OSD thread, not here:
+     * popen("cli …") on the recv thread was blocking profile-message intake
+     * every time the cache TTL expired. Reading whatever's currently cached
+     * is safe — runtime camera reconfigs are rare and stale values for one
+     * TTL window are acceptable. */
 
     /* Stamp t3 as late as possible while still embeddable in the payload.
      * Snprintf/memcpy/frame-build cost is ~µs and falls outside (t3 - t2);

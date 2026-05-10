@@ -10,6 +10,7 @@
 #include "rssi_monitor.h"
 #include "util.h"
 #include "message.h"
+#include "command.h"
 
 /* Channel cache refresh interval (milliseconds) */
 #define CHANNEL_CACHE_INTERVAL_MS 5000
@@ -34,6 +35,16 @@ void osd_init(osd_state_t *os) {
     os->channel_cache_time = 0;
     os->last_osd_string[0] = '\0';
     os->last_string_valid = false;
+
+    /* Debug OSD delta tracking (safe to initialise even when disabled) */
+    os->prev_tx_bytes = 0;
+    os->prev_tx_dropped = 0;
+    os->prev_sample_time_ms = 0;
+    os->debug_samples_valid = false;
+    os->prev_wfb_stats_query_ms = 0;
+    os->wfb_stats_cached.p_fec_timeouts = 0;
+    os->wfb_stats_cached.p_truncated = 0;
+    os->wfb_stats_ok = false;
 }
 
 void osd_error(const char *message) {
@@ -85,6 +96,7 @@ void *osd_thread_func(void *arg) {
     profile_state_t *ps = (profile_state_t *)ta->ps;
     keyframe_state_t *ks = (keyframe_state_t *)ta->ks;
     rssi_state_t *rs = (rssi_state_t *)ta->rs;
+    cmd_ctx_t *cmd = (cmd_ctx_t *)ta->cmd;
 
     struct sockaddr_in udp_out_addr;
     if (osd_config->udp_out_sock != -1) {
@@ -104,6 +116,12 @@ void *osd_thread_func(void *arg) {
 
     while (true) {
         usleep(OSD_REFRESH_INTERVAL_US);
+
+        /* Refresh camera fps/resolution on the OSD thread, not the recv thread.
+         * The internal TTL gates actual `cli` popen work; every other tick is
+         * a fast no-op. Picks up runtime camera reconfigs without stalling
+         * profile-message intake. */
+        hw_refresh_camera_info(hw);
 
         /* Get cached WiFi channel (refreshes every 5 seconds) */
         int wfb_ch = get_cached_channel(os);
@@ -179,6 +197,119 @@ void *osd_thread_func(void *arg) {
         } else if (cfg->osd_level == 1) {
             snprintf(full_osd_string, sizeof(full_osd_string), "%s%s",
                     pos_prefix, local_regular_osd);
+        }
+
+        /* Debug OSD line — appended when debug_osd is enabled. Safe to run at
+         * any osd_level > 0 (stays no-op if osd_level == 0 since nothing is
+         * written below). */
+        if (cfg->debug_osd && cfg->osd_level != 0) {
+            /* Snapshot profile state under worker_mutex: worker thread may
+             * be mid-apply, tx_monitor may be mutating bitrate_reduced. */
+            char snap_gi[sizeof(ps->prevApplied.setGI)];
+            pthread_mutex_lock(&ps->worker_mutex);
+            int snap_fec_k = ps->prevApplied.setFecK;
+            int snap_fec_n = ps->prevApplied.setFecN;
+            int snap_bitrate_kbps = ps->prevApplied.setBitrate;
+            int snap_mcs = ps->prevApplied.setMCS;
+            int snap_bw = ps->prevApplied.bandwidth;
+            strncpy(snap_gi, ps->prevApplied.setGI, sizeof(snap_gi) - 1);
+            snap_gi[sizeof(snap_gi) - 1] = '\0';
+            uint64_t snap_last_apply_ms = ps->last_apply_time_ms;
+            uint32_t snap_apply_count = ps->apply_count;
+            bool snap_br_reduced = ps->bitrate_reduced;
+            pthread_mutex_unlock(&ps->worker_mutex);
+
+            uint64_t now_ms = util_now_ms();
+
+            /* t_block_ms = K × 8 × MTU / bitrate_kbps  (see plan).
+             * Guard against divide-by-zero at startup and negative sentinels. */
+            float t_block_ms = 0.0f;
+            if (snap_fec_k > 0 && snap_bitrate_kbps > 0 && cfg->debug_mtu_payload_bytes > 0) {
+                t_block_ms = (float)snap_fec_k * 8.0f
+                           * (float)cfg->debug_mtu_payload_bytes
+                           / (float)snap_bitrate_kbps;
+            }
+
+            /* Age since last apply. If we've never applied a profile yet
+             * (last_apply_time_ms == 0) show a placeholder. */
+            float age_s = 0.0f;
+            if (snap_last_apply_ms > 0 && now_ms >= snap_last_apply_ms) {
+                age_s = (now_ms - snap_last_apply_ms) / 1000.0f;
+            }
+
+            /* Kernel netdev counters. Rates are derived from the previous
+             * sample so they only become meaningful on the second tick. */
+            long cur_tx_bytes = 0, cur_tx_packets = 0;
+            hw_get_tx_netstats(&cur_tx_bytes, &cur_tx_packets);
+            long cur_tx_dropped = (long)hw->global_total_tx_dropped;
+
+            float tx_mbps = 0.0f;
+            long  xtx_rate = 0;
+            if (os->debug_samples_valid && now_ms > os->prev_sample_time_ms) {
+                double dt_s = (double)(now_ms - os->prev_sample_time_ms) / 1000.0;
+                if (dt_s > 0.0) {
+                    long db = cur_tx_bytes - os->prev_tx_bytes;
+                    long dx = cur_tx_dropped - os->prev_tx_dropped;
+                    if (db < 0) db = 0;  /* counter reset — skip this sample */
+                    tx_mbps = (float)((double)db * 8.0 / 1e6 / dt_s);
+                    xtx_rate = (long)((double)dx / dt_s);
+                }
+            }
+            os->prev_tx_bytes = cur_tx_bytes;
+            os->prev_tx_dropped = cur_tx_dropped;
+            os->prev_sample_time_ms = now_ms;
+            os->debug_samples_valid = true;
+
+            /* Poll wfb_tx CMD_GET_STATS at most once per second. Gated by
+             * debug_osd so the control socket is not touched when disabled. */
+            if (cmd != NULL && (now_ms - os->prev_wfb_stats_query_ms) >= 1000) {
+                wfb_stats_t stats;
+                if (cmd_wfb_get_stats(cmd, &stats) == 0) {
+                    os->wfb_stats_cached.p_fec_timeouts = stats.p_fec_timeouts;
+                    os->wfb_stats_cached.p_truncated    = stats.p_truncated;
+                    os->wfb_stats_ok = true;
+                } else {
+                    /* Don't clear stats_ok — keep the last good values.
+                     * A transient failure shouldn't blank the field. */
+                }
+                os->prev_wfb_stats_query_ms = now_ms;
+            }
+
+            char dbg_line[192];
+            int n;
+            /* Prefix {bw}{gi}{mcs} mirrors the top-line format so the two can
+             * be visually diffed. Skip the prefix while prevApplied still
+             * holds profile_init sentinels (setFecK <= 0). */
+            if (snap_fec_k > 0) {
+                n = snprintf(dbg_line, sizeof(dbg_line),
+                        "DBG %d%s%d K:%d/%d tb:%.1fms age:%.1fs chg:%u tx:%.1fMbps xtx:+%ld/s",
+                        snap_bw, snap_gi, snap_mcs,
+                        snap_fec_k, snap_fec_n, t_block_ms, age_s, snap_apply_count,
+                        tx_mbps, xtx_rate);
+            } else {
+                n = snprintf(dbg_line, sizeof(dbg_line),
+                        "DBG K:%d/%d tb:%.1fms age:%.1fs chg:%u tx:%.1fMbps xtx:+%ld/s",
+                        snap_fec_k, snap_fec_n, t_block_ms, age_s, snap_apply_count,
+                        tx_mbps, xtx_rate);
+            }
+            if (os->wfb_stats_ok) {
+                n += snprintf(dbg_line + n, sizeof(dbg_line) - n,
+                        " fect:%llu trunc:%llu",
+                        (unsigned long long)os->wfb_stats_cached.p_fec_timeouts,
+                        (unsigned long long)os->wfb_stats_cached.p_truncated);
+            } else {
+                n += snprintf(dbg_line + n, sizeof(dbg_line) - n, " fect:? trunc:?");
+            }
+            if (snap_br_reduced) {
+                snprintf(dbg_line + n, sizeof(dbg_line) - n, " BR-RED");
+            }
+
+            /* Append as a new line. Guard against full_osd_string overflow. */
+            size_t cur_len = strlen(full_osd_string);
+            if (cur_len + 2 + strlen(pos_prefix) + strlen(dbg_line) < sizeof(full_osd_string)) {
+                snprintf(full_osd_string + cur_len, sizeof(full_osd_string) - cur_len,
+                         "\n%s%s", pos_prefix, dbg_line);
+            }
         }
 
         /* Conditional update: only write if content changed */

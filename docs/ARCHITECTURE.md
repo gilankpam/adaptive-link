@@ -231,8 +231,10 @@ PHY_RATES_40MHZ = [
 **Constants:**
 ```python
 VIDEO_FPS = 60              # Fixed video frame rate
-MTU_PAYLOAD_BYTES = 1446    # WFB-NG MTU payload byte size
+MTU_PAYLOAD_BYTES = 1446    # Default; overridable via [dynamic] mtu_payload_bytes
 ```
+
+The MTU default matches standard 1500-byte Ethernet minus IP/UDP headers. For wfb-ng mlink setups with larger UDP payloads (up to ~3893 bytes), set `mtu_payload_bytes` in the `[dynamic]` section of `alink_gs.conf`. See `docs/FEC_CALCULATION.md`.
 
 **MCS Selection:**
 ```
@@ -262,7 +264,7 @@ MTU_PAYLOAD_BYTES = 1446    # WFB-NG MTU payload byte size
 **FEC Calculation (Frame-Aligned Algorithm):**
 ```
 1. Packets per frame:
-   packets_per_frame = bitrate_bps / (VIDEO_FPS * 8 * MTU_PAYLOAD_BYTES)
+   packets_per_frame = bitrate_bps / (VIDEO_FPS * 8 * mtu_payload_bytes)
 
 2. K = ceil(packets_per_frame) for minimal latency:
    fec_k = max(2, ceil(packets_per_frame))

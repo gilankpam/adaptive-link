@@ -37,7 +37,8 @@ void *txmon_thread_func(void *arg) {
         /* Snapshot ps fields under worker_mutex so we don't race the profile
          * worker updating prevApplied/bitrate_reduced. The snapshot is also
          * written back under the same lock. The actual HTTP call is released
-         * from this lock — it's serialized separately by cmd->exec_mutex. */
+         * from this lock — cmd->exec_mutex serialises HTTP/shell ops across
+         * threads; cmd->wfb_mutex is independent. */
         pthread_mutex_lock(&ps->worker_mutex);
         int snap_prev_bitrate = ps->prevApplied.setBitrate;
         float snap_prev_gop = ps->prevApplied.setGop;
@@ -83,17 +84,16 @@ void *txmon_thread_func(void *arg) {
         pthread_mutex_unlock(&ks->mutex);
 
         if (fire_kf) {
-            /* Parse the IDR command URL and use native HTTP client */
-            char host[64];
-            int port = 80;
-            char url_path[BUFFER_SIZE];
+            /* Templates are path-only; majestic is always on localhost:80.
+             * Accept legacy http://host/... prefix for backward compat. */
+            const char *url_path = idrCommand;
+            if (strncmp(url_path, "http://", 7) == 0) {
+                const char *slash = strchr(url_path + 7, '/');
+                url_path = slash ? slash : "/";
+            }
 
-            if (util_parse_url(idrCommand, host, sizeof(host), &port, url_path, sizeof(url_path)) != 0) {
-                ERROR_LOG(cfg, "Failed to parse IDR URL: %s\n", idrCommand);
-            } else {
-                if (cmd_http_get(host, port, url_path, NULL, 0, cmd) != 0) {
-                    ERROR_LOG(cfg, "IDR request failed: %s:%d%s\n", host, port, url_path);
-                }
+            if (cmd_http_get("localhost", 80, url_path, NULL, 0, cmd) != 0) {
+                ERROR_LOG(cfg, "IDR request failed: %s\n", url_path);
             }
 
             INFO_LOG(cfg, "Requesting keyframe for locally dropped tx packet\n");

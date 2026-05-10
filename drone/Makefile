@@ -47,3 +47,7 @@ test/test_util: test/test_util.c $(SRC_DIR)/util.c $(UNITY_SRC)
 test/test_message: test/test_message.c $(SRC_DIR)/util.c $(UNITY_SRC)
 	$(CC) -I$(SRC_DIR) -I$(UNITY_INC) $(CFLAGS) $(OPT) $< $(SRC_DIR)/util.c $(UNITY_SRC) $(LDFLAGS) -ldl -o $@
 
+# Build rule for test_wfb_cmd - links command.c + http_client.c (for cmd_http_get symbol)
+test/test_wfb_cmd: test/test_wfb_cmd.c $(SRC_DIR)/command.c $(SRC_DIR)/http_client.c $(UNITY_SRC)
+	$(CC) -I$(SRC_DIR) -I$(UNITY_INC) $(CFLAGS) $(OPT) $< $(SRC_DIR)/command.c $(SRC_DIR)/http_client.c $(UNITY_SRC) $(LDFLAGS) -o $@
+
